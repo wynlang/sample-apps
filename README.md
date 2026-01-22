@@ -4,7 +4,23 @@ Real-world applications demonstrating Wyn v1.4.0 features and best practices.
 
 ## Applications
 
-### 1. file-finder
+### 1. calculator-modules ⭐ NEW
+Demonstrates Wyn's module system with a calculator.
+
+**Features:**
+- Module imports (`import calculator`)
+- Namespaced function calls
+- Type-safe module boundaries
+- Multiple module usage
+
+**Usage:**
+```bash
+cd wyn
+./wyn ../sample-apps/calculator-modules/main.wyn
+../sample-apps/calculator-modules/main.wyn.out
+```
+
+### 2. file-finder
 Find files by extension with size statistics.
 
 **Features:**
@@ -21,7 +37,7 @@ cd wyn
 ../sample-apps/file-finder/main.wyn.out .wyn
 ```
 
-### 2. code-stats
+### 3. code-stats
 Analyze source code statistics in a directory.
 
 **Features:**
@@ -38,7 +54,7 @@ cd wyn
 ../sample-apps/code-stats/main.wyn.out examples
 ```
 
-### 3. build-monitor
+### 4. build-monitor
 Monitor directory for Wyn source files with change detection.
 
 **Features:**
@@ -54,7 +70,7 @@ cd wyn
 ../sample-apps/build-monitor/main.wyn.out examples
 ```
 
-### 4. csv-processor
+### 5. csv-processor
 Parse and analyze CSV data files.
 
 **Features:**
@@ -71,7 +87,7 @@ cd wyn
 ../sample-apps/csv-processor/main.wyn.out
 ```
 
-### 5. log-analyzer
+### 6. log-analyzer
 Analyze log files for errors, warnings, and patterns.
 
 **Features:**
@@ -88,7 +104,7 @@ cd wyn
 ../sample-apps/log-analyzer/main.wyn.out
 ```
 
-### 6. disk-analyzer
+### 7. disk-analyzer
 Analyze disk usage and file statistics.
 
 **Features:**
@@ -105,7 +121,7 @@ cd wyn
 ../sample-apps/disk-analyzer/main.wyn.out
 ```
 
-### 7. process-monitor
+### 8. process-monitor
 Monitor system processes and resources.
 
 **Features:**
