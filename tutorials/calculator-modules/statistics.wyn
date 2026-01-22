@@ -1,7 +1,7 @@
 // Statistics Module - Demonstrates Wyn's Module System
 // Provides statistical operations on arrays
 
-fn sum_array(numbers: array, count: int) -> int {
+pub fn sum_array(numbers: array, count: int) -> int {
     var total = 0;
     for i in 0..count {
         total = total + numbers[i];
@@ -9,15 +9,15 @@ fn sum_array(numbers: array, count: int) -> int {
     return total;
 }
 
-fn average(numbers: array, count: int) -> int {
+pub fn average(numbers: array, count: int) -> int {
     if count == 0 {
         return 0;
     }
-    var total = sum_array(numbers, count);
+    var total = statistics::sum_array(numbers, count);
     return total / count;
 }
 
-fn find_min(numbers: array, count: int) -> int {
+pub pub fn find_min(numbers: array, count: int) -> int {
     if count == 0 {
         return 0;
     }
@@ -31,7 +31,7 @@ fn find_min(numbers: array, count: int) -> int {
     return min_val;
 }
 
-fn find_max(numbers: array, count: int) -> int {
+pub fn find_max(numbers: array, count: int) -> int {
     if count == 0 {
         return 0;
     }

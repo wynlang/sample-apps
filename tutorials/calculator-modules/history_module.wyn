@@ -1,0 +1,23 @@
+// History Module - Tracks calculation history using module state
+var operation_count = 0;
+var last_result = 0;
+
+pub fn record(result: int) -> int {
+    operation_count = operation_count + 1;
+    last_result = result;
+    return operation_count;
+}
+
+pub fn get_count() -> int {
+    return operation_count;
+}
+
+pub fn get_last() -> int {
+    return last_result;
+}
+
+pub fn reset() -> int {
+    operation_count = 0;
+    last_result = 0;
+    return 0;
+}

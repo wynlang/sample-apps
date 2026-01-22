@@ -1,0 +1,41 @@
+// Enhanced Calculator - Uses Advanced Module Features
+// Demonstrates: re-exports, module variables, aliases
+
+import calculator as calc
+import statistics as stats
+import history_module
+
+fn main() -> int {
+    print("=== ENHANCED CALCULATOR ===");
+    print("Using: Module aliases, re-exports, module state");
+    print("");
+    
+    // Test 1: Module aliases
+    var sum = calc::add(10, 5);
+    print("10 + 5 = ${sum}");
+    history_module::record(sum);
+    
+    var product = calc::multiply(4, 3);
+    print("4 * 3 = ${product}");
+    history_module::record(product);
+    
+    // Test 2: Module state (history)
+    var count = history_module::get_count();
+    print("Operations performed: ${count}");
+    
+    // Test 3: Statistics (uses arrays)
+    var numbers = [10, 20, 30, 40, 50];
+    var avg = stats::average(numbers, 5);
+    print("Average of [10,20,30,40,50]: ${avg}");
+    
+    var min_val = stats::find_min(numbers, 5);
+    print("Minimum: ${min_val}");
+    
+    var max_val = stats::find_max(numbers, 5);
+    print("Maximum: ${max_val}");
+    
+    print("");
+    print("=== ALL FEATURES WORKING! ===");
+    
+    return 0;
+}

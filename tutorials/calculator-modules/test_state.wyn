@@ -1,0 +1,28 @@
+// Simple Enhanced Calculator - Tests module features without complex parameters
+import history_module as hist
+
+fn main() -> int {
+    print("=== SIMPLE ENHANCED CALCULATOR ===");
+    print("");
+    
+    // Test module state
+    hist::record(100);
+    hist::record(200);
+    hist::record(300);
+    
+    var count = hist::get_count();
+    print("Operations: ${count}");
+    
+    var last = hist::get_last();
+    print("Last result: ${last}");
+    
+    // Reset
+    hist::reset();
+    var new_count = hist::get_count();
+    print("After reset: ${new_count}");
+    
+    print("");
+    print("=== MODULE STATE WORKING! ===");
+    
+    return 0;
+}
