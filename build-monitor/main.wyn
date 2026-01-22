@@ -1,0 +1,67 @@
+// Build Monitor - Watches directory for .wyn files and reports changes
+fn scan_directory(dir: string) -> int {
+    var entries = File::list_dir(dir);
+    var count = 0;
+    
+    for i in 0..entries.len() {
+        var name = entries[i];
+        var path = File::path_join(dir, name);
+        
+        if File::is_file(path) && name.ends_with(".wyn") {
+            var size = File::file_size(path);
+            print("  ${name} (${size} bytes)");
+            count = count + 1;
+        }
+    }
+    
+    return count;
+}
+
+fn main() -> int {
+    var args = System::args();
+    
+    var dir = ".";
+    if args.len() > 1 {
+        dir = args[1];
+    }
+    
+    var full_path = File::path_join(File::get_cwd(), dir);
+    
+    print("=== BUILD MONITOR ===");
+    print("Monitoring: ${full_path}");
+    print("Time: ${Time::now()}");
+    print("");
+    
+    if File::is_dir(dir) == 0 {
+        print("Error: Directory does not exist");
+        return 1;
+    }
+    
+    print("Scanning for .wyn files...");
+    print("");
+    var count = scan_directory(dir);
+    
+    print("");
+    print("Found ${count} Wyn source files");
+    
+    print("");
+    print("Watching for changes (press Ctrl+C to stop)...");
+    
+    for iteration in 0..3 {
+        Time::sleep(2000);
+        
+        print("");
+        print("[${Time::now()}] Rescanning...");
+        
+        var new_count = scan_directory(dir);
+        
+        if new_count != count {
+            print("Change detected! Files: ${count} -> ${new_count}");
+            count = new_count;
+        }
+    }
+    
+    print("");
+    print("Monitoring complete.");
+    return 0;
+}

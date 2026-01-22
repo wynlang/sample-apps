@@ -1,0 +1,43 @@
+// File Finder - Find files by extension with real file system operations
+fn main() -> int {
+    var args = System::args();
+    
+    if args.len() < 2 {
+        print("Usage: file-finder <extension>");
+        print("Example: file-finder .wyn");
+        return 1;
+    }
+    
+    var ext = args[1];
+    var cwd = File::get_cwd();
+    
+    print("=== FILE FINDER ===");
+    print("Directory: ${cwd}");
+    print("Extension: ${ext}");
+    print("");
+    
+    var entries = File::list_dir(".");
+    var count = 0;
+    var total_size = 0;
+    
+    print("Matching files:");
+    print("");
+    
+    for i in 0..entries.len() {
+        var name = entries[i];
+        
+        if File::is_file(name) && name.ends_with(ext) {
+            var size = File::file_size(name);
+            print("  ${name} (${size} bytes)");
+            count = count + 1;
+            total_size = total_size + size;
+        }
+    }
+    
+    print("");
+    print("Results:");
+    print("  Files found: ${count}");
+    print("  Total size: ${total_size} bytes");
+    
+    return 0;
+}

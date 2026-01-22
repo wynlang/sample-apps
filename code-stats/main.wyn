@@ -1,0 +1,87 @@
+// Code Statistics - Analyze source code in directory
+fn analyze_file(path: string) -> int {
+    var content = File::read(path);
+    if content.len() == 0 {
+        return 0;
+    }
+    
+    var lines = content.split("\n");
+    return lines.len();
+}
+
+fn main() -> int {
+    var args = System::args();
+    
+    var dir = ".";
+    if args.len() > 1 {
+        dir = args[1];
+    }
+    
+    var cwd = File::get_cwd();
+    var target = File::path_join(cwd, dir);
+    
+    print("=== CODE STATISTICS ===");
+    print("Analyzing: ${target}");
+    print("Time: ${Time::now()}");
+    print("");
+    
+    if File::is_dir(dir) == 0 {
+        print("Error: Directory not found");
+        return 1;
+    }
+    
+    var entries = File::list_dir(dir);
+    var total_files = 0;
+    var total_lines = 0;
+    var total_bytes = 0;
+    
+    print("Source Files:");
+    print("");
+    
+    for i in 0..entries.len() {
+        var name = entries[i];
+        var path = File::path_join(dir, name);
+        
+        var is_source = name.ends_with(".wyn") || name.ends_with(".c") || name.ends_with(".h");
+        
+        if File::is_file(path) && is_source {
+            var size = File::file_size(path);
+            var lines = analyze_file(path);
+            
+            print("  ${name} - ${lines} lines, ${size} bytes");
+            
+            total_files = total_files + 1;
+            total_lines = total_lines + lines;
+            total_bytes = total_bytes + size;
+        }
+    }
+    
+    var avg_lines = 0;
+    var avg_bytes = 0;
+    if total_files > 0 {
+        avg_lines = total_lines / total_files;
+        avg_bytes = total_bytes / total_files;
+    }
+    
+    print("");
+    print("=== STATISTICS ===");
+    print("Total files: ${total_files}");
+    print("Total lines: ${total_lines}");
+    print("Total bytes: ${total_bytes}");
+    print("Avg lines/file: ${avg_lines}");
+    print("Avg bytes/file: ${avg_bytes}");
+    
+    var report = "CODE STATISTICS REPORT\n";
+    report = report.concat("======================\n\n");
+    report = report.concat("Directory: ").concat(target).concat("\n");
+    report = report.concat("Files: ").concat(total_files.to_string()).concat("\n");
+    report = report.concat("Lines: ").concat(total_lines.to_string()).concat("\n");
+    report = report.concat("Bytes: ").concat(total_bytes.to_string()).concat("\n");
+    report = report.concat("Avg lines/file: ").concat(avg_lines.to_string()).concat("\n");
+    
+    File::write("/tmp/code_stats.txt", report);
+    print("");
+    print("Report saved to /tmp/code_stats.txt");
+    
+    return 0;
+}

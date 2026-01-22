@@ -1,0 +1,48 @@
+// Log Analyzer - Real-world log file analysis
+fn main() -> int {
+    print("=== LOG ANALYZER ===");
+    print("");
+    
+    // Create sample log file
+    var log_data = "2026-01-21 10:15:23 INFO Server started on port 8080\n2026-01-21 10:15:45 ERROR Failed to connect to database\n2026-01-21 10:16:12 WARN High memory usage detected: 85%\n2026-01-21 10:16:34 INFO Request processed: GET /api/users\n2026-01-21 10:17:01 ERROR Timeout waiting for response\n2026-01-21 10:17:23 INFO Cache cleared successfully\n2026-01-21 10:18:45 WARN Slow query detected: 2.3s\n2026-01-21 10:19:12 ERROR Connection pool exhausted\n";
+    File::write("/tmp/app.log", log_data);
+    
+    // Read and analyze
+    var content = File::read("/tmp/app.log");
+    var size = content.len();
+    
+    print("File size: ${size} bytes");
+    print("");
+    
+    // Analyze content
+    var has_errors = content.contains("ERROR");
+    var has_warnings = content.contains("WARN");
+    var has_database = content.contains("database");
+    
+    print("Analysis Results:");
+    if has_errors {
+        print("  ✗ Errors detected");
+    }
+    if has_warnings {
+        print("  ⚠ Warnings detected");
+    }
+    if has_database {
+        print("  • Database issues found");
+    }
+    
+    // Get line count
+    var line_count_cmd = System::exec("wc -l < /tmp/app.log");
+    var line_count = line_count_cmd.trim();
+    print("");
+    print("Total lines: ${line_count}");
+    
+    // Generate report
+    var report = "LOG ANALYSIS REPORT\n===================\n\nFile: /tmp/app.log\nSize: ";
+    report = report.concat(size.to_string());
+    report = report.concat(" bytes\nErrors: Detected\nWarnings: Detected\n");
+    File::write("/tmp/log_report.txt", report);
+    print("");
+    print("Report saved to /tmp/log_report.txt");
+    
+    return 0;
+}

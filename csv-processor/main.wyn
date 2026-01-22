@@ -1,0 +1,56 @@
+// CSV Data Processor - Parse and analyze CSV data
+fn main() -> int {
+    print("=== CSV DATA PROCESSOR ===");
+    print("");
+    
+    // Create sample CSV file
+    var csv = "name,age,score\nAlice,25,95\nBob,30,87\nCharlie,22,92\nDiana,28,88\n";
+    File::write("/tmp/data.csv", csv);
+    
+    // Read and process
+    var content = File::read("/tmp/data.csv");
+    var size = content.len();
+    print("Processing CSV file (${size} bytes)...");
+    print("");
+    
+    // Simple parsing - count lines
+    var line_count_cmd = System::exec("wc -l < /tmp/data.csv");
+    var line_count = line_count_cmd.trim();
+    print("Total rows: ${line_count}");
+    print("");
+    
+    // Check data quality
+    var has_header = content.contains("name,age,score");
+    var has_alice = content.contains("Alice");
+    var has_bob = content.contains("Bob");
+    
+    print("Data Validation:");
+    if has_header {
+        print("  ✓ Valid CSV header");
+    }
+    if has_alice && has_bob {
+        print("  ✓ Sample data present");
+    }
+    
+    // Extract specific data using grep
+    var alice_data = System::exec("grep Alice /tmp/data.csv");
+    var alice_record = alice_data.trim();
+    print("");
+    print("Alice's record:");
+    print("  ${alice_record}");
+    
+    // Statistics (simplified)
+    print("");
+    print("Statistics:");
+    print("  Total records: 4");
+    print("  Age range: 22-30");
+    print("  Score range: 87-95");
+    
+    // Generate summary
+    var summary = "CSV ANALYSIS\n============\n\nFile: data.csv\nRecords: 4\nStatus: Valid\n";
+    File::write("/tmp/csv_summary.txt", summary);
+    print("");
+    print("Summary saved to /tmp/csv_summary.txt");
+    
+    return 0;
+}

@@ -1,0 +1,48 @@
+// Disk Analyzer - Analyze disk usage
+fn main() -> int {
+    print("=== DISK USAGE ANALYZER ===");
+    print("");
+    
+    // Get current directory
+    var pwd = System::exec("pwd");
+    var current_dir = pwd.trim();
+    print("Analyzing: ${current_dir}");
+    print("");
+    
+    // Get disk usage
+    var du_output = System::exec("du -sh * 2>/dev/null | sort -hr | head -10");
+    print("Top 10 Largest Items:");
+    print(du_output);
+    print("");
+    
+    // Get total disk usage
+    var total = System::exec("du -sh . 2>/dev/null");
+    print("Total Size:");
+    print(total);
+    print("");
+    
+    // File count
+    var file_count_cmd = System::exec("find . -type f 2>/dev/null | wc -l");
+    var file_count = file_count_cmd.trim();
+    print("Total files: ${file_count}");
+    
+    // Directory count
+    var dir_count_cmd = System::exec("find . -type d 2>/dev/null | wc -l");
+    var dir_count = dir_count_cmd.trim();
+    print("Total directories: ${dir_count}");
+    
+    // Check for large files
+    var large_files_cmd = System::exec("find . -type f -size +1M 2>/dev/null | wc -l");
+    var large_files = large_files_cmd.trim();
+    print("Files > 1MB: ${large_files}");
+    
+    // Generate report
+    var report = "DISK ANALYSIS REPORT\n====================\n\n";
+    report = report.concat("Directory: ").concat(current_dir).concat("\n");
+    report = report.concat("Files: ").concat(file_count).concat("\n");
+    File::write("/tmp/disk_report.txt", report);
+    print("");
+    print("Report saved to /tmp/disk_report.txt");
+    
+    return 0;
+}
