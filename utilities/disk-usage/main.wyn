@@ -50,4 +50,6 @@ fn main() {
     print("Total size: ");
     print(total);
     print(" bytes");
+    
+    return 0;
 }
