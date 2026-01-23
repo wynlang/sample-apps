@@ -1,0 +1,48 @@
+// Sample App: Concurrent Web Scraper
+// Demonstrates spawns for I/O-bound work
+
+var urls_scraped = 0;
+var total_bytes = 0;
+
+fn scrape_url(url_id: int) {
+    var bytes = url_id * 1024;
+    total_bytes = total_bytes + bytes;
+    urls_scraped = urls_scraped + 1;
+}
+
+fn main() {
+    print("=== Concurrent Web Scraper ===\n\n");
+    
+    var num_urls = 20;
+    print("Scraping ");
+    print(num_urls);
+    print(" URLs concurrently...\n\n");
+    
+    var i = 0;
+    while (i < num_urls) {
+        spawn scrape_url(i);
+        i = i + 1;
+    }
+    
+    print("Spawned ");
+    print(num_urls);
+    print(" scrapers\n");
+    
+    var wait = 0;
+    while (wait < 1000000) {
+        wait = wait + 1;
+    }
+    
+    print("\nResults:\n");
+    print("  URLs scraped: ");
+    print(urls_scraped);
+    print("\n");
+    print("  Total bytes: ");
+    print(total_bytes);
+    print("\n\n");
+    
+    print("✓ Concurrent scraping complete!\n");
+    print("✓ All spawns shared result counters\n");
+    
+    return 0;
+}

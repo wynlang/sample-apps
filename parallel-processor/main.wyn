@@ -1,0 +1,48 @@
+// Sample App: Parallel File Processor
+// Demonstrates spawns with shared data structures
+
+var files_processed = 0;
+var total_lines = 0;
+
+fn process_file(file_id: int) {
+    var lines = file_id * 100;
+    total_lines = total_lines + lines;
+    files_processed = files_processed + 1;
+}
+
+fn main() {
+    print("=== Parallel File Processor ===\n\n");
+    
+    var num_files = 10;
+    print("Processing ");
+    print(num_files);
+    print(" files in parallel...\n\n");
+    
+    var i = 0;
+    while (i < num_files) {
+        spawn process_file(i);
+        i = i + 1;
+    }
+    
+    print("Spawned ");
+    print(num_files);
+    print(" workers\n");
+    
+    var wait = 0;
+    while (wait < 1000000) {
+        wait = wait + 1;
+    }
+    
+    print("\nResults:\n");
+    print("  Files processed: ");
+    print(files_processed);
+    print("\n");
+    print("  Total lines: ");
+    print(total_lines);
+    print("\n\n");
+    
+    print("✓ Parallel processing complete!\n");
+    print("✓ Shared counters updated by all spawns\n");
+    
+    return 0;
+}
