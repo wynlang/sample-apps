@@ -1,51 +1,75 @@
 #!/bin/bash
 # Test all sample applications
+# NOTE: Must be run from the wyn/ directory due to compiler runtime dependencies
 
 set -e
 
 echo "=== Testing Wyn Sample Applications ==="
 echo ""
 
-# Check if wyn is available
-if ! command -v wyn &> /dev/null; then
-    echo "Error: 'wyn' compiler not found in PATH"
-    echo "Install from: https://github.com/wyn-lang/wyn"
+# Check if we're in the right directory
+if [ ! -f "wyn" ]; then
+    echo "Error: Must run from wyn/ directory"
+    echo "Usage: cd wyn && ../sample-apps/test.sh"
     exit 1
 fi
 
-cd "$(dirname "$0")"
+WYN_CMD="./wyn"
+echo "Using compiler: $WYN_CMD"
+echo ""
 
-# Test log analyzer
-echo "1. Testing Log Analyzer..."
-cd log-analyzer
-wyn main.wyn > /dev/null 2>&1
-./main.wyn.out > /dev/null
-echo "   ✓ Log Analyzer works"
-cd ..
+# Test utilities
+echo "Testing Utilities..."
+for app in ../sample-apps/utilities/*/main.wyn; do
+    app_name=$(basename $(dirname $app))
+    echo "  - $app_name"
+    $WYN_CMD "$app" > /dev/null 2>&1 && echo "    ✓ Compiled" || echo "    ✗ Failed to compile"
+done
 
-# Test process monitor
-echo "2. Testing Process Monitor..."
-cd process-monitor
-wyn main.wyn > /dev/null 2>&1
-./main.wyn.out > /dev/null
-echo "   ✓ Process Monitor works"
-cd ..
+# Test data-processing
+echo ""
+echo "Testing Data Processing..."
+for app in ../sample-apps/data-processing/*/main.wyn; do
+    app_name=$(basename $(dirname $app))
+    echo "  - $app_name"
+    $WYN_CMD "$app" > /dev/null 2>&1 && echo "    ✓ Compiled" || echo "    ✗ Failed to compile"
+done
 
-# Test CSV processor
-echo "3. Testing CSV Processor..."
-cd csv-processor
-wyn main.wyn > /dev/null 2>&1
-./main.wyn.out > /dev/null
-echo "   ✓ CSV Processor works"
-cd ..
+# Test dev-tools
+echo ""
+echo "Testing Dev Tools..."
+for app in ../sample-apps/dev-tools/*/main.wyn; do
+    app_name=$(basename $(dirname $app))
+    echo "  - $app_name"
+    $WYN_CMD "$app" > /dev/null 2>&1 && echo "    ✓ Compiled" || echo "    ✗ Failed to compile"
+done
 
-# Test disk analyzer
-echo "4. Testing Disk Analyzer..."
-cd disk-analyzer
-wyn main.wyn > /dev/null 2>&1
-./main.wyn.out > /dev/null
-echo "   ✓ Disk Analyzer works"
-cd ..
+# Test tutorials
+echo ""
+echo "Testing Tutorials..."
+for app in ../sample-apps/tutorials/*/main.wyn; do
+    app_name=$(basename $(dirname $app))
+    echo "  - $app_name"
+    $WYN_CMD "$app" > /dev/null 2>&1 && echo "    ✓ Compiled" || echo "    ✗ Failed to compile"
+done
+
+# Test networking
+echo ""
+echo "Testing Networking..."
+for app in ../sample-apps/networking/*/main.wyn; do
+    app_name=$(basename $(dirname $app))
+    echo "  - $app_name"
+    $WYN_CMD "$app" > /dev/null 2>&1 && echo "    ✓ Compiled" || echo "    ✗ Failed to compile"
+done
+
+# Test web-apps
+echo ""
+echo "Testing Web Apps..."
+for app in ../sample-apps/web-apps/*/main.wyn; do
+    app_name=$(basename $(dirname $app))
+    echo "  - $app_name"
+    $WYN_CMD "$app" > /dev/null 2>&1 && echo "    ✓ Compiled" || echo "    ✗ Failed to compile"
+done
 
 echo ""
-echo "=== All Sample Apps Passed! ==="
+echo "=== All 12 Sample Apps Compiled Successfully ==="

@@ -1,0 +1,74 @@
+// Working Feature Demo - Demonstrates Fixed Features
+// Shows: String concatenation with integers, all core APIs
+
+fn main() -> int {
+    var start_time = Time::now();
+    
+    print("=== WYN FEATURE DEMO - ALL WORKING ===");
+    print("");
+    
+    // FEATURE 1: String Concatenation with Integers (FIXED!)
+    print("1. String Concatenation with Integers");
+    var count = 42;
+    var msg = "Count: " + count;
+    print(msg);
+    
+    var x = 10;
+    var y = 20;
+    var sum = x + y;
+    var result = "Sum: " + sum;
+    print(result);
+    print("");
+    
+    // FEATURE 2: File Operations
+    print("2. File Operations");
+    var dir = "test_demo";
+    File::create_dir_all(dir);
+    print("Created directory: " + dir);
+    
+    var file = File::path_join(dir, "test.txt");
+    File::write(file, "Hello Wyn!");
+    print("Created file: " + file);
+    
+    var size = File::size(file);
+    print("File size: " + size);
+    print("");
+    
+    // FEATURE 3: String Comparison
+    print("3. String Comparison");
+    var ext = File::extension(file);
+    if ext == "txt" {
+        print("Extension is txt: true");
+    }
+    print("");
+    
+    // FEATURE 4: Time API
+    print("4. Time API");
+    var now = Time::now();
+    print("Timestamp: " + now);
+    var formatted = Time::format(now);
+    print("Formatted: " + formatted);
+    print("");
+    
+    // FEATURE 5: Process Execution
+    print("5. Process Execution");
+    var output = System::exec("echo Hello");
+    print("Output: " + output);
+    print("");
+    
+    // Calculate duration
+    var end_time = Time::now();
+    var duration = end_time - start_time;
+    print("Duration: " + duration + " seconds");
+    print("");
+    
+    // Cleanup
+    File::remove_dir_all(dir);
+    print("Cleaned up");
+    print("");
+    
+    print("=== SUCCESS ===");
+    print("All features working perfectly!");
+    
+    return 0;
+}
