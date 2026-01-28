@@ -4,9 +4,9 @@
 
 ## ⚠️ Known Syntax Limitations in v1.5.0
 
-v1.5.0 prioritized getting the type system working. Some syntax is more verbose than ideal:
+v1.5.0 has verbose syntax that is improved in v1.6.0:
 
-**Current syntax:**
+**v1.5.0 syntax:**
 ```wyn
 var result = Result_Ok(42)           // Underscore required
 var map: HashMap<string, int> = {}   // Type annotation required
@@ -16,17 +16,17 @@ match result {
 }
 ```
 
-**Planned for v1.6.0:**
+**v1.6.0 improvements:**
 ```wyn
-var result = Ok(42)                  // Direct constructor
-var map = HashMap<string, int>{}     // Type in initializer
+var result = Result::Ok(42)          // Namespace operator
+var map = HashMap<string, int>{}     // Type in initializer (planned)
 match result {
-    Ok(x) => x,                      // Short constructor name
-    None => 0
+    Result::Ok(x) => x,              // Namespace operator
+    Result::None() => 0
 }
 ```
 
-The features work correctly, but syntax needs polish. See [v1.6.0 roadmap](#v16-syntax-improvements) below.
+✅ **Namespace operator (::) available in v1.6.0!**
 
 ---
 
@@ -227,35 +227,54 @@ This showcase demonstrates that Wyn combines:
 
 ## v1.6.0 Syntax Improvements
 
-Planned improvements for cleaner syntax:
+Available now in v1.6.0:
 
 1. **Namespace syntax for enums:**
    ```wyn
-   Result::Ok(42)  // Instead of Result_Ok(42)
+   // v1.5.0
+   var result = Result_Ok(42)
+   
+   // v1.6.0 ✅
+   var result = Result::Ok(42)
    ```
 
-2. **Type inference for HashMap:**
+2. **Enhanced error messages:**
+   - Color-coded output
+   - Detailed type information
+   - Conversion suggestions
+
+3. **More string methods:**
+   - `string.replace(old, new)`
+   - `string.pad_left(width, char)`
+   - `string.pad_right(width, char)`
+
+Planned for future v1.6.x releases:
+
+4. **Type inference for HashMap:**
    ```wyn
-   var map = HashMap<string, int>{}  // Instead of var map: HashMap<string, int> = {}
+   // Current
+   var map: HashMap<string, int> = {}
+   
+   // Planned
+   var map = HashMap<string, int>{}
    ```
 
-3. **Short constructor names in patterns:**
+5. **Short constructor names in patterns:**
    ```wyn
+   // Current
    match result {
-       Ok(x) => x,    // Instead of Result_Ok(x)
+       Result::Ok(x) => x,
+       Result::Err(e) => 0
+   }
+   
+   // Planned
+   match result {
+       Ok(x) => x,
        Err(e) => 0
    }
    ```
 
-4. **Generic enum syntax:**
-   ```wyn
-   enum Result<T, E> {  // Generic type parameters
-       Ok(T),
-       Err(E)
-   }
-   ```
-
-These improvements will make the syntax as clean as the type system is powerful.
+These improvements make the syntax cleaner while maintaining the powerful type system.
 
 ## Complexity Hidden Behind Simplicity
 

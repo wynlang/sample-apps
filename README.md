@@ -13,9 +13,10 @@ All sample apps can now leverage:
 - ✅ **Type inference** - Less boilerplate
 - ✅ **Variable HashMap keys** - Dynamic lookups
 
-**⚠️ Note:** v1.5.0 has some verbose syntax (enum constructors use underscores like `Result_Ok`, HashMap needs type annotations). These are known limitations being addressed in v1.6.0. The type system itself is production-ready.
+**⚠️ Note:** v1.5.0 uses underscore syntax (`Result_Ok`). **v1.6.0 adds namespace operator (`Result::Ok`)** for cleaner code.
 
-**See [V1.5_MIGRATION.md](V1.5_MIGRATION.md) for upgrade guide**
+**See [V1.5_MIGRATION.md](V1.5_MIGRATION.md) for v1.5.0 upgrade guide**
+**See [V1.6_FEATURES.md](V1.6_FEATURES.md) for v1.6.0 improvements**
 
 ## 🌟 Featured: v1.5.0 Showcase
 
