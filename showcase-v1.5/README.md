@@ -2,6 +2,34 @@
 
 **The most comprehensive demonstration of Wyn's modern type system and elegant syntax.**
 
+## ⚠️ Known Syntax Limitations in v1.5.0
+
+v1.5.0 prioritized getting the type system working. Some syntax is more verbose than ideal:
+
+**Current syntax:**
+```wyn
+var result = Result_Ok(42)           // Underscore required
+var map: HashMap<string, int> = {}   // Type annotation required
+match result {
+    Result_Ok(x) => x,               // Full enum name required
+    Result_None() => 0
+}
+```
+
+**Planned for v1.6.0:**
+```wyn
+var result = Ok(42)                  // Direct constructor
+var map = HashMap<string, int>{}     // Type in initializer
+match result {
+    Ok(x) => x,                      // Short constructor name
+    None => 0
+}
+```
+
+The features work correctly, but syntax needs polish. See [v1.6.0 roadmap](#v16-syntax-improvements) below.
+
+---
+
 ## Features Demonstrated
 
 ### 1. **Enums with Associated Data** 🎯
@@ -192,11 +220,42 @@ Total with bonus: 458
 This showcase demonstrates that Wyn combines:
 
 - **Modern type system** (generics, enums, pattern matching)
-- **Beautiful syntax** (clean, readable, minimal boilerplate)
-- **Complex functionality** (type inference, tagged unions, functional programming)
+- **Functional features** (type inference, tagged unions, functional programming)
 - **Production-ready** (type-safe, no runtime errors, predictable behavior)
 
-You get the elegance of high-level languages with the performance and control of systems programming.
+**Note:** Some syntax is verbose in v1.5.0 (enum constructors use underscores, HashMap needs type annotations). This is a known limitation being addressed in v1.6.0. The type system itself is solid and production-ready.
+
+## v1.6.0 Syntax Improvements
+
+Planned improvements for cleaner syntax:
+
+1. **Namespace syntax for enums:**
+   ```wyn
+   Result::Ok(42)  // Instead of Result_Ok(42)
+   ```
+
+2. **Type inference for HashMap:**
+   ```wyn
+   var map = HashMap<string, int>{}  // Instead of var map: HashMap<string, int> = {}
+   ```
+
+3. **Short constructor names in patterns:**
+   ```wyn
+   match result {
+       Ok(x) => x,    // Instead of Result_Ok(x)
+       Err(e) => 0
+   }
+   ```
+
+4. **Generic enum syntax:**
+   ```wyn
+   enum Result<T, E> {  // Generic type parameters
+       Ok(T),
+       Err(E)
+   }
+   ```
+
+These improvements will make the syntax as clean as the type system is powerful.
 
 ## Complexity Hidden Behind Simplicity
 
