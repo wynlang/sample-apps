@@ -2,6 +2,19 @@
 
 Production-ready applications showcasing Wyn v1.5.0 features.
 
+## 🚀 What's New in v1.5.0
+
+All sample apps can now leverage:
+- ✅ **Enums with data** - Type-safe states and results
+- ✅ **Pattern matching** - Elegant control flow
+- ✅ **Generic HashMap<K,V>** - Type-safe collections
+- ✅ **Option/Result types** - Safe error handling
+- ✅ **String indexing** - Direct character access
+- ✅ **Type inference** - Less boilerplate
+- ✅ **Variable HashMap keys** - Dynamic lookups
+
+**See [V1.5_MIGRATION.md](V1.5_MIGRATION.md) for upgrade guide**
+
 ## 🌟 Featured: v1.5.0 Showcase
 
 **The ultimate demonstration of Wyn's modern type system!**
@@ -35,6 +48,51 @@ Features demonstrated:
 - **Utilities** - File finders, disk analyzers, process monitors
 - **Dev Tools** - Code statistics, build monitors
 - **Tutorials** - Learning examples with modules
+
+---
+
+## How v1.5.0 Improves Each Category
+
+### Data Processing Apps
+**Can now use:**
+- Result enums for validation errors
+- Pattern matching for data classification
+- HashMap for statistics and metrics
+- Option for safe lookups
+- String indexing for parsing
+
+**Example upgrade:**
+```wyn
+// Before: Error codes
+fn validate(data: string) -> int { return -1 }
+
+// After: Type-safe Result
+enum Result { Success(int), Error(string) }
+fn validate(data: string) -> Result {
+    return Result_Error("Invalid")
+}
+```
+
+### Networking Apps
+**Can now use:**
+- HttpResult enum for responses
+- Pattern matching for status codes
+- HashMap for headers
+- Option for optional fields
+
+### Web Apps
+**Can now use:**
+- Route enum for endpoints
+- Pattern matching for request handling
+- HashMap for route mapping
+- Result for response generation
+
+### Utilities
+**Can now use:**
+- SearchResult enum for file operations
+- Option for file lookups
+- HashMap for metadata
+- Pattern matching for file types
 
 ---
 
@@ -214,16 +272,27 @@ cd wyn
 
 ## Features Demonstrated
 
-### v1.5.0 Modern Type System
-- ✅ Enums with associated data: `enum Result { Ok(int), Err(string) }`
-- ✅ Pattern matching: `match result { Result_Ok(x) => x, ... }`
-- ✅ Generic collections: `HashMap<string, int>`, `HashSet<T>`
-- ✅ Type inference: `var map = create_map()` (type inferred!)
-- ✅ String indexing: `text[0]` returns character
-- ✅ Variable HashMap keys: `map[variable] = value`
-- ✅ Option methods: `unwrap()`, `is_some()`, `unwrap_or()`
-- ✅ Result methods: `unwrap()`, `is_ok()`, `unwrap_or()`
-- ✅ Bool methods: `to_string()`, `to_int()`
+### v1.5.0 Modern Type System ⭐ NEW
+- ✅ **Enums with data**: `enum Result { Ok(int), Err(string) }`
+- ✅ **Pattern matching**: `match result { Result_Ok(x) => x, ... }`
+- ✅ **Generic HashMap**: `HashMap<string, int>` with type safety
+- ✅ **Type inference**: `var map = create_map()` (type inferred!)
+- ✅ **String indexing**: `text[0]` returns character
+- ✅ **Variable HashMap keys**: `map[variable] = value`
+- ✅ **Option methods**: `unwrap()`, `is_some()`, `unwrap_or()`
+- ✅ **Result methods**: `unwrap()`, `is_ok()`, `unwrap_or()`
+- ✅ **Bool methods**: `to_string()`, `to_int()`
+
+### How to Upgrade Your Apps
+All existing v1.4.0 apps continue to work. To use v1.5.0 features:
+
+1. **Replace error codes** with Result enums
+2. **Add pattern matching** for cleaner control flow
+3. **Use HashMap** for key-value data
+4. **Add Option** for nullable values
+5. **Use string indexing** for character access
+
+See [V1.5_MIGRATION.md](V1.5_MIGRATION.md) for detailed examples.
 
 ### Language Features
 - ✅ Function types: `fn(T) -> R`
