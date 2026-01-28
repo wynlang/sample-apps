@@ -1,9 +1,34 @@
 # Wyn Sample Applications
 
-Production-ready applications showcasing Wyn v1.4.0 features.
+Production-ready applications showcasing Wyn v1.5.0 features.
+
+## 🌟 Featured: v1.5.0 Showcase
+
+**The ultimate demonstration of Wyn's modern type system!**
+
+```bash
+cd wyn
+./wyn ../sample-apps/showcase-v1.5/main.wyn
+../sample-apps/showcase-v1.5/main.wyn.out
+```
+
+Features demonstrated:
+- ✅ Enums with associated data (Result, Option)
+- ✅ Pattern matching with destructuring
+- ✅ Generic collections (HashMap<K,V>)
+- ✅ Type inference through function returns
+- ✅ String indexing with [] syntax
+- ✅ Variable HashMap keys
+- ✅ Option/Result methods (unwrap, is_some, etc.)
+- ✅ Bool methods (to_string, to_int)
+
+**Beautiful syntax + Complex functionality = Wyn v1.5.0** 🚀
+
+---
 
 ## Categories
 
+- **🌟 Showcase** - v1.5.0 feature demonstration
 - **Data Processing** - Log analysis, CSV processing, text manipulation
 - **Networking** - HTTP clients, TCP communication
 - **Web Apps** - Web servers, HTTP services
@@ -189,6 +214,17 @@ cd wyn
 
 ## Features Demonstrated
 
+### v1.5.0 Modern Type System
+- ✅ Enums with associated data: `enum Result { Ok(int), Err(string) }`
+- ✅ Pattern matching: `match result { Result_Ok(x) => x, ... }`
+- ✅ Generic collections: `HashMap<string, int>`, `HashSet<T>`
+- ✅ Type inference: `var map = create_map()` (type inferred!)
+- ✅ String indexing: `text[0]` returns character
+- ✅ Variable HashMap keys: `map[variable] = value`
+- ✅ Option methods: `unwrap()`, `is_some()`, `unwrap_or()`
+- ✅ Result methods: `unwrap()`, `is_ok()`, `unwrap_or()`
+- ✅ Bool methods: `to_string()`, `to_int()`
+
 ### Language Features
 - ✅ Function types: `fn(T) -> R`
 - ✅ Async/await: `async fn`, `await`
@@ -225,8 +261,8 @@ cd wyn
 
 ## Requirements
 
-- Wyn v1.4.0 or later
-- macOS, Linux, or Unix-like system
+- Wyn v1.5.0 or later
+- macOS, Linux, or Windows
 - GCC or Clang compiler
 
 ---
@@ -239,4 +275,6 @@ All applications are:
 - ✅ Well-documented
 - ✅ Feature-complete
 
-**Total:** 12 sample applications organized by category.
+**Total:** 13 sample applications organized by category.
+
+**Latest:** v1.5.0 Showcase demonstrates modern type system with beautiful syntax!

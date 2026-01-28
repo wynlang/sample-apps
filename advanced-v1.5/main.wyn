@@ -1,0 +1,253 @@
+// Advanced v1.5.0 Example: User Management System
+// Demonstrates real-world usage of enums, pattern matching, and generics
+
+// ============================================================================
+// DATA TYPES
+// ============================================================================
+
+enum UserRole {
+    Admin,
+    Moderator,
+    User
+}
+
+enum ValidationResult {
+    Valid,
+    Invalid(string)
+}
+
+enum OperationResult {
+    Success(int),
+    Failure(string)
+}
+
+// ============================================================================
+// USER DATABASE (HashMap-based)
+// ============================================================================
+
+fn create_database() -> HashMap<string, int> {
+    var db: HashMap<string, int> = {}
+    return db
+}
+
+fn add_user(db: HashMap<string, int>, username: string, score: int) -> OperationResult {
+    if db.contains(username) {
+        return OperationResult_Failure("User already exists")
+    }
+    
+    db.insert(username, score)
+    return OperationResult_Success(db.len())
+}
+
+fn get_user_score(db: HashMap<string, int>, username: string) -> Option {
+    if db.contains(username) {
+        return Option_Some(db[username])
+    }
+    return Option_None()
+}
+
+fn update_score(db: HashMap<string, int>, username: string, new_score: int) -> OperationResult {
+    if db.contains(username) {
+        db[username] = new_score
+        return OperationResult_Success(new_score)
+    }
+    return OperationResult_Failure("User not found")
+}
+
+// ============================================================================
+// VALIDATION
+// ============================================================================
+
+fn validate_username(name: string) -> ValidationResult {
+    var len = name.len()
+    
+    if len < 3 {
+        return ValidationResult_Invalid("Username too short (min 3 chars)")
+    }
+    
+    if len > 20 {
+        return ValidationResult_Invalid("Username too long (max 20 chars)")
+    }
+    
+    // Check first character
+    var first = name[0]
+    if first == " " {
+        return ValidationResult_Invalid("Username cannot start with space")
+    }
+    
+    return ValidationResult_Valid()
+}
+
+fn validate_score(score: int) -> ValidationResult {
+    if score < 0 {
+        return ValidationResult_Invalid("Score cannot be negative")
+    }
+    
+    if score > 100 {
+        return ValidationResult_Invalid("Score cannot exceed 100")
+    }
+    
+    return ValidationResult_Valid()
+}
+
+// ============================================================================
+// BUSINESS LOGIC
+// ============================================================================
+
+fn process_user_registration(db: HashMap<string, int>, username: string, score: int) -> OperationResult {
+    // Validate username
+    var name_check = validate_username(username)
+    var name_valid = match name_check {
+        ValidationResult_Valid() => true,
+        ValidationResult_Invalid(msg) => false
+    }
+    
+    if name_valid == false {
+        print("Username validation failed")
+        return OperationResult_Failure("Invalid username")
+    }
+    
+    // Validate score
+    var score_check = validate_score(score)
+    var score_valid = match score_check {
+        ValidationResult_Valid() => true,
+        ValidationResult_Invalid(msg) => false
+    }
+    
+    if score_valid == false {
+        print("Score validation failed")
+        return OperationResult_Failure("Invalid score")
+    }
+    
+    // Add user
+    return add_user(db, username, score)
+}
+
+fn get_user_info(db: HashMap<string, int>, username: string) -> string {
+    var score_opt = get_user_score(db, username)
+    
+    var result = match score_opt {
+        Option_Some(score) => "found",
+        Option_None() => "not_found"
+    }
+    
+    if result == "found" {
+        print("User found: ")
+        print(username)
+        var score = score_opt.unwrap()
+        print(" (score: ")
+        print(score.to_string())
+        print(")")
+    } else {
+        print("User not found: ")
+        print(username)
+    }
+    
+    return result
+}
+
+// ============================================================================
+// REPORTING
+// ============================================================================
+
+fn print_operation_result(result: OperationResult) -> int {
+    var code = match result {
+        OperationResult_Success(count) => 0,
+        OperationResult_Failure(reason) => 1
+    }
+    
+    if code == 0 {
+        print("✓ Operation successful")
+    } else {
+        print("✗ Operation failed")
+    }
+    
+    return code
+}
+
+fn print_database_stats(db: HashMap<string, int>) -> int {
+    print("Database Statistics:")
+    print("  Total users: ")
+    print(db.len().to_string())
+    
+    return 0
+}
+
+// ============================================================================
+// MAIN - Demonstration
+// ============================================================================
+
+fn main() -> int {
+    print("╔═══════════════════════════════════════════╗")
+    print("║  User Management System (v1.5.0)          ║")
+    print("║  Advanced Enums + Pattern Matching        ║")
+    print("╚═══════════════════════════════════════════╝")
+    print("")
+    
+    // Create database
+    var db = create_database()
+    print("✓ Database initialized")
+    print("")
+    
+    // Test 1: Valid user registration
+    print("━━━ Test 1: Register valid user ━━━")
+    var result1 = process_user_registration(db, "alice", 95)
+    print_operation_result(result1)
+    print("")
+    
+    // Test 2: Another valid user
+    print("━━━ Test 2: Register another user ━━━")
+    var result2 = process_user_registration(db, "bob", 87)
+    print_operation_result(result2)
+    print("")
+    
+    // Test 3: Invalid username (too short)
+    print("━━━ Test 3: Invalid username (too short) ━━━")
+    var result3 = process_user_registration(db, "ab", 90)
+    print_operation_result(result3)
+    print("")
+    
+    // Test 4: Invalid score (negative)
+    print("━━━ Test 4: Invalid score (negative) ━━━")
+    var result4 = process_user_registration(db, "charlie", -10)
+    print_operation_result(result4)
+    print("")
+    
+    // Test 5: Duplicate user
+    print("━━━ Test 5: Duplicate user ━━━")
+    var result5 = process_user_registration(db, "alice", 100)
+    print_operation_result(result5)
+    print("")
+    
+    // Test 6: Lookup existing user
+    print("━━━ Test 6: Lookup existing user ━━━")
+    get_user_info(db, "alice")
+    print("")
+    
+    // Test 7: Lookup non-existent user
+    print("━━━ Test 7: Lookup non-existent user ━━━")
+    get_user_info(db, "unknown")
+    print("")
+    
+    // Test 8: Update score
+    print("━━━ Test 8: Update user score ━━━")
+    var update_result = update_score(db, "bob", 92)
+    print_operation_result(update_result)
+    get_user_info(db, "bob")
+    print("")
+    
+    // Final stats
+    print("━━━ Final Statistics ━━━")
+    print_database_stats(db)
+    print("")
+    
+    print("╔═══════════════════════════════════════════╗")
+    print("║  ✓ All operations completed               ║")
+    print("║  ✓ Enums for type-safe states             ║")
+    print("║  ✓ Pattern matching for control flow      ║")
+    print("║  ✓ HashMap for data storage               ║")
+    print("║  ✓ Option for safe null handling          ║")
+    print("╚═══════════════════════════════════════════╝")
+    
+    return 0
+}
