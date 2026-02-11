@@ -1,0 +1,64 @@
+// Config Reader — Parse key=value configuration files
+// Demonstrates: File.read, HashMap, string methods, error handling
+
+fn main() -> int {
+    println("=== Config Reader ===")
+    println("")
+
+    var path = "../sample-apps/cli-tools/config-reader/app.conf"
+    if File.exists(path) == 0 {
+        println("Error: Config file not found")
+        return 1
+    }
+
+    var content = File.read(path)
+    var config = HashMap.new()
+    var line_start = 0
+    var total_len = content.len()
+    var key_count = 0
+
+    for idx in 0..total_len {
+        if content[idx] == "\n" {
+            var line = content.substring(line_start, idx)
+            var trimmed = line.trim()
+            line_start = idx + 1
+
+            // Skip empty lines and comments
+            if trimmed.len() == 0 { continue }
+            if trimmed.starts_with("#") { continue }
+
+            // Parse key=value
+            var eq_pos = trimmed.index_of("=")
+            if eq_pos > 0 {
+                var key = trimmed.substring(0, eq_pos)
+                var val_start = eq_pos + 1
+                var value = trimmed.substring(val_start, trimmed.len())
+                config.insert_string(key, value)
+                key_count = key_count + 1
+            }
+        }
+    }
+
+    println("Loaded " + key_count.to_string() + " config entries:")
+    println("")
+
+    // Display known keys
+    var keys = ["app_name", "version", "port", "debug", "max_connections", "database_host", "database_port", "log_level"]
+    for i in 0..8 {
+        var key = keys[i]
+        var val = config.get(key)
+        if val.len() > 0 {
+            println("  " + key + " = " + val)
+        }
+    }
+
+    // Validate port is a number
+    println("")
+    var port_str = config.get("port")
+    var port = port_str.to_int()
+    if port > 0 {
+        println("  ✓ Port " + port.to_string() + " is valid")
+    }
+
+    return 0
+}

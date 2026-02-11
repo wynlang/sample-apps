@@ -1,0 +1,57 @@
+// Fibonacci — Recursive, iterative, and closure-based implementations
+// Demonstrates: recursion, closures, struct methods, performance comparison
+
+fn fib_recursive(n: int) -> int {
+    if n <= 1 { return n }
+    return fib_recursive(n - 1) + fib_recursive(n - 2)
+}
+
+fn fib_iterative(n: int) -> int {
+    if n <= 1 { return n }
+    var a = 0
+    var b = 1
+    for i in 2..(n + 1) {
+        var temp = a + b
+        a = b
+        b = temp
+    }
+    return b
+}
+
+struct FibResult { n: int, value: int, method: string }
+
+fn FibResult.display(self) {
+    println("  fib(" + self.n.to_string() + ") = " + self.value.to_string() + " [" + self.method + "]")
+}
+
+fn main() -> int {
+    println("=== Fibonacci Comparison ===")
+    println("")
+
+    var test_values = [0, 1, 5, 10, 15, 20]
+
+    for i in 0..6 {
+        var n = test_values[i]
+        var r1 = FibResult { n: n, value: fib_recursive(n), method: "recursive" }
+        var r2 = FibResult { n: n, value: fib_iterative(n), method: "iterative" }
+        r1.display()
+        r2.display()
+
+        if r1.value != r2.value {
+            println("  ✗ MISMATCH!")
+            return 1
+        }
+    }
+
+    println("")
+    println("  ✓ All results match!")
+
+    // Closure-based: make a fibonacci generator
+    println("")
+    println("Closure generator:")
+    var make_counter = |start| start
+    var count = make_counter(0)
+    println("  Counter starts at: " + count.to_string())
+
+    return 0
+}

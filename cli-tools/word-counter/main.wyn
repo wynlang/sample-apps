@@ -1,0 +1,46 @@
+// Word Counter — Count word frequency in source files
+// Demonstrates: HashMap, string methods, File.read, loops
+
+fn main() -> int {
+    println("=== Word Frequency Counter ===")
+    println("")
+
+    var content = File.read("tests/validation/test_struct_methods.wyn")
+    var counts = HashMap.new()
+    var line_start = 0
+    var total_words = 0
+    var total_len = content.len()
+
+    for idx in 0..total_len {
+        var ch = content[idx]
+        // Split on whitespace and punctuation
+        if ch == " " || ch == "\n" || ch == "\t" || ch == "(" || ch == ")" || ch == "{" || ch == "}" || ch == "," || ch == ":" {
+            if idx > line_start {
+                var word = content.substring(line_start, idx)
+                var trimmed = word.trim()
+                if trimmed.len() > 0 {
+                    // Increment count
+                    var current = counts.get_int(trimmed)
+                    counts.insert_int(trimmed, current + 1)
+                    total_words = total_words + 1
+                }
+            }
+            line_start = idx + 1
+        }
+    }
+
+    println("Total words: " + total_words.to_string())
+    println("")
+
+    // Show some known keywords
+    var keywords = ["fn", "var", "return", "struct", "if", "for", "println", "int", "self"]
+    for i in 0..9 {
+        var kw = keywords[i]
+        var count = counts.get_int(kw)
+        if count > 0 {
+            println("  " + kw + ": " + count.to_string())
+        }
+    }
+
+    return 0
+}
