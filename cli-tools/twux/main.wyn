@@ -1,119 +1,141 @@
-// twux — Terminal multiplexer
-// Phase 2: Raw terminal mode + keyboard input
+// twux — Terminal multiplexer written in Wyn
+// Phase 3: Interactive with keyboard input
 //
-// BLOCKERS FOUND:
-// 1. Need Terminal.raw_mode() / Terminal.restore() - wraps tcgetattr/tcsetattr
-// 2. Need Terminal.read_key() - non-blocking single character read
-// 3. Need Terminal.size() - get terminal dimensions (ioctl TIOCGWINSZ)
-// 4. Need Process.spawn(cmd) - fork+exec with PTY
-//
-// Adding these as built-in functions in the runtime.
+// Usage: ./wyn run twux/main.wyn
+// Keys: q=quit, 1/2=switch pane focus, r=refresh
 
-fn main() -> int {
-    // Get terminal size
-    var cols = Terminal.cols()
-    var rows = Terminal.rows()
-    
-    // Clear screen
-    print("\x1b[2J\x1b[H")
-    
-    // Draw split panes
-    // Top border
+struct Pane { title: string, content: string, focused: int }
+
+fn draw_border(cols: int, rows: int, split: int) {
+    // Top
+    Terminal.move(1, 1)
     var top = "┌"
-    var half = cols / 2
     for i in 1..(cols - 1) {
-        if i == half {
-            top = top + "┬"
-        } else {
-            top = top + "─"
-        }
+        if i == split { top = top + "┬" }
+        else { top = top + "─" }
     }
-    top = top + "┐"
-    print(top + "\n")
-    
-    // Content rows
-    for row in 1..(rows - 2) {
-        var line = "│"
-        for col in 1..(cols - 1) {
-            if col == half {
-                line = line + "│"
-            } else {
-                line = line + " "
-            }
-        }
-        line = line + "│"
-        print(line + "\n")
+    Terminal.write(top + "┐")
+
+    // Middle rows
+    for row in 2..(rows - 1) {
+        Terminal.move(row, 1)
+        Terminal.write("│")
+        Terminal.move(row, split + 1)
+        Terminal.write("│")
+        Terminal.move(row, cols)
+        Terminal.write("│")
     }
-    
-    // Bottom border
+
+    // Bottom
+    Terminal.move(rows - 1, 1)
     var bottom = "└"
     for i in 1..(cols - 1) {
-        if i == half {
-            bottom = bottom + "┴"
-        } else {
-            bottom = bottom + "─"
-        }
+        if i == split { bottom = bottom + "┴" }
+        else { bottom = bottom + "─" }
     }
-    bottom = bottom + "┘"
-    print(bottom + "\n")
-    
-    // Left pane: show command output
-    print("\x1b[2;2H")
-    print("\x1b[1m Pane 1 \x1b[0m")
-    
-    var ls_out = System.exec("ls -1 src/*.c | head -10")
-    var ls_start = 0
-    var ls_row = 3
-    var ls_len = ls_out.len()
-    for idx in 0..ls_len {
-        if ls_out[idx] == "\n" {
-            var ln = ls_out.substring(ls_start, idx)
-            if ln.len() > (half - 3) {
-                ln = ln.substring(0, half - 3)
+    Terminal.write(bottom + "┘")
+}
+
+fn draw_pane_content(content: string, start_row: int, start_col: int, max_width: int, max_rows: int) {
+    var line_start = 0
+    var row = 0
+    var clen = content.len()
+    for idx in 0..clen {
+        if content[idx] == "\n" {
+            if row < max_rows {
+                var line = content.substring(line_start, idx)
+                if line.len() > max_width {
+                    line = line.substring(0, max_width)
+                }
+                Terminal.move(start_row + row, start_col)
+                Terminal.write(line)
+                row = row + 1
             }
-            print("\x1b[" + ls_row.to_string() + ";2H" + ln)
-            ls_row = ls_row + 1
-            ls_start = idx + 1
+            line_start = idx + 1
         }
     }
-    
-    // Right pane: show system info
-    var right_col = half + 2
-    print("\x1b[2;" + right_col.to_string() + "H")
-    print("\x1b[1m Pane 2 \x1b[0m")
-    
-    print("\x1b[3;" + right_col.to_string() + "H")
-    print("Date: " + System.exec("date").trim())
-    
-    print("\x1b[4;" + right_col.to_string() + "H")
-    print("User: " + System.exec("whoami").trim())
-    
-    print("\x1b[5;" + right_col.to_string() + "H")
-    print("PWD:  " + System.exec("pwd").trim())
-    
-    // Status bar
-    print("\x1b[" + rows.to_string() + ";1H")
-    print("\x1b[30;42m")
-    var status = " twux 0.2 | " + cols.to_string() + "x" + rows.to_string() + " | 2 panes"
-    print(status)
-    var remaining = cols - status.len()
-    for i in 0..remaining {
-        print(" ")
+}
+
+fn draw_status(cols: int, rows: int, msg: string) {
+    Terminal.move(rows, 1)
+    Terminal.write("\x1b[30;42m")
+    Terminal.write(msg)
+    var pad = cols - msg.len()
+    for i in 0..pad {
+        Terminal.write(" ")
     }
-    print("\x1b[0m")
-    
-    // Move below
-    var below = rows + 1
-    print("\x1b[" + below.to_string() + ";1H\n")
-    println("")
-    println("twux phase 2 complete!")
-    println("Terminal size: " + cols.to_string() + "x" + rows.to_string())
-    println("")
-    println("STILL NEEDED for interactive tmux:")
-    println("  - Terminal.raw_mode() / Terminal.restore()")
-    println("  - Terminal.read_key() for keyboard input")
-    println("  - Process.spawn() with PTY")
-    println("  - Event loop (select/poll)")
-    
+    Terminal.write("\x1b[0m")
+}
+
+fn main() -> int {
+    var cols = Terminal.cols()
+    var rows = Terminal.rows()
+    var split = cols / 2
+    var active_pane = 1
+
+    Terminal.raw_mode()
+    Terminal.clear()
+
+    // Initial content
+    var left_content = System.exec("ls -la | head -15")
+    var right_content = System.exec("ps aux | head -15")
+
+    // Draw UI
+    draw_border(cols, rows, split)
+
+    // Pane titles
+    Terminal.move(1, 3)
+    Terminal.write("\x1b[1m ls -la \x1b[0m")
+    var right_title_col = split + 3
+    Terminal.move(1, right_title_col)
+    Terminal.write("\x1b[1m ps aux \x1b[0m")
+
+    // Pane content
+    draw_pane_content(left_content, 2, 2, split - 2, rows - 3)
+    draw_pane_content(right_content, 2, split + 2, cols - split - 2, rows - 3)
+
+    // Status
+    var status = " twux | " + cols.to_string() + "x" + rows.to_string() + " | Pane " + active_pane.to_string() + " | q:quit r:refresh 1/2:switch"
+    draw_status(cols, rows, status)
+
+    // Event loop
+    var running = 1
+    while running == 1 {
+        var key = Terminal.read_key()
+        if key == 113 {
+            // q - quit
+            running = 0
+        }
+        if key == 114 {
+            // r - refresh
+            Terminal.clear()
+            left_content = System.exec("ls -la | head -15")
+            right_content = System.exec("ps aux | head -15")
+            draw_border(cols, rows, split)
+            Terminal.move(1, 3)
+            Terminal.write("\x1b[1m ls -la \x1b[0m")
+            Terminal.move(1, right_title_col)
+            Terminal.write("\x1b[1m ps aux \x1b[0m")
+            draw_pane_content(left_content, 2, 2, split - 2, rows - 3)
+            draw_pane_content(right_content, 2, split + 2, cols - split - 2, rows - 3)
+            draw_status(cols, rows, status)
+        }
+        if key == 49 {
+            // 1 - focus left
+            active_pane = 1
+            status = " twux | " + cols.to_string() + "x" + rows.to_string() + " | Pane 1 | q:quit r:refresh 1/2:switch"
+            draw_status(cols, rows, status)
+        }
+        if key == 50 {
+            // 2 - focus right
+            active_pane = 2
+            status = " twux | " + cols.to_string() + "x" + rows.to_string() + " | Pane 2 | q:quit r:refresh 1/2:switch"
+            draw_status(cols, rows, status)
+        }
+    }
+
+    Terminal.restore()
+    Terminal.clear()
+    println("twux exited cleanly.")
     return 0
 }

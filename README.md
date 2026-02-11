@@ -11,7 +11,10 @@ Command-line utilities that solve real problems.
 
 - **loc** — Count lines of code across a project
 - **todo-finder** — Scan source files for TODO/FIXME comments
-- **file-renamer** — Batch rename files with pattern matching
+- **word-counter** — Analyze word frequency in text files
+- **config-reader** — Parse key=value config files with error handling
+- **md-toc** — Generate table of contents from Markdown headings
+- **twux** — Terminal multiplexer with split panes *(interactive — run manually)*
 
 ### data-processing/
 Programs that read, transform, and output data.
@@ -31,6 +34,10 @@ Classic algorithms implemented in Wyn.
 # From the wyn-lang workspace
 cd wyn
 ./wyn run ../sample-apps/cli-tools/loc/main.wyn
+./wyn run ../sample-apps/algorithms/sorting/main.wyn
+
+# Interactive apps (run in your terminal, not from scripts)
+./wyn run ../sample-apps/cli-tools/twux/main.wyn
 ```
 
 ## Requirements
