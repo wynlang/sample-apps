@@ -26,10 +26,13 @@ fn main() -> int {
             if trimmed.len() == 0 { continue }
             if trimmed.contains(",") == 0 { continue }
 
-            var name = split_get(trimmed, ",", 0)
-            var math_score = split_get(trimmed, ",", 1).to_int()
-            var sci_score = split_get(trimmed, ",", 2).to_int()
-            var eng_score = split_get(trimmed, ",", 3).to_int()
+            var name = trimmed.split_at(",", 0)
+            var ms = trimmed.split_at(",", 1)
+            var ss = trimmed.split_at(",", 2)
+            var es = trimmed.split_at(",", 3)
+            var math_score = ms.to_int()
+            var sci_score = ss.to_int()
+            var eng_score = es.to_int()
             var avg = (math_score + sci_score + eng_score) / 3
 
             var grade = "F"
