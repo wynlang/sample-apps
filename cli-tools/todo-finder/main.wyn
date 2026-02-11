@@ -1,0 +1,59 @@
+// todo-finder — Scan source files for TODO/FIXME/HACK comments
+// Demonstrates: file I/O, string search, structs, Result type, closures
+
+struct TodoItem { file: string, line: int, kind: string, text: string }
+
+fn find_todos(filename: string) -> int {
+    var content = file_read(filename)
+    var line_num = 1
+    var line_start = 0
+    var len = str_len(content)
+    var found = 0
+
+    for i in 0..len {
+        if content[i] == "\n" {
+            var line = str_substring(content, line_start, i)
+
+            if str_contains(line, "TODO") {
+                println("  " + filename + ":" + int_to_string(line_num) + " [TODO] " + str_trim(line))
+                found = found + 1
+            }
+            if str_contains(line, "FIXME") {
+                println("  " + filename + ":" + int_to_string(line_num) + " [FIXME] " + str_trim(line))
+                found = found + 1
+            }
+            if str_contains(line, "HACK") {
+                println("  " + filename + ":" + int_to_string(line_num) + " [HACK] " + str_trim(line))
+                found = found + 1
+            }
+
+            line_num = line_num + 1
+            line_start = i + 1
+        }
+    }
+    return found
+}
+
+fn main() -> int {
+    println("=== TODO Finder ===")
+    println("")
+
+    var files = [
+        "src/codegen.c",
+        "src/parser.c",
+        "src/checker.c",
+        "src/main.c"
+    ]
+
+    var total = 0
+    for i in 0..4 {
+        if file_exists(files[i]) {
+            var count = find_todos(files[i])
+            total = total + count
+        }
+    }
+
+    println("")
+    println("Total items found: " + int_to_string(total))
+    return 0
+}

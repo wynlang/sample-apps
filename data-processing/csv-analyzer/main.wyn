@@ -1,0 +1,72 @@
+// CSV Analyzer — Read student grades, compute statistics
+// Demonstrates: file I/O, string parsing, structs, methods
+
+struct Student { name: string, math: int, science: int, english: int }
+
+fn Student.average(self) -> int {
+    return (self.math + self.science + self.english) / 3
+}
+
+fn main() -> int {
+    println("=== Student Grade Analyzer ===")
+    println("")
+
+    var content = file_read("../sample-apps/data-processing/csv-analyzer/data.csv")
+    var line_start = 0
+    var len = str_len(content)
+    var count = 0
+    var total_math = 0
+    var total_science = 0
+    var total_english = 0
+    var highest_avg = 0
+    var highest_name = ""
+
+    println("Name       Math  Sci   Eng   Avg  Grade")
+    println("─────────────────────────────────────────")
+
+    for i in 0..len {
+        if content[i] == "\n" {
+            var line = str_substring(content, line_start, i)
+            var trimmed = str_trim(line)
+            line_start = i + 1
+
+            if str_len(trimmed) == 0 { continue }
+            if str_contains(trimmed, ",") == 0 { continue }
+
+            // Parse CSV fields using split_get
+            var name = split_get(trimmed, ",", 0)
+            var math = str_to_int(split_get(trimmed, ",", 1))
+            var science = str_to_int(split_get(trimmed, ",", 2))
+            var english = str_to_int(split_get(trimmed, ",", 3))
+            var avg = (math + science + english) / 3
+
+            var grade = "F"
+            if avg >= 60 { grade = "D" }
+            if avg >= 70 { grade = "C" }
+            if avg >= 80 { grade = "B" }
+            if avg >= 90 { grade = "A" }
+
+            println(name + "     " + int_to_string(math) + "    " + int_to_string(science) + "    " + int_to_string(english) + "    " + int_to_string(avg) + "   " + grade)
+
+            total_math = total_math + math
+            total_science = total_science + science
+            total_english = total_english + english
+            count = count + 1
+
+            if avg > highest_avg {
+                highest_avg = avg
+                highest_name = name
+            }
+        }
+    }
+
+    println("─────────────────────────────────────────")
+    println("")
+    println("Students:     " + int_to_string(count))
+    println("Avg Math:     " + int_to_string(total_math / count))
+    println("Avg Science:  " + int_to_string(total_science / count))
+    println("Avg English:  " + int_to_string(total_english / count))
+    println("Top Student:  " + highest_name + " (avg: " + int_to_string(highest_avg) + ")")
+
+    return 0
+}

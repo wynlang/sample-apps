@@ -1,2 +1,5 @@
-*.c
+*.wyn.c
+*.wyn.out
 *.out
+*.dSYM/
+.DS_Store
