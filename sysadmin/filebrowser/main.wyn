@@ -1,0 +1,180 @@
+// filebrowser — Interactive file browser TUI
+// Demonstrates: Terminal TUI, System.exec, file listing, navigation
+// Keys: j/k or arrows=navigate, Enter=open dir, q=quit, h=parent dir
+
+fn draw_header(cols: int, cwd: string) {
+    Terminal.move(1, 1)
+    Terminal.write("\x1b[1;36m filebrowser\x1b[0m — " + cwd)
+    var pad = cols - 14 - cwd.len()
+    if pad > 0 {
+        Terminal.write("\x1b[90m" + " ".pad_right(pad, " ") + "\x1b[0m")
+    }
+}
+
+fn draw_files(entries: [string], count: int, selected: int, rows: int, offset: int) {
+    var visible = rows - 3
+    if visible > count { visible = count }
+
+    for i in 0..visible {
+        var idx = offset + i
+        if idx >= count { continue }
+        var entry = entries[idx]
+        Terminal.move(i + 2, 1)
+
+        // Check if directory
+        var is_dir = entry.ends_with("/")
+
+        if idx == selected {
+            Terminal.write("\x1b[7m")
+        }
+
+        if is_dir {
+            Terminal.write("  \x1b[1;34m📁 " + entry + "\x1b[0m")
+        } else {
+            Terminal.write("  📄 " + entry)
+        }
+
+        if idx == selected {
+            Terminal.write("\x1b[0m")
+        }
+
+        // Clear rest of line
+        Terminal.write("                              ")
+    }
+}
+
+fn draw_status(cols: int, rows: int, count: int, selected: int, msg: string) {
+    Terminal.move(rows, 1)
+    var info = " " + (selected + 1).to_string() + "/" + count.to_string() + " "
+    Terminal.write("\x1b[32;40m" + info)
+    if msg.len() > 0 {
+        var gap = cols - info.len() - msg.len() - 1
+        if gap > 0 {
+            Terminal.write(" ".pad_right(gap, " "))
+        }
+        Terminal.write(msg)
+    } else {
+        Terminal.write(" ".pad_right(cols - info.len(), " "))
+    }
+    Terminal.write("\x1b[0m")
+}
+
+fn main() -> int {
+    var cols = Terminal.cols()
+    var rows = Terminal.rows()
+    var cwd = System.exec("pwd").trim()
+
+    // Get file listing
+    var listing = System.exec("ls -1F 2>/dev/null")
+    var entries = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+    var count = 0
+    var line_start = 0
+    var llen = listing.len()
+    for idx in 0..llen {
+        if listing[idx] == "\n" {
+            if count < 50 {
+                entries[count] = listing.substring(line_start, idx)
+                count = count + 1
+            }
+            line_start = idx + 1
+        }
+    }
+
+    var selected = 0
+    var offset = 0
+
+    Terminal.raw_mode()
+    Terminal.clear()
+    draw_header(cols, cwd)
+    draw_files(entries, count, selected, rows, offset)
+    draw_status(cols, rows, count, selected, "q:quit h:parent Enter:open j/k:nav")
+
+    var running = 1
+    while running == 1 {
+        var key = Terminal.read_key()
+        if key == 0 { continue }
+
+        // q = quit
+        if key == 113 { running = 0 }
+
+        // j or Down = next
+        if key == 106 { selected = selected + 1 }
+        if key == 1001 { selected = selected + 1 }
+
+        // k or Up = previous
+        if key == 107 { selected = selected - 1 }
+        if key == 1000 { selected = selected - 1 }
+
+        // Bounds
+        if selected < 0 { selected = 0 }
+        if selected >= count { selected = count - 1 }
+
+        // Scroll
+        var visible = rows - 3
+        if selected < offset { offset = selected }
+        if selected >= offset + visible { offset = selected - visible + 1 }
+
+        // Enter = open directory
+        if key == 13 {
+            if selected >= 0 {
+                if selected < count {
+                    var entry = entries[selected]
+                    if entry.ends_with("/") {
+                        // Navigate into directory
+                        var dirname = entry.substring(0, entry.len() - 1)
+                        System.exec_code("cd '" + cwd + "/" + dirname + "'")
+                        cwd = cwd + "/" + dirname
+                        listing = System.exec("ls -1F '" + cwd + "' 2>/dev/null")
+                        count = 0
+                        line_start = 0
+                        llen = listing.len()
+                        for idx in 0..llen {
+                            if listing[idx] == "\n" {
+                                if count < 50 {
+                                    entries[count] = listing.substring(line_start, idx)
+                                    count = count + 1
+                                }
+                                line_start = idx + 1
+                            }
+                        }
+                        selected = 0
+                        offset = 0
+                        Terminal.clear()
+                        draw_header(cols, cwd)
+                    }
+                }
+            }
+        }
+
+        // h = parent directory
+        if key == 104 {
+            var parent = System.exec("dirname '" + cwd + "'").trim()
+            cwd = parent
+            listing = System.exec("ls -1F '" + cwd + "' 2>/dev/null")
+            count = 0
+            line_start = 0
+            llen = listing.len()
+            for idx in 0..llen {
+                if listing[idx] == "\n" {
+                    if count < 50 {
+                        entries[count] = listing.substring(line_start, idx)
+                        count = count + 1
+                    }
+                    line_start = idx + 1
+                }
+            }
+            selected = 0
+            offset = 0
+            Terminal.clear()
+            draw_header(cols, cwd)
+        }
+
+        draw_files(entries, count, selected, rows, offset)
+        draw_status(cols, rows, count, selected, "q:quit h:parent Enter:open j/k:nav")
+    }
+
+    Terminal.restore()
+    Terminal.clear()
+    println("filebrowser exited.")
+    return 0
+}
