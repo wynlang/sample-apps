@@ -1,28 +1,23 @@
 // loc — Lines of Code Counter
-// Counts lines of code, blank lines, and comment lines in .wyn files
+// Demonstrates: file I/O, string methods, structs, loops
 
 struct FileStats { name: string, code: int, blank: int, comment: int }
-
-fn FileStats.total(self) -> int {
-    return self.code + self.blank + self.comment
-}
 
 fn count_lines(filename: string, content: string) -> FileStats {
     var code = 0
     var blank = 0
     var comment = 0
-    var in_line = 0
     var line_start = 0
-    var len = str_len(content)
+    var len = content.len()
 
     for i in 0..len {
         if content[i] == "\n" {
-            var line = str_substring(content, line_start, i)
-            var trimmed = str_trim(line)
-            if str_len(trimmed) == 0 {
+            var line = content.substring(line_start, i)
+            var trimmed = line.trim()
+            if trimmed.len() == 0 {
                 blank = blank + 1
             } else {
-                if str_starts_with(trimmed, "//") {
+                if trimmed.starts_with("//") {
                     comment = comment + 1
                 } else {
                     code = code + 1
@@ -31,7 +26,6 @@ fn count_lines(filename: string, content: string) -> FileStats {
             line_start = i + 1
         }
     }
-    // Last line (no trailing newline)
     if line_start < len {
         code = code + 1
     }
@@ -42,7 +36,7 @@ fn count_lines(filename: string, content: string) -> FileStats {
 fn display_stats(s: FileStats) {
     var total = s.code + s.blank + s.comment
     println("  " + s.name)
-    println("    Code: " + int_to_string(s.code) + "  Blank: " + int_to_string(s.blank) + "  Comment: " + int_to_string(s.comment) + "  Total: " + int_to_string(total))
+    println("    Code: " + s.code.to_string() + "  Blank: " + s.blank.to_string() + "  Comment: " + s.comment.to_string() + "  Total: " + total.to_string())
 }
 
 fn main() -> int {
@@ -71,11 +65,12 @@ fn main() -> int {
 
     println("")
     println("=== Summary ===")
-    println("  Files:   " + int_to_string(5))
-    println("  Code:    " + int_to_string(total_code))
-    println("  Blank:   " + int_to_string(total_blank))
-    println("  Comment: " + int_to_string(total_comment))
-    println("  Total:   " + int_to_string(total_code + total_blank + total_comment))
+    var total = total_code + total_blank + total_comment
+    println("  Files:   5")
+    println("  Code:    " + total_code.to_string())
+    println("  Blank:   " + total_blank.to_string())
+    println("  Comment: " + total_comment.to_string())
+    println("  Total:   " + total.to_string())
 
     return 0
 }

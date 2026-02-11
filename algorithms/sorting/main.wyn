@@ -1,5 +1,5 @@
 // Sorting Algorithms in Wyn
-// Demonstrates: arrays, loops, conditionals, functions
+// Demonstrates: arrays, loops, conditionals, method syntax
 
 fn main() -> int {
     println("=== Sorting Algorithms ===")
@@ -7,13 +7,12 @@ fn main() -> int {
     var data = [64, 34, 25, 12, 22, 11, 90, 1, 45, 78]
     var n = 10
 
-    // Print input
     println("")
     println("Input:")
     var s = "["
     for i in 0..n {
         if i > 0 { s = s + ", " }
-        s = s + int_to_string(data[i])
+        s = s + data[i].to_string()
     }
     println(s + "]")
 
@@ -28,22 +27,18 @@ fn main() -> int {
         }
     }
 
-    // Print sorted
     println("")
     println("Bubble Sort result:")
     var s2 = "["
     for i in 0..n {
         if i > 0 { s2 = s2 + ", " }
-        s2 = s2 + int_to_string(data[i])
+        s2 = s2 + data[i].to_string()
     }
     println(s2 + "]")
 
-    // Verify sorted
     var sorted = 1
     for i in 0..(n - 1) {
-        if data[i] > data[i + 1] {
-            sorted = 0
-        }
+        if data[i] > data[i + 1] { sorted = 0 }
     }
 
     if sorted == 1 {
