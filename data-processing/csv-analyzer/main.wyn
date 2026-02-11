@@ -4,7 +4,7 @@ fn main() -> int {
     println("=== Student Grade Analyzer ===")
     println("")
 
-    var content = file_read("../sample-apps/data-processing/csv-analyzer/data.csv")
+    var content = File.read("../sample-apps/data-processing/csv-analyzer/data.csv")
     var line_start = 0
     var total_len = content.len()
     var count = 0

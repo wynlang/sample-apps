@@ -55,7 +55,7 @@ fn main() -> int {
     var total_comment = 0
 
     for i in 0..5 {
-        var content = file_read(files[i])
+        var content = File.read(files[i])
         var stats = count_lines(files[i], content)
         display_stats(stats)
         total_code = total_code + stats.code

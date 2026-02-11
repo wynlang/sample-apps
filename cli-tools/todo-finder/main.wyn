@@ -2,7 +2,7 @@
 // Demonstrates: file I/O, string methods, structs
 
 fn find_todos(filename: string) -> int {
-    var content = file_read(filename)
+    var content = File.read(filename)
     var line_num = 1
     var line_start = 0
     var len = content.len()
@@ -40,7 +40,7 @@ fn main() -> int {
     var total = 0
 
     for i in 0..4 {
-        if file_exists(files[i]) {
+        if File.exists(files[i]) {
             total = total + find_todos(files[i])
         }
     }
