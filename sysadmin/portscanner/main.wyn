@@ -1,0 +1,66 @@
+// portscanner — Scan common ports on a host
+// Demonstrates: System.exec, string parsing, loops
+// Non-interactive: prints and exits
+
+fn scan_port(host: string, port: int) -> int {
+    var cmd = "nc -z -w1 " + host + " " + port.to_string() + " 2>&1; echo $?"
+    var result = System.exec(cmd).trim()
+    // Last line is exit code
+    var lines = result
+    var last_nl = result.last_index_of("\n")
+    if last_nl >= 0 {
+        lines = result.substring(last_nl + 1, result.len()).trim()
+    }
+    return lines.to_int()
+}
+
+fn port_name(port: int) -> string {
+    if port == 22 { return "SSH" }
+    if port == 80 { return "HTTP" }
+    if port == 443 { return "HTTPS" }
+    if port == 3000 { return "Dev Server" }
+    if port == 3306 { return "MySQL" }
+    if port == 5432 { return "PostgreSQL" }
+    if port == 6379 { return "Redis" }
+    if port == 8080 { return "HTTP Alt" }
+    if port == 8443 { return "HTTPS Alt" }
+    if port == 9090 { return "Prometheus" }
+    if port == 27017 { return "MongoDB" }
+    return "Unknown"
+}
+
+fn main() -> int {
+    println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
+    println("\x1b[1;36m║\x1b[0m           \x1b[1mportscanner\x1b[0m — Network Port Scanner                \x1b[1;36m║\x1b[0m")
+    println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
+    println("")
+
+    var host = "localhost"
+    var ports = [22, 80, 443, 3000, 3306, 5432, 6379, 8080, 8443, 9090, 27017]
+    var open_count = 0
+
+    println("  Scanning \x1b[1m" + host + "\x1b[0m ...")
+    println("")
+    println("  " + "PORT".pad_right(8, " ") + "SERVICE".pad_right(15, " ") + "STATUS")
+    println("  " + "────".pad_right(8, " ") + "───────".pad_right(15, " ") + "──────")
+
+    for i in 0..11 {
+        var port = ports[i]
+        var exit_code = scan_port(host, port)
+        var name = port_name(port)
+        var status = ""
+        if exit_code == 0 {
+            status = "\x1b[32m● OPEN\x1b[0m"
+            open_count = open_count + 1
+        } else {
+            status = "\x1b[90m○ closed\x1b[0m"
+        }
+        println("  " + port.to_string().pad_right(8, " ") + name.pad_right(15, " ") + status)
+    }
+
+    println("")
+    println("  \x1b[90mFound " + open_count.to_string() + " open port(s) on " + host + "\x1b[0m")
+    println("")
+
+    return 0
+}

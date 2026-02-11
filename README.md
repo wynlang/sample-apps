@@ -16,6 +16,18 @@ Command-line utilities that solve real problems.
 - **md-toc** — Generate table of contents from Markdown headings
 - **twux** — Terminal multiplexer with split panes *(interactive — run manually)*
 
+### sysadmin/
+Real tools for DevOps and systems administration.
+
+- **sysmon** — System monitor (htop-lite) with CPU, memory, processes, disk, network views *(interactive)*
+- **sysinfo** — System information dashboard (CPU, memory, disk, network, environment)
+- **procwatch** — Process monitor with CPU/memory sorting
+- **diskmon** — Disk usage monitor with color-coded progress bars
+- **netstat-lite** — Network status: interfaces, listening ports, active connections, DNS
+- **portscanner** — Scan common ports on a host
+- **httpcheck** — HTTP endpoint health checker with response timing
+- **logwatch** — Log file analyzer with severity highlighting and health assessment
+
 ### data-processing/
 Programs that read, transform, and output data.
 
@@ -33,10 +45,15 @@ Classic algorithms implemented in Wyn.
 ```bash
 # From the wyn/ directory
 cd wyn
-./wyn run ../sample-apps/cli-tools/loc/main.wyn
-./wyn run ../sample-apps/algorithms/sorting/main.wyn
 
-# Interactive apps (run in your terminal, not from scripts)
+# Non-interactive tools (safe for scripts)
+./wyn run ../sample-apps/sysadmin/sysinfo/main.wyn
+./wyn run ../sample-apps/sysadmin/diskmon/main.wyn
+./wyn run ../sample-apps/sysadmin/procwatch/main.wyn
+./wyn run ../sample-apps/cli-tools/loc/main.wyn
+
+# Interactive TUI apps (run in your terminal)
+./wyn run ../sample-apps/sysadmin/sysmon/main.wyn
 ./wyn run ../sample-apps/cli-tools/twux/main.wyn
 ```
 

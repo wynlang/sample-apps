@@ -1,0 +1,71 @@
+// sysinfo — System information dashboard
+// Demonstrates: System.exec, string formatting, ANSI output
+// Non-interactive: prints and exits
+
+fn main() -> int {
+    println("")
+    println("  \x1b[1;36m┌─────────────────────────────────────────────────────┐\x1b[0m")
+    println("  \x1b[1;36m│\x1b[0m              \x1b[1msysinfo\x1b[0m — System Dashboard             \x1b[1;36m│\x1b[0m")
+    println("  \x1b[1;36m└─────────────────────────────────────────────────────┘\x1b[0m")
+    println("")
+
+    // OS Info
+    var os = System.exec("uname -s").trim()
+    var kernel = System.exec("uname -r").trim()
+    var arch = System.exec("uname -m").trim()
+    var hostname = System.exec("hostname").trim()
+
+    println("  \x1b[1;33m● System\x1b[0m")
+    println("    Hostname:  " + hostname)
+    println("    OS:        " + os + " " + kernel)
+    println("    Arch:      " + arch)
+    var uptime = System.exec("uptime").trim()
+    println("    Uptime:    " + uptime)
+    println("")
+
+    // CPU
+    var ncpu = System.exec("sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo ?").trim()
+    var cpu_brand = System.exec("sysctl -n machdep.cpu.brand_string 2>/dev/null || cat /proc/cpuinfo 2>/dev/null | grep 'model name' | head -1 | cut -d: -f2 || echo unknown").trim()
+
+    println("  \x1b[1;33m● CPU\x1b[0m")
+    println("    Model:     " + cpu_brand)
+    println("    Cores:     " + ncpu)
+    println("")
+
+    // Memory
+    var total_mem = System.exec("sysctl -n hw.memsize 2>/dev/null | awk '{printf \"%.0f\", $1/1073741824}' || free -g 2>/dev/null | grep Mem | awk '{print $2}' || echo 0").trim()
+    var mem_gb = total_mem.to_int()
+    println("  \x1b[1;33m● Memory\x1b[0m")
+    println("    Total:     " + mem_gb.to_string() + " GB")
+    println("")
+
+    // Disk
+    println("  \x1b[1;33m● Disk\x1b[0m")
+    var df = System.exec("df -Ph / | tail -1")
+    var size = df.split_at(" ", 1)
+    var used = df.split_at(" ", 2)
+    var avail = df.split_at(" ", 3)
+    var cap = df.split_at(" ", 4)
+    println("    Root (/):  " + used + " used / " + size + " total (" + cap + ")")
+    println("")
+
+    // Network
+    println("  \x1b[1;33m● Network\x1b[0m")
+    var ip = System.exec("ifconfig 2>/dev/null | grep 'inet ' | grep -v 127.0.0.1 | head -1 | awk '{print $2}'").trim()
+    var ext_ip = System.exec("curl -s --connect-timeout 2 ifconfig.me 2>/dev/null || echo N/A").trim()
+    println("    Local IP:  " + ip)
+    println("    Public IP: " + ext_ip)
+    println("")
+
+    // Shell & User
+    println("  \x1b[1;33m● Environment\x1b[0m")
+    var user = System.exec("whoami").trim()
+    var shell = System.env("SHELL")
+    var home = System.env("HOME")
+    println("    User:      " + user)
+    println("    Shell:     " + shell)
+    println("    Home:      " + home)
+    println("")
+
+    return 0
+}
