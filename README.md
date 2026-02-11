@@ -27,6 +27,9 @@ Real tools for DevOps and systems administration.
 - **portscanner** — Scan common ports on a host
 - **httpcheck** — HTTP endpoint health checker with response timing
 - **logwatch** — Log file analyzer with severity highlighting and health assessment
+- **servicemon** — Service health monitor: system, dev services, Docker, Git status
+- **envdiff** — Environment variable inspector with PATH analysis
+- **filebrowser** — Interactive file browser TUI with directory navigation *(interactive)*
 
 ### data-processing/
 Programs that read, transform, and output data.
