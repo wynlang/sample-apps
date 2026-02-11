@@ -1,4 +1,4 @@
-// todo-finder — Scan source files for TODO/FIXME/HACK comments
+// todo-finder — Scan source files for action item comments
 // Demonstrates: file I/O, string methods, structs
 
 fn find_todos(filename: string) -> int {
@@ -36,10 +36,18 @@ fn main() -> int {
     println("=== TODO Finder ===")
     println("")
 
-    var files = ["src/codegen.c", "src/parser.c", "src/checker.c", "src/main.c"]
+    // Scan the sample apps themselves for TODOs
+    var files = [
+        "../sample-apps/cli-tools/loc/main.wyn",
+        "../sample-apps/cli-tools/todo-finder/main.wyn",
+        "../sample-apps/cli-tools/word-counter/main.wyn",
+        "../sample-apps/cli-tools/config-reader/main.wyn",
+        "../sample-apps/cli-tools/md-toc/main.wyn",
+        "../sample-apps/cli-tools/twux/main.wyn"
+    ]
     var total = 0
 
-    for i in 0..4 {
+    for i in 0..6 {
         if File.exists(files[i]) {
             total = total + find_todos(files[i])
         }

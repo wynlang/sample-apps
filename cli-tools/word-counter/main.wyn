@@ -5,7 +5,12 @@ fn main() -> int {
     println("=== Word Frequency Counter ===")
     println("")
 
-    var content = File.read("tests/validation/test_struct_methods.wyn")
+    var content = File.read("../sample-apps/cli-tools/word-counter/main.wyn")
+    if content.len() == 0 {
+        println("Error: could not read input file")
+        return 1
+    }
+
     var counts = HashMap.new()
     var line_start = 0
     var total_words = 0
@@ -19,7 +24,6 @@ fn main() -> int {
                 var word = content.substring(line_start, idx)
                 var trimmed = word.trim()
                 if trimmed.len() > 0 {
-                    // Increment count
                     var current = counts.get_int(trimmed)
                     counts.insert_int(trimmed, current + 1)
                     total_words = total_words + 1
@@ -33,7 +37,7 @@ fn main() -> int {
     println("")
 
     // Show some known keywords
-    var keywords = ["fn", "var", "return", "struct", "if", "for", "println", "int", "self"]
+    var keywords = ["fn", "var", "return", "if", "for", "println", "int", "string", "HashMap"]
     for i in 0..9 {
         var kw = keywords[i]
         var count = counts.get_int(kw)

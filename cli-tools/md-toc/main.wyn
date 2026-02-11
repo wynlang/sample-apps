@@ -6,6 +6,11 @@ fn main() -> int {
     println("")
 
     var content = File.read("../sample-apps/README.md")
+    if content.len() == 0 {
+        println("Error: could not read README.md")
+        return 1
+    }
+
     var line_start = 0
     var total_len = content.len()
     var heading_count = 0

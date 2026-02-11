@@ -42,12 +42,13 @@ fn display_stats(s: FileStats) {
 fn main() -> int {
     println("=== Lines of Code Counter ===")
 
+    // Count lines in the sample apps themselves
     var files = [
-        "tests/validation/test_struct_methods.wyn",
-        "tests/validation/test_option_type.wyn",
-        "tests/validation/test_returning_closures.wyn",
-        "tests/validation/test_traits.wyn",
-        "tests/validation/test_runtime_extraction.wyn"
+        "../sample-apps/cli-tools/loc/main.wyn",
+        "../sample-apps/cli-tools/todo-finder/main.wyn",
+        "../sample-apps/cli-tools/word-counter/main.wyn",
+        "../sample-apps/cli-tools/config-reader/main.wyn",
+        "../sample-apps/cli-tools/md-toc/main.wyn"
     ]
 
     var total_code = 0
@@ -55,12 +56,14 @@ fn main() -> int {
     var total_comment = 0
 
     for i in 0..5 {
-        var content = File.read(files[i])
-        var stats = count_lines(files[i], content)
-        display_stats(stats)
-        total_code = total_code + stats.code
-        total_blank = total_blank + stats.blank
-        total_comment = total_comment + stats.comment
+        if File.exists(files[i]) {
+            var content = File.read(files[i])
+            var stats = count_lines(files[i], content)
+            display_stats(stats)
+            total_code = total_code + stats.code
+            total_blank = total_blank + stats.blank
+            total_comment = total_comment + stats.comment
+        }
     }
 
     println("")

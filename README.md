@@ -31,7 +31,7 @@ Classic algorithms implemented in Wyn.
 ## Running
 
 ```bash
-# From the wyn-lang workspace
+# From the wyn/ directory
 cd wyn
 ./wyn run ../sample-apps/cli-tools/loc/main.wyn
 ./wyn run ../sample-apps/algorithms/sorting/main.wyn
