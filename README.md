@@ -30,6 +30,8 @@ Real tools for DevOps and systems administration.
 - **servicemon** — Service health monitor: system, dev services, Docker, Git status
 - **envdiff** — Environment variable inspector with PATH analysis
 - **filebrowser** — Interactive file browser TUI with directory navigation *(interactive)*
+- **dockermon** — Docker container monitor: overview, running/stopped, disk usage
+- **gitdash** — Git repository dashboard: branch, working tree, commits, remotes
 
 ### data-processing/
 Programs that read, transform, and output data.
