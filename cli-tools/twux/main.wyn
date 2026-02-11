@@ -1,0 +1,119 @@
+// twux — Terminal multiplexer
+// Phase 2: Raw terminal mode + keyboard input
+//
+// BLOCKERS FOUND:
+// 1. Need Terminal.raw_mode() / Terminal.restore() - wraps tcgetattr/tcsetattr
+// 2. Need Terminal.read_key() - non-blocking single character read
+// 3. Need Terminal.size() - get terminal dimensions (ioctl TIOCGWINSZ)
+// 4. Need Process.spawn(cmd) - fork+exec with PTY
+//
+// Adding these as built-in functions in the runtime.
+
+fn main() -> int {
+    // Get terminal size
+    var cols = Terminal.cols()
+    var rows = Terminal.rows()
+    
+    // Clear screen
+    print("\x1b[2J\x1b[H")
+    
+    // Draw split panes
+    // Top border
+    var top = "┌"
+    var half = cols / 2
+    for i in 1..(cols - 1) {
+        if i == half {
+            top = top + "┬"
+        } else {
+            top = top + "─"
+        }
+    }
+    top = top + "┐"
+    print(top + "\n")
+    
+    // Content rows
+    for row in 1..(rows - 2) {
+        var line = "│"
+        for col in 1..(cols - 1) {
+            if col == half {
+                line = line + "│"
+            } else {
+                line = line + " "
+            }
+        }
+        line = line + "│"
+        print(line + "\n")
+    }
+    
+    // Bottom border
+    var bottom = "└"
+    for i in 1..(cols - 1) {
+        if i == half {
+            bottom = bottom + "┴"
+        } else {
+            bottom = bottom + "─"
+        }
+    }
+    bottom = bottom + "┘"
+    print(bottom + "\n")
+    
+    // Left pane: show command output
+    print("\x1b[2;2H")
+    print("\x1b[1m Pane 1 \x1b[0m")
+    
+    var ls_out = System.exec("ls -1 src/*.c | head -10")
+    var ls_start = 0
+    var ls_row = 3
+    var ls_len = ls_out.len()
+    for idx in 0..ls_len {
+        if ls_out[idx] == "\n" {
+            var ln = ls_out.substring(ls_start, idx)
+            if ln.len() > (half - 3) {
+                ln = ln.substring(0, half - 3)
+            }
+            print("\x1b[" + ls_row.to_string() + ";2H" + ln)
+            ls_row = ls_row + 1
+            ls_start = idx + 1
+        }
+    }
+    
+    // Right pane: show system info
+    var right_col = half + 2
+    print("\x1b[2;" + right_col.to_string() + "H")
+    print("\x1b[1m Pane 2 \x1b[0m")
+    
+    print("\x1b[3;" + right_col.to_string() + "H")
+    print("Date: " + System.exec("date").trim())
+    
+    print("\x1b[4;" + right_col.to_string() + "H")
+    print("User: " + System.exec("whoami").trim())
+    
+    print("\x1b[5;" + right_col.to_string() + "H")
+    print("PWD:  " + System.exec("pwd").trim())
+    
+    // Status bar
+    print("\x1b[" + rows.to_string() + ";1H")
+    print("\x1b[30;42m")
+    var status = " twux 0.2 | " + cols.to_string() + "x" + rows.to_string() + " | 2 panes"
+    print(status)
+    var remaining = cols - status.len()
+    for i in 0..remaining {
+        print(" ")
+    }
+    print("\x1b[0m")
+    
+    // Move below
+    var below = rows + 1
+    print("\x1b[" + below.to_string() + ";1H\n")
+    println("")
+    println("twux phase 2 complete!")
+    println("Terminal size: " + cols.to_string() + "x" + rows.to_string())
+    println("")
+    println("STILL NEEDED for interactive tmux:")
+    println("  - Terminal.raw_mode() / Terminal.restore()")
+    println("  - Terminal.read_key() for keyboard input")
+    println("  - Process.spawn() with PTY")
+    println("  - Event loop (select/poll)")
+    
+    return 0
+}
