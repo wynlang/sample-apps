@@ -33,8 +33,9 @@ fn main() -> int {
     println("")
 
     // Memory
-    var total_mem = System.exec("sysctl -n hw.memsize 2>/dev/null | awk '{printf \"%.0f\", $1/1073741824}' || free -g 2>/dev/null | grep Mem | awk '{print $2}' || echo 0").trim()
-    var mem_gb = total_mem.to_int()
+    var total_mem = System.exec("sysctl -n hw.memsize 2>/dev/null || grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2*1024}' || echo 0").trim()
+    var mem_bytes = total_mem.to_int()
+    var mem_gb = mem_bytes / 1073741824
     println("  \x1b[1;33m● Memory\x1b[0m")
     println("    Total:     " + mem_gb.to_string() + " GB")
     println("")
