@@ -1,85 +1,78 @@
 # Wyn Sample Apps
 
-Real-world programs written in [Wyn](https://github.com/AO-Design-Inc/wyn), demonstrating what you can build today.
-
-Every app in this repo compiles and runs. If it's here, it works.
+Real-world programs written in Wyn. Every app compiles and runs.
 
 ## Categories
 
-### 🛠 cli-tools/
-Command-line utilities that solve real problems.
+### 🛠 cli-tools/ (6 apps)
+| App | Description |
+|-----|-------------|
+| **loc** | Count lines of code |
+| **todo-finder** | Scan for TODO/FIXME comments |
+| **word-counter** | Word frequency analysis |
+| **config-reader** | Parse key=value config files |
+| **md-toc** | Generate Markdown TOC |
+| **twux** | Terminal multiplexer *(interactive)* |
 
-| App | Description | Features |
-|-----|-------------|----------|
-| **loc** | Count lines of code | File I/O, structs, string parsing |
-| **todo-finder** | Scan for TODO/FIXME comments | File I/O, string methods |
-| **word-counter** | Word frequency analysis | HashMap, string splitting |
-| **config-reader** | Parse key=value config files | HashMap, error handling |
-| **md-toc** | Generate Markdown TOC | String pattern detection |
-| **twux** | Terminal multiplexer *(interactive)* | Terminal TUI, panes, keyboard input |
+### 🖥 sysadmin/ (13 apps)
+| App | Description |
+|-----|-------------|
+| **sysmon** | System monitor — htop-lite *(interactive)* |
+| **sysinfo** | System dashboard (CPU, memory, disk, network) |
+| **procwatch** | Process monitor with CPU/memory sorting |
+| **diskmon** | Disk usage with color-coded progress bars |
+| **netstat-lite** | Network interfaces, ports, connections |
+| **portscanner** | Scan common ports |
+| **httpcheck** | HTTP health checker with timing |
+| **logwatch** | Log file analyzer with severity highlighting |
+| **servicemon** | Service health monitor |
+| **envdiff** | Environment variable inspector |
+| **filebrowser** | File browser TUI *(interactive)* |
+| **dockermon** | Docker container monitor |
+| **gitdash** | Git repository dashboard |
 
-### 🖥 sysadmin/
-Real tools for DevOps and systems administration.
+### 📊 data-processing/ (2 apps)
+| App | Description |
+|-----|-------------|
+| **csv-analyzer** | Student grade statistics |
+| **log-parser** | Parse and report log errors |
 
-| App | Description | Features |
-|-----|-------------|----------|
-| **sysmon** | System monitor — htop-lite *(interactive)* | Terminal TUI, CPU/memory bars, process list |
-| **sysinfo** | System dashboard | CPU, memory (64-bit), disk, network, env |
-| **procwatch** | Process monitor | CPU/memory sorting, formatted output |
-| **diskmon** | Disk usage with progress bars | Color-coded bars, POSIX df parsing |
-| **netstat-lite** | Network status | Interfaces, ports, connections, DNS |
-| **portscanner** | Scan common ports | Network probing, service names |
-| **httpcheck** | HTTP health checker | curl, response timing, status codes |
-| **logwatch** | Log file analyzer | Severity highlighting, health assessment |
-| **servicemon** | Service health monitor | System/dev/Docker/Git status checks |
-| **envdiff** | Environment inspector | PATH analysis, variable audit |
-| **filebrowser** | File browser TUI *(interactive)* | Directory navigation, j/k/arrows |
-| **dockermon** | Docker container monitor | Global variables, container/disk info |
-| **gitdash** | Git repository dashboard | Global variables, branch/commit/stash |
+### 🧮 algorithms/ (2 apps)
+| App | Description |
+|-----|-------------|
+| **sorting** | Quicksort, mergesort, bubblesort |
+| **fibonacci** | Recursive vs iterative comparison |
 
-### 📊 data-processing/
-Programs that read, transform, and output data.
+### 🌐 web/ (1 app)
+| App | Description |
+|-----|-------------|
+| **rest-api** | REST API server with SQLite + JSON |
 
-| App | Description | Features |
-|-----|-------------|----------|
-| **csv-analyzer** | Student grade statistics | CSV parsing, computed fields |
-| **log-parser** | Parse and report log errors | String parsing, structs |
-
-### 🧮 algorithms/
-Classic algorithms implemented in Wyn.
-
-| App | Description | Features |
-|-----|-------------|----------|
-| **sorting** | Quicksort, mergesort, bubblesort | Recursion, array manipulation |
-| **fibonacci** | Recursive vs iterative comparison | Performance comparison |
+### 🎨 gui/ (4 apps, require SDL2)
+| App | Description |
+|-----|-------------|
+| **hello_gui** | Colored rectangles and text |
+| **dashboard** | System monitor with widgets |
+| **pong** | Classic Pong game |
+| **notepad** | Text editor with input widget |
 
 ## Running
 
 ```bash
-# From the wyn/ directory
 cd wyn
 
-# Non-interactive tools
+# CLI and sysadmin tools
 ./wyn run ../sample-apps/sysadmin/sysinfo/main.wyn
-./wyn run ../sample-apps/sysadmin/diskmon/main.wyn
-./wyn run ../sample-apps/sysadmin/procwatch/main.wyn
-./wyn run ../sample-apps/sysadmin/gitdash/main.wyn
 ./wyn run ../sample-apps/cli-tools/loc/main.wyn
 
-# Interactive TUI apps (run in your terminal)
+# Interactive TUI apps
 ./wyn run ../sample-apps/sysadmin/sysmon/main.wyn
 ./wyn run ../sample-apps/cli-tools/twux/main.wyn
-./wyn run ../sample-apps/sysadmin/filebrowser/main.wyn
+
+# GUI apps (requires: brew install sdl2)
+./wyn run ../sample-apps/gui/pong/main.wyn
+./wyn run ../sample-apps/gui/dashboard/main.wyn
+
+# Web server
+./wyn run ../sample-apps/web/rest-api/main.wyn
 ```
-
-## Requirements
-
-- Wyn compiler (built from `wyn/` directory)
-- No external dependencies
-
-## Contributing
-
-Each app should:
-1. Compile and run without errors
-2. Demonstrate real Wyn features
-3. Be self-contained (no external dependencies)
