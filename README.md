@@ -6,44 +6,52 @@ Every app in this repo compiles and runs. If it's here, it works.
 
 ## Categories
 
-### cli-tools/
+### 🛠 cli-tools/
 Command-line utilities that solve real problems.
 
-- **loc** — Count lines of code across a project
-- **todo-finder** — Scan source files for TODO/FIXME comments
-- **word-counter** — Analyze word frequency in text files
-- **config-reader** — Parse key=value config files with error handling
-- **md-toc** — Generate table of contents from Markdown headings
-- **twux** — Terminal multiplexer with split panes *(interactive — run manually)*
+| App | Description | Features |
+|-----|-------------|----------|
+| **loc** | Count lines of code | File I/O, structs, string parsing |
+| **todo-finder** | Scan for TODO/FIXME comments | File I/O, string methods |
+| **word-counter** | Word frequency analysis | HashMap, string splitting |
+| **config-reader** | Parse key=value config files | HashMap, error handling |
+| **md-toc** | Generate Markdown TOC | String pattern detection |
+| **twux** | Terminal multiplexer *(interactive)* | Terminal TUI, panes, keyboard input |
 
-### sysadmin/
+### 🖥 sysadmin/
 Real tools for DevOps and systems administration.
 
-- **sysmon** — System monitor (htop-lite) with CPU, memory, processes, disk, network views *(interactive)*
-- **sysinfo** — System information dashboard (CPU, memory, disk, network, environment)
-- **procwatch** — Process monitor with CPU/memory sorting
-- **diskmon** — Disk usage monitor with color-coded progress bars
-- **netstat-lite** — Network status: interfaces, listening ports, active connections, DNS
-- **portscanner** — Scan common ports on a host
-- **httpcheck** — HTTP endpoint health checker with response timing
-- **logwatch** — Log file analyzer with severity highlighting and health assessment
-- **servicemon** — Service health monitor: system, dev services, Docker, Git status
-- **envdiff** — Environment variable inspector with PATH analysis
-- **filebrowser** — Interactive file browser TUI with directory navigation *(interactive)*
-- **dockermon** — Docker container monitor: overview, running/stopped, disk usage
-- **gitdash** — Git repository dashboard: branch, working tree, commits, remotes
+| App | Description | Features |
+|-----|-------------|----------|
+| **sysmon** | System monitor — htop-lite *(interactive)* | Terminal TUI, CPU/memory bars, process list |
+| **sysinfo** | System dashboard | CPU, memory (64-bit), disk, network, env |
+| **procwatch** | Process monitor | CPU/memory sorting, formatted output |
+| **diskmon** | Disk usage with progress bars | Color-coded bars, POSIX df parsing |
+| **netstat-lite** | Network status | Interfaces, ports, connections, DNS |
+| **portscanner** | Scan common ports | Network probing, service names |
+| **httpcheck** | HTTP health checker | curl, response timing, status codes |
+| **logwatch** | Log file analyzer | Severity highlighting, health assessment |
+| **servicemon** | Service health monitor | System/dev/Docker/Git status checks |
+| **envdiff** | Environment inspector | PATH analysis, variable audit |
+| **filebrowser** | File browser TUI *(interactive)* | Directory navigation, j/k/arrows |
+| **dockermon** | Docker container monitor | Global variables, container/disk info |
+| **gitdash** | Git repository dashboard | Global variables, branch/commit/stash |
 
-### data-processing/
+### 📊 data-processing/
 Programs that read, transform, and output data.
 
-- **csv-analyzer** — Read CSV data, compute statistics, output summary
-- **log-parser** — Parse log files, extract errors, generate report
+| App | Description | Features |
+|-----|-------------|----------|
+| **csv-analyzer** | Student grade statistics | CSV parsing, computed fields |
+| **log-parser** | Parse and report log errors | String parsing, structs |
 
-### algorithms/
+### 🧮 algorithms/
 Classic algorithms implemented in Wyn.
 
-- **sorting** — Quicksort, mergesort, bubblesort with benchmarks
-- **fibonacci** — Recursive and iterative with performance comparison
+| App | Description | Features |
+|-----|-------------|----------|
+| **sorting** | Quicksort, mergesort, bubblesort | Recursion, array manipulation |
+| **fibonacci** | Recursive vs iterative comparison | Performance comparison |
 
 ## Running
 
@@ -51,15 +59,17 @@ Classic algorithms implemented in Wyn.
 # From the wyn/ directory
 cd wyn
 
-# Non-interactive tools (safe for scripts)
+# Non-interactive tools
 ./wyn run ../sample-apps/sysadmin/sysinfo/main.wyn
 ./wyn run ../sample-apps/sysadmin/diskmon/main.wyn
 ./wyn run ../sample-apps/sysadmin/procwatch/main.wyn
+./wyn run ../sample-apps/sysadmin/gitdash/main.wyn
 ./wyn run ../sample-apps/cli-tools/loc/main.wyn
 
 # Interactive TUI apps (run in your terminal)
 ./wyn run ../sample-apps/sysadmin/sysmon/main.wyn
 ./wyn run ../sample-apps/cli-tools/twux/main.wyn
+./wyn run ../sample-apps/sysadmin/filebrowser/main.wyn
 ```
 
 ## Requirements
@@ -71,6 +81,5 @@ cd wyn
 
 Each app should:
 1. Compile and run without errors
-2. Have a clear purpose described in its own README
-3. Demonstrate real Wyn features (structs, methods, Result/Option, modules, etc.)
-4. Be self-contained (no external dependencies)
+2. Demonstrate real Wyn features
+3. Be self-contained (no external dependencies)
