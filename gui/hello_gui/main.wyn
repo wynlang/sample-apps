@@ -1,0 +1,51 @@
+// Simple GUI test — draws colored rectangles
+fn main() -> int {
+    var ok = Gui.create("Wyn GUI Test", 640, 480)
+    if ok < 0 {
+        println("Failed to create window")
+        return 1
+    }
+    
+    var frame = 0
+    while Gui.running() > 0 {
+        // Handle events
+        var event = Gui.poll()
+        var etype = event.split_at("|", 0)
+        if etype == "key" {
+            var key = event.split_at("|", 1).to_int()
+            if key == 27 { break }
+        }
+        
+        // Draw
+        Gui.clear(30, 30, 40)
+        
+        // Red rectangle
+        Gui.color(255, 80, 80)
+        Gui.rect(50, 50, 200, 150)
+        
+        // Green rectangle
+        Gui.color(80, 255, 80)
+        Gui.rect(300, 100, 200, 150)
+        
+        // Blue rectangle  
+        Gui.color(80, 80, 255)
+        Gui.rect(150, 250, 200, 150)
+        
+        // Animated bar
+        Gui.color(255, 255, 100)
+        var bar_x = frame % 600
+        Gui.rect(bar_x, 430, 40, 20)
+        
+        // Text
+        Gui.color(255, 255, 255)
+        Gui.text(50, 20, "WYN GUI - PRESS ESC TO QUIT", 2)
+        
+        Gui.present()
+        Gui.delay(16)
+        frame = frame + 1
+    }
+    
+    Gui.destroy()
+    println("GUI closed cleanly")
+    return 0
+}
