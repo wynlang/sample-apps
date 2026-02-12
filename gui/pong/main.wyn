@@ -1,0 +1,73 @@
+// Pong — Classic game in Wyn
+
+var py = 250
+var bx = 400
+var by = 300
+var bdx = 4
+var bdy = 3
+var ay = 250
+var sl = 0
+var sr = 0
+var sep = "|"
+
+fn main() -> int {
+    var ok = Gui.create("Wyn Pong", 800, 600)
+    if ok < 0 { return 1 }
+    
+    while Gui.running() > 0 {
+        var ev = Gui.poll()
+        var t = ev.split_at(sep, 0)
+        if t == "quit" { break }
+        if t == "key" {
+            var k = ev.split_at(sep, 1).to_int()
+            if k == 27 { break }
+        }
+        
+        // Input
+        if Gui.key_pressed(1073741906) > 0 { py = py - 6 }
+        if Gui.key_pressed(1073741905) > 0 { py = py + 6 }
+        if py < 0 { py = 0 }
+        if py > 520 { py = 520 }
+        
+        // Ball
+        bx = bx + bdx
+        by = by + bdy
+        if by < 10 { bdy = 0 - bdy }
+        if by > 580 { bdy = 0 - bdy }
+        
+        // Left paddle
+        if bx < 40 {
+            if by > py { if by < py + 80 { bdx = 0 - bdx } }
+        }
+        // Right paddle (AI)
+        if bx > 755 {
+            if by > ay { if by < ay + 80 { bdx = 0 - bdx } }
+        }
+        // AI
+        if ay + 40 < by { ay = ay + 3 }
+        if ay + 40 > by { ay = ay - 3 }
+        
+        // Score
+        if bx < 0 { sr = sr + 1  bx = 400  by = 300  bdx = 4 }
+        if bx > 800 { sl = sl + 1  bx = 400  by = 300  bdx = -4 }
+        
+        // Draw
+        Gui.clear(20, 20, 30)
+        Gui.color(60, 60, 80)
+        for i in 0..30 { Gui.rect(398, i * 20 + 5, 4, 10) }
+        Gui.color(100, 200, 255)
+        Gui.rect(20, py, 15, 80)
+        Gui.color(255, 100, 100)
+        Gui.rect(765, ay, 15, 80)
+        Gui.color(255, 255, 255)
+        Gui.rect(bx - 5, by - 5, 10, 10)
+        Gui.color(200, 200, 200)
+        Gui.text(350, 20, sl.to_string(), 3)
+        Gui.text(430, 20, sr.to_string(), 3)
+        Gui.present()
+        Gui.delay(16)
+    }
+    
+    Gui.destroy()
+    return 0
+}
