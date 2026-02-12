@@ -1,0 +1,68 @@
+// Notepad — Simple text editor GUI
+// Demonstrates: Gui text input, buttons, panels
+
+var sep = "|"
+
+fn main() -> int {
+    var ok = Gui.create("Wyn Notepad", 600, 400)
+    if ok < 0 { return 1 }
+    
+    Gui.text_input_activate(1)
+    var notes = ""
+    var line_count = 0
+    
+    while Gui.running() > 0 {
+        var ev = Gui.poll()
+        var t = ev.split_at(sep, 0)
+        if t == "quit" { break }
+        if t == "key" {
+            var k = ev.split_at(sep, 1).to_int()
+            if k == 27 { break }
+            var entered = Gui.text_input_key(k)
+            if entered > 0 {
+                var text = Gui.text_input_value()
+                notes = notes + text + "\n"
+                line_count = line_count + 1
+                Gui.text_input_clear()
+            }
+        }
+        
+        Gui.clear(30, 30, 40)
+        
+        // Title
+        Gui.color(100, 200, 255)
+        Gui.text(20, 10, "WYN NOTEPAD", 2)
+        
+        // Notes display
+        Gui.panel(20, 40, 560, 300)
+        Gui.color(200, 200, 200)
+        // Show last 15 lines
+        var display = notes
+        var y_pos = 50
+        var start = 0
+        var dlen = display.len()
+        for i in 0..dlen {
+            if display[i] == "\n" {
+                var line = display.substring(start, i)
+                Gui.text(30, y_pos, line, 1)
+                y_pos = y_pos + 12
+                start = i + 1
+                if y_pos > 320 { break }
+            }
+        }
+        
+        // Input field
+        Gui.text_input(20, 350, 560, 30)
+        
+        // Status
+        Gui.color(100, 100, 120)
+        Gui.text(20, 385, "LINES: ", 1)
+        Gui.text(70, 385, line_count.to_string(), 1)
+        
+        Gui.present()
+        Gui.delay(16)
+    }
+    
+    Gui.destroy()
+    return 0
+}
