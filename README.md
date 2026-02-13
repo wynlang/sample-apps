@@ -44,9 +44,10 @@ Real-world programs written in Wyn. Every app compiles and runs.
 | **sorting** | Quicksort, mergesort, bubblesort |
 | **fibonacci** | Recursive vs iterative comparison |
 
-### 🌐 web/ (1 app)
+### 🌐 web/ (2 apps)
 | App | Description |
 |-----|-------------|
+| **website** | Web server with HTML templating and JSON API |
 | **rest-api** | REST API server with SQLite + JSON |
 
 ### 🎨 gui/ (4 apps, require SDL2)

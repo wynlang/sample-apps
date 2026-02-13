@@ -1,0 +1,51 @@
+// Web server with HTML templating
+// Demonstrates: Http.serve, Http.accept, Http.respond, string interpolation
+
+fn template(title: string, body: string) -> string {
+    return "<!DOCTYPE html><html><head><meta charset=utf-8><title>${title}</title><style>body{font-family:system-ui;max-width:700px;margin:40px auto;padding:0 20px;color:#1a2332;background:#f4f3f3}h1{color:#4fc3f7}a{color:#5b8dd9}nav{display:flex;gap:16px;padding:12px 0;border-bottom:1px solid #ddd;margin-bottom:24px}nav a{text-decoration:none;font-weight:500}footer{margin-top:40px;padding:16px 0;border-top:1px solid #ddd;color:#999;font-size:0.85em}</style></head><body><nav><a href=/>Home</a> <a href=/about>About</a> <a href=/api/time>API</a></nav>${body}<footer>Powered by Wyn</footer></body></html>"
+}
+
+fn page_home() -> string {
+    return template("Home", "<h1>Welcome to Wyn Web</h1><p>This page is served by a Wyn program.</p><ul><li>HTML templating via string interpolation</li><li>Multiple routes</li><li>JSON API endpoint</li></ul>")
+}
+
+fn page_about() -> string {
+    var platform = Os.platform()
+    var arch = Os.arch()
+    return template("About", "<h1>About</h1><p>Wyn v1.6.0 on ${platform} ${arch}.</p><p>26 stdlib modules. Native binaries.</p><p><a href=https://wynlang.com>wynlang.com</a></p>")
+}
+
+fn handle(method: string, path: string, fd: int) {
+    if path == "/" {
+        Http.respond(fd, 200, "text/html", page_home())
+    } else if path == "/about" {
+        Http.respond(fd, 200, "text/html", page_about())
+    } else if path == "/api/time" {
+        var j = Json.new()
+        Json.set(j, "time", DateTime.to_iso(DateTime.now()))
+        Json.set(j, "platform", Os.platform())
+        var out: string = Json.stringify(j)
+        Http.respond(fd, 200, "application/json", out)
+    } else {
+        Http.respond(fd, 404, "text/html", template("404", "<h1>404</h1><p>Not found.</p>"))
+    }
+}
+
+fn main() -> int {
+    var port = 8080
+    var server = Http.serve(port)
+    var p = port.to_string()
+    println("Wyn Web running on http://localhost:${p}")
+    println("Press Ctrl+C to stop")
+
+    while 1 == 1 {
+        var req = Http.accept(server)
+        var method = req.split_at("|", 0)
+        var path = req.split_at("|", 1)
+        var fd = req.split_at("|", 3).to_int()
+        if fd > 0 {
+            handle(method, path, fd)
+        }
+    }
+    return 0
+}
