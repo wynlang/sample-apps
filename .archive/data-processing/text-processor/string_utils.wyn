@@ -1,3 +1,0 @@
-pub fn count_lines(text: string) -> int {
-    return text.lines().len();
-}

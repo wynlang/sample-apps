@@ -31,9 +31,10 @@ Real-world programs written in Wyn. Every app compiles and runs.
 | **dockermon** | Docker container monitor |
 | **gitdash** | Git repository dashboard |
 
-### 📊 data-processing/ (2 apps)
+### 📊 data-processing/ (3 apps)
 | App | Description |
 |-----|-------------|
+| **api-client** | HTTP + JSON + Base64 + Crypto + CSV + SQLite |
 | **csv-analyzer** | Student grade statistics |
 | **log-parser** | Parse and report log errors |
 
