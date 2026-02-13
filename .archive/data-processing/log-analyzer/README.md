@@ -13,13 +13,13 @@ Analyze log files with pattern detection and automatic report generation.
 
 ```bash
 # Install Wyn compiler first
-git clone https://github.com/wyn-lang/wyn.git
+git clone https://github.com/wynlang/wyn.git
 cd wyn && make
 export PATH=$PATH:$(pwd)
 
 # Clone and run
 cd ..
-git clone https://github.com/wyn-lang/sample-apps.git
+git clone https://github.com/wynlang/sample-apps.git
 cd sample-apps/log-analyzer
 
 # Compile and run
