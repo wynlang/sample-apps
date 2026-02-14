@@ -10,11 +10,11 @@ fn handle_request(method: string, path: string, body: string, fd: int) {
             var json = "{\"items\": [" + rows.replace("\n", ",").replace("|", "\",\"name\":\"").replace(",", "\"},{\"id\":\"") + "\"]}"
             // Simpler: just return pipe-separated
             Http.respond(fd, 200, "application/json", "{\"data\":\"" + rows.replace("\n", "; ").replace("\"", "'") + "\"}")
-            return 0
+            return
         }
         if path == "/api/health" {
             Http.respond(fd, 200, "application/json", "{\"status\":\"ok\"}")
-            return 0
+            return
         }
     }
     if method == "POST" {
@@ -24,7 +24,7 @@ fn handle_request(method: string, path: string, body: string, fd: int) {
             var id = Db.last_insert_id(db)
             Db.close(db)
             Http.respond(fd, 201, "application/json", "{\"id\":" + id.to_string() + "}")
-            return 0
+            return
         }
     }
     Http.respond(fd, 404, "application/json", "{\"error\":\"not found\"}")
@@ -42,7 +42,7 @@ fn main() -> int {
     var server = Http.serve(port)
     if server < 0 {
         println("Failed to start server")
-        return 1
+        return 0
     }
     println("REST API running on http://localhost:" + port.to_string())
     println("Endpoints: GET /api/health, GET /api/items, POST /api/items")
