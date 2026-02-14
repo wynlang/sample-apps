@@ -1,0 +1,158 @@
+// Wyn Web Server — full-featured HTTP server
+// Demonstrates: Http, Json, Db, File, Csv, Encoding, Crypto, DateTime, Os, System.gc()
+// Run: wyn run main.wyn
+
+fn css() -> string {
+    return "*{margin:0;padding:0;box-sizing:border-box}body{font-family:system-ui;background:#f4f3f3;color:#1a2332}header{background:#1a2332;color:#fff;padding:16px 24px}header h1{font-size:1.2em}header nav{margin-top:8px}header a{color:#4fc3f7;text-decoration:none;margin-right:16px;font-size:0.9em}main{max-width:800px;margin:24px auto;padding:0 16px}.card{background:#fff;border:1px solid #e2e6ec;border-radius:8px;padding:20px;margin-bottom:16px}h2{margin-bottom:12px}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px;border-bottom:1px solid #eee}th{color:#6b7280;font-size:0.85em}code{background:#eee;padding:2px 6px;border-radius:3px}.badge{display:inline-block;background:#4fc3f7;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.8em}footer{text-align:center;padding:24px;color:#999;font-size:0.8em}"
+}
+
+fn html(title: string, body: string) -> string {
+    var style = css()
+    return "<!DOCTYPE html><html><head><meta charset=utf-8><title>${title}</title><style>${style}</style></head><body><header><h1>Wyn Server</h1><nav><a href=/>Home</a> <a href=/status>Status</a> <a href=/users>Users</a> <a href=/api/info>API</a></nav></header><main>${body}</main><footer>Powered by Wyn v1.6.0</footer></body></html>"
+}
+
+fn page_home() -> string {
+    var platform = Os.platform()
+    var arch = Os.arch()
+    var info = "Platform: ${platform} ${arch}"
+    return html("Home", "<div class=card><h2>Welcome</h2><p>A full web server in Wyn.</p><p>${info}</p></div>")
+}
+
+fn page_status(db: int, start_time: int) -> string {
+    var now = DateTime.now()
+    var uptime_sec = now - start_time
+    var uptime_str = DateTime.format_duration(uptime_sec * 1000)
+    var user_count = Db.query_one(db, "SELECT COUNT(*) FROM users")
+    var host = Os.hostname()
+    var pid = Os.pid().to_string()
+    var iso = DateTime.to_iso(now)
+    var sb = StringBuilder.new()
+    StringBuilder.append(sb, "<div class=card><h2>Status</h2><table>")
+    StringBuilder.append(sb, "<tr><td>Uptime</td><td>")
+    StringBuilder.append(sb, uptime_str)
+    StringBuilder.append(sb, "</td></tr><tr><td>Users</td><td>")
+    StringBuilder.append(sb, user_count)
+    StringBuilder.append(sb, "</td></tr><tr><td>Host</td><td>")
+    StringBuilder.append(sb, host)
+    StringBuilder.append(sb, "</td></tr><tr><td>PID</td><td>")
+    StringBuilder.append(sb, pid)
+    StringBuilder.append(sb, "</td></tr><tr><td>Time</td><td>")
+    StringBuilder.append(sb, iso)
+    StringBuilder.append(sb, "</td></tr></table></div>")
+    var body: string = StringBuilder.to_string(sb)
+    StringBuilder.free(sb)
+    return html("Status", body)
+}
+
+fn page_users(db: int) -> string {
+    var rows = Db.query(db, "SELECT id, name, email FROM users ORDER BY id")
+    var sb = StringBuilder.new()
+    StringBuilder.append(sb, "<div class=card><h2>Users</h2><table><tr><th>ID</th><th>Name</th><th>Email</th></tr>")
+    var lines = rows.split("\n")
+    for line in lines {
+        var cols = line.split("|")
+        var count = cols.len()
+        if count >= 3 {
+            var id = cols[0]
+            var name = cols[1]
+            var email = cols[2]
+            StringBuilder.append(sb, "<tr><td>${id}</td><td>${name}</td><td>${email}</td></tr>")
+        }
+    }
+    StringBuilder.append(sb, "</table></div>")
+    StringBuilder.append(sb, "<div class=card><h2>Add User</h2><p>POST /api/users with JSON: <code>{\"name\":\"...\",\"email\":\"...\"}</code></p></div>")
+    var body: string = StringBuilder.to_string(sb)
+    StringBuilder.free(sb)
+    return html("Users", body)
+}
+
+fn api_info(db: int, start_time: int) -> string {
+    var j = Json.new()
+    Json.set(j, "server", "Wyn")
+    Json.set(j, "version", "1.6.0")
+    Json.set(j, "platform", Os.platform())
+    Json.set(j, "arch", Os.arch())
+    Json.set_int(j, "uptime", DateTime.now() - start_time)
+    Json.set_int(j, "users", Db.query_one(db, "SELECT COUNT(*) FROM users").to_int())
+    var iso_time = DateTime.to_iso(DateTime.now())
+    Json.set(j, "time", iso_time)
+    var out: string = Json.to_pretty_string(j)
+    return out
+}
+
+fn api_add_user(db: int, body: string) -> string {
+    var doc = Json.parse(body)
+    var name = Json.get(doc, "name")
+    var email = Json.get(doc, "email")
+    if name.len() == 0 {
+        return "{\"error\":\"name required\"}"
+    }
+    var safe_name = Db.escape(name)
+    var safe_email = Db.escape(email)
+    Db.exec(db, "INSERT INTO users(name, email) VALUES('${safe_name}', '${safe_email}')")
+    var id = Db.last_insert_id(db)
+    var id_str = id.to_string()
+    return "{\"id\":${id_str},\"name\":\"${name}\",\"email\":\"${email}\"}"
+}
+
+fn handle(method: string, path: string, body: string, fd: int, db: int, start_time: int) {
+    if method == "GET" {
+        if path == "/" {
+            Http.respond(fd, 200, "text/html", page_home())
+        } else if path == "/status" {
+            Http.respond(fd, 200, "text/html", page_status(db, start_time))
+        } else if path == "/users" {
+            Http.respond(fd, 200, "text/html", page_users(db))
+        } else if path == "/api/info" {
+            Http.respond(fd, 200, "application/json", api_info(db, start_time))
+        } else {
+            Http.respond(fd, 404, "text/html", html("404", "<div class=card><h2>404 Not Found</h2><p>The page <code>${path}</code> does not exist.</p></div>"))
+        }
+    } else if method == "POST" {
+        if path == "/api/users" {
+            var result = api_add_user(db, body)
+            Http.respond(fd, 201, "application/json", result)
+        } else {
+            Http.respond(fd, 405, "application/json", "{\"error\":\"method not allowed\"}")
+        }
+    } else {
+        Http.respond(fd, 405, "application/json", "{\"error\":\"method not allowed\"}")
+    }
+}
+
+fn main() -> int {
+    var port = 8080
+    var start_time = DateTime.now()
+
+    // Initialize database
+    var db = Db.open("server.db")
+    Db.exec(db, "CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, name TEXT, email TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+
+    // Seed data if empty
+    var count = Db.query_one(db, "SELECT COUNT(*) FROM users")
+    if count == "0" {
+        Db.exec(db, "INSERT INTO users(name, email) VALUES('Alice', 'alice@example.com')")
+        Db.exec(db, "INSERT INTO users(name, email) VALUES('Bob', 'bob@example.com')")
+        Db.exec(db, "INSERT INTO users(name, email) VALUES('Charlie', 'charlie@example.com')")
+        println("Seeded 3 users")
+    }
+
+    var server = Http.serve(port)
+    var p = port.to_string()
+    println("Wyn Server running on http://localhost:${p}")
+    println("Routes: / /status /users /api/info POST /api/users")
+    println("Press Ctrl+C to stop")
+
+    while 1 == 1 {
+        var req = Http.accept(server)
+        var method = req.split_at("|", 0)
+        var path = req.split_at("|", 1)
+        var body = req.split_at("|", 2)
+        var fd = req.split_at("|", 3).to_int()
+        if fd > 0 {
+            handle(method, path, body, fd, db, start_time)
+        }
+        System.gc()
+    }
+    return 0
+}
