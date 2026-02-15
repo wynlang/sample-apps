@@ -6,7 +6,7 @@ A math library written in Wyn, compiled to a shared library, and called from Pyt
 
 ```bash
 cd sample-apps/python/math-lib
-wyn run main.wyn --python
+wyn build main.wyn --python
 ```
 
 This generates:
