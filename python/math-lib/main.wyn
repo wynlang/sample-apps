@@ -1,0 +1,102 @@
+// Math library for Python — built with Wyn
+// Build: wyn run main.wyn --python
+// Use:   python3 test.py
+
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+fn subtract(a: int, b: int) -> int {
+    return a - b
+}
+
+fn multiply(a: int, b: int) -> int {
+    return a * b
+}
+
+fn divide(a: int, b: int) -> int {
+    if b == 0 { return 0 }
+    return a / b
+}
+
+fn modulo(a: int, b: int) -> int {
+    if b == 0 { return 0 }
+    return a % b
+}
+
+fn power(base: int, exp: int) -> int {
+    var result = 1
+    for i in 0..exp {
+        result = result * base
+    }
+    return result
+}
+
+fn factorial(n: int) -> int {
+    if n <= 1 { return 1 }
+    return n * factorial(n - 1)
+}
+
+fn fibonacci(n: int) -> int {
+    if n <= 1 { return n }
+    var a = 0
+    var b = 1
+    for i in 2..n + 1 {
+        var tmp = a + b
+        a = b
+        b = tmp
+    }
+    return b
+}
+
+fn calc_gcd(a: int, b: int) -> int {
+    var x = a
+    var y = b
+    if x < 0 { x = 0 - x }
+    if y < 0 { y = 0 - y }
+    while y != 0 {
+        var t = y
+        y = x % y
+        x = t
+    }
+    return x
+}
+
+fn is_prime(n: int) -> bool {
+    if n < 2 { return false }
+    if n < 4 { return true }
+    if n % 2 == 0 { return false }
+    var i = 3
+    while i * i <= n {
+        if n % i == 0 { return false }
+        i = i + 2
+    }
+    return true
+}
+
+fn calc_clamp(val: int, lo: int, hi: int) -> int {
+    if val < lo { return lo }
+    if val > hi { return hi }
+    return val
+}
+
+fn calc_abs(n: int) -> int {
+    if n < 0 { return 0 - n }
+    return n
+}
+
+fn greet(name: string) -> string {
+    return "Hello from Wyn, " + name + "!"
+}
+
+fn repeat_str(s: string, n: int) -> string {
+    var sb = StringBuilder.new()
+    for i in 0..n {
+        sb.append(s)
+    }
+    return sb.to_string()
+}
+
+fn main() -> int {
+    return 0
+}

@@ -79,3 +79,6 @@ cd wyn
 # Web server
 ./wyn run ../sample-apps/web/rest-api/main.wyn
 ```
+
+### python/
+- **math-lib/** — Math library compiled to shared library with auto-generated Python wrapper (31 tests)
