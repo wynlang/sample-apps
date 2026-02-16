@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head><title>${title}</title></head>
+<body>
+<h1>${title}</h1>
+${if:logged_in}
+<p>Welcome, ${username}!</p>
+<h2>Your Items</h2>
+<ul>
+${each:items}<li>${item}</li>
+${endeach}</ul>
+${else}
+<p>Please log in to continue.</p>
+${endif}
+</body>
+</html>

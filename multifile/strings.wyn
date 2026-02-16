@@ -1,0 +1,2 @@
+export fn shout(s: string) -> string { return s.upper() + "!" }
+export fn greet(name: string) -> string { return "Hello, " + name }
