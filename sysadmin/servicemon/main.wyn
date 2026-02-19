@@ -18,7 +18,7 @@ fn status_line(name: string, cmd: string, desc: string) -> string {
     return "  " + icon + "  " + name.pad_right(18, " ") + desc
 }
 
-fn main() -> int {
+fn main() {
     println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
     println("\x1b[1;36m║\x1b[0m          \x1b[1mservicemon\x1b[0m — Service Health Monitor                \x1b[1;36m║\x1b[0m")
     println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
@@ -85,5 +85,4 @@ fn main() -> int {
     }
 
     println("")
-    return 0
 }

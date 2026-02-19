@@ -166,7 +166,7 @@ fn draw_help_overlay(cols: int, rows: int) {
     Terminal.write("\x1b[1;37;44m└" + repeat_str("─", w - 2) + "┘\x1b[0m")
 }
 
-fn main() -> int {
+fn main() {
     var cols = Terminal.cols()
     var rows = Terminal.rows()
 
@@ -456,5 +456,4 @@ fn main() -> int {
     Terminal.restore()
     Terminal.clear()
     println("twux exited cleanly.")
-    return 0
 }

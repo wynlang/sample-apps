@@ -2,7 +2,7 @@
 // Demonstrates: System.exec, string parsing, formatted output
 // Non-interactive: prints and exits
 
-fn main() -> int {
+fn main() {
     println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
     println("\x1b[1;36m║\x1b[0m          \x1b[1mnetstat-lite\x1b[0m — Network Status Monitor               \x1b[1;36m║\x1b[0m")
     println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
@@ -113,5 +113,4 @@ fn main() -> int {
     }
 
     println("")
-    return 0
 }

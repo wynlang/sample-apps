@@ -16,7 +16,7 @@ fn update_stats() {
     disk_pct = disk_raw.to_int()
 }
 
-fn main() -> int {
+fn main() {
     var ok = Gui.create("Wyn Dashboard", 800, 500)
     if ok < 0 {
         println("Install SDL2: brew install sdl2")
@@ -67,5 +67,4 @@ fn main() -> int {
     }
     
     Gui.destroy()
-    return 0
 }

@@ -1,4 +1,4 @@
-fn main() -> int {
+fn main() {
     var ctx = HashMap.new()
     ctx.insert("title", "Template Demo")
     ctx.insert("logged_in", "true")
@@ -7,5 +7,4 @@ fn main() -> int {
     
     var html = Template.render("templates/index.html", ctx)
     println(html)
-    return 0
 }

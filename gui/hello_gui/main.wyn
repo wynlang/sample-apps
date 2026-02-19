@@ -1,5 +1,5 @@
 // Simple GUI test — draws colored rectangles
-fn main() -> int {
+fn main() {
     var ok = Gui.create("Wyn GUI Test", 640, 480)
     if ok < 0 {
         println("Failed to create window")
@@ -47,5 +47,4 @@ fn main() -> int {
     
     Gui.destroy()
     println("GUI closed cleanly")
-    return 0
 }

@@ -24,7 +24,7 @@ fn FibResult.display(self) {
     println("  fib(" + self.n.to_string() + ") = " + self.value.to_string() + " [" + self.method + "]")
 }
 
-fn main() -> int {
+fn main() {
     println("=== Fibonacci Comparison ===")
     println("")
 
@@ -53,5 +53,4 @@ fn main() -> int {
     var count = make_counter(0)
     println("  Counter starts at: " + count.to_string())
 
-    return 0
 }

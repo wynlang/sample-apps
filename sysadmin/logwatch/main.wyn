@@ -10,7 +10,7 @@ fn severity_color(level: string) -> string {
     return "\x1b[0m"
 }
 
-fn main() -> int {
+fn main() {
     println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
     println("\x1b[1;36m║\x1b[0m             \x1b[1mlogwatch\x1b[0m — Log File Analyzer                    \x1b[1;36m║\x1b[0m")
     println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
@@ -117,5 +117,4 @@ fn main() -> int {
     }
     println("")
 
-    return 0
 }

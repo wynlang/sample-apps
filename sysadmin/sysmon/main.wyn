@@ -284,7 +284,7 @@ fn draw_status(cols: int, rows: int, view: int, msg: string) {
     Terminal.write("\x1b[0m")
 }
 
-fn main() -> int {
+fn main() {
     var cols = Terminal.cols()
     var rows = Terminal.rows()
 
@@ -365,5 +365,4 @@ fn main() -> int {
     Terminal.restore()
     Terminal.clear()
     println("sysmon exited.")
-    return 0
 }

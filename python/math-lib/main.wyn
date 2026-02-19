@@ -97,6 +97,5 @@ fn repeat_str(s: string, n: int) -> string {
     return sb.to_string()
 }
 
-fn main() -> int {
-    return 0
+fn main() {
 }

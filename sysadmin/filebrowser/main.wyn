@@ -59,7 +59,7 @@ fn draw_status(cols: int, rows: int, count: int, selected: int, msg: string) {
     Terminal.write("\x1b[0m")
 }
 
-fn main() -> int {
+fn main() {
     var cols = Terminal.cols()
     var rows = Terminal.rows()
     var cwd = System.exec("pwd").trim()
@@ -176,5 +176,4 @@ fn main() -> int {
     Terminal.restore()
     Terminal.clear()
     println("filebrowser exited.")
-    return 0
 }

@@ -10,7 +10,7 @@ var sl = 0
 var sr = 0
 var sep = "|"
 
-fn main() -> int {
+fn main() {
     var ok = Gui.create("Wyn Pong", 800, 600)
     if ok < 0 { return 1 }
     
@@ -69,5 +69,4 @@ fn main() -> int {
     }
     
     Gui.destroy()
-    return 0
 }

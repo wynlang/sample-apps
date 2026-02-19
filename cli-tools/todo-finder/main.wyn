@@ -32,7 +32,7 @@ fn find_todos(filename: string) -> int {
     return found
 }
 
-fn main() -> int {
+fn main() {
     println("=== TODO Finder ===")
     println("")
 
@@ -55,5 +55,4 @@ fn main() -> int {
 
     println("")
     println("Total items found: " + total.to_string())
-    return 0
 }

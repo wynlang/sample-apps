@@ -3,7 +3,7 @@
 
 var sep = "|"
 
-fn main() -> int {
+fn main() {
     var ok = Gui.create("Wyn Notepad", 600, 400)
     if ok < 0 { return 1 }
     
@@ -64,5 +64,4 @@ fn main() -> int {
     }
     
     Gui.destroy()
-    return 0
 }

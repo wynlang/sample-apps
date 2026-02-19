@@ -1,7 +1,7 @@
 // Sorting Algorithms in Wyn
 // Demonstrates: arrays, loops, conditionals, method syntax
 
-fn main() -> int {
+fn main() {
     println("=== Sorting Algorithms ===")
 
     var data = [64, 34, 25, 12, 22, 11, 90, 1, 45, 78]
@@ -47,5 +47,4 @@ fn main() -> int {
         println("  ✗ Sort failed!")
     }
 
-    return 0
 }

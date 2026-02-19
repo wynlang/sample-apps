@@ -1,7 +1,7 @@
 // Word Counter — Count word frequency in source files
 // Demonstrates: HashMap, string methods, File.read, loops
 
-fn main() -> int {
+fn main() {
     println("=== Word Frequency Counter ===")
     println("")
 
@@ -46,5 +46,4 @@ fn main() -> int {
         }
     }
 
-    return 0
 }

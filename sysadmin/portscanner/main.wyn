@@ -29,7 +29,7 @@ fn port_name(port: int) -> string {
     return "Unknown"
 }
 
-fn main() -> int {
+fn main() {
     println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
     println("\x1b[1;36m║\x1b[0m           \x1b[1mportscanner\x1b[0m — Network Port Scanner                \x1b[1;36m║\x1b[0m")
     println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
@@ -62,5 +62,4 @@ fn main() -> int {
     println("  \x1b[90mFound " + open_count.to_string() + " open port(s) on " + host + "\x1b[0m")
     println("")
 
-    return 0
 }

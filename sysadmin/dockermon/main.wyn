@@ -21,7 +21,7 @@ fn print_section(title: string) {
     println("")
 }
 
-fn main() -> int {
+fn main() {
     println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
     println("\x1b[1;36m║\x1b[0m           \x1b[1mdockermon\x1b[0m — Docker Container Monitor               \x1b[1;36m║\x1b[0m")
     println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
@@ -112,5 +112,4 @@ fn main() -> int {
     }
 
     println("")
-    return 0
 }
