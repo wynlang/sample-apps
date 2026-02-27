@@ -1,0 +1,125 @@
+// Snake -- Terminal game written in Wyn
+// Demonstrates: Terminal TUI, game loop, Random, structs, spawn
+// Keys: wasd or arrows to move, q to quit
+
+fn main() -> int {
+    Random.seed_auto()
+    var cols = Terminal.cols()
+    var rows = Terminal.rows()
+    if cols > 40 { cols = 40 }
+    if rows > 20 { rows = 20 }
+
+    // Snake body as parallel x/y arrays
+    var sx = [20, 19, 18]
+    var sy = [10, 10, 10]
+    var slen = 3
+
+    // Direction: 0=right, 1=down, 2=left, 3=up
+    var dir = 0
+
+    // Food
+    var fx = Random.int(2, cols - 2)
+    var fy = Random.int(2, rows - 2)
+
+    var score = 0
+    var running = 1
+
+    Terminal.raw_mode()
+    Terminal.clear()
+
+    while running == 1 {
+        // Draw border
+        Terminal.move(1, 1)
+        var top = "+"
+        for i in 0..cols { top = top + "-" }
+        top += "+"
+        Terminal.write(top)
+
+        for r in 2..rows {
+            Terminal.move(r, 1)
+            Terminal.write("|")
+            Terminal.move(r, cols + 2)
+            Terminal.write("|")
+        }
+
+        Terminal.move(rows, 1)
+        Terminal.write(top)
+
+        // Draw food
+        Terminal.move(fy, fx + 1)
+        Terminal.write("\x1b[31m●\x1b[0m")
+
+        // Draw snake
+        for i in 0..slen {
+            Terminal.move(sy[i], sx[i] + 1)
+            if i == 0 {
+                Terminal.write("\x1b[32m█\x1b[0m")
+            } else {
+                Terminal.write("\x1b[32m▓\x1b[0m")
+            }
+        }
+
+        // Score
+        Terminal.move(rows + 1, 1)
+        Terminal.write("Score: "${score} + "  wasd/arrows=move q=quit")
+
+        // Input (non-blocking with short timeout)
+        var key = Terminal.read_key()
+        if key == 113 { running = 0 }
+        if key == 119 || key == 1000 { if dir != 1 { dir = 3 } }
+        if key == 115 || key == 1001 { if dir != 3 { dir = 1 } }
+        if key == 97 || key == 1003 { if dir != 0 { dir = 2 } }
+        if key == 100 || key == 1002 { if dir != 2 { dir = 0 } }
+
+        // Move: shift body
+        var i = slen - 1
+        while i > 0 {
+            sx[i] = sx[i - 1]
+            sy[i] = sy[i - 1]
+            i -= 1
+        }
+
+        // Move head
+        if dir == 0 { sx[0] = sx[0] + 1 }
+        if dir == 1 { sy[0] = sy[0] + 1 }
+        if dir == 2 { sx[0] = sx[0] - 1 }
+        if dir == 3 { sy[0] = sy[0] - 1 }
+
+        // Wall collision
+        if sx[0] < 2 || sx[0] > cols - 1 || sy[0] < 2 || sy[0] > rows - 1 {
+            running = 0
+        }
+
+        // Self collision
+        for j in 1..slen {
+            if sx[0] == sx[j] && sy[0] == sy[j] {
+                running = 0
+            }
+        }
+
+        // Eat food
+        if sx[0] == fx && sy[0] == fy {
+            score += 10
+            // Grow snake
+            sx.push(sx[slen - 1])
+            sy.push(sy[slen - 1])
+            slen += 1
+            // New food
+            fx = Random.int(2, cols - 2)
+            fy = Random.int(2, rows - 2)
+        }
+
+        // Clear old tail
+        Terminal.move(sy[slen - 1], sx[slen - 1] + 1)
+        Terminal.write(" ")
+
+        // Game speed
+        DateTime.sleep(0)
+        System.exec("sleep 0.1")
+    }
+
+    Terminal.restore()
+    Terminal.clear()
+    println("Game Over! Score: "${score})
+    return 0
+}

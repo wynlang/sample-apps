@@ -1,0 +1,132 @@
+// Hello GUI -- Interactive demo of Wyn's GUI capabilities
+// Demonstrates: drawing, buttons, mouse tracking, animation
+// Click buttons, move mouse, press Esc to quit
+
+var sep = "|"
+var click_count = 0
+var mouse_trail_x = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+var mouse_trail_y = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+var trail_idx = 0
+var hue = 0
+
+fn main() -> int {
+    var ok = Gui.create("Wyn GUI Demo", 800, 600)
+    if ok < 0 {
+        println("Install SDL2: brew install sdl2")
+        return 1
+    }
+
+    var frame = 0
+
+    while Gui.running() > 0 {
+        var ev = Gui.poll()
+        var t = ev.split_at(sep, 0)
+        if t == "quit" { break }
+        if t == "key" {
+            var k = ev.split_at(sep, 1).to_int()
+            if k == 27 { break }
+        }
+
+        var mx = Gui.mouse_x()
+        var my = Gui.mouse_y()
+        var md = Gui.mouse_down()
+
+        // Track mouse trail
+        if frame % 2 == 0 {
+            mouse_trail_x[trail_idx % 20] = mx
+            mouse_trail_y[trail_idx % 20] = my
+            trail_idx += 1
+        }
+
+        // Click detection on button area
+        if md == 1 && mx > 50 && mx < 250 && my > 500 && my < 545 {
+            click_count += 1
+        }
+
+        // Background
+        Gui.clear(25, 26, 30)
+
+        // Header
+        Gui.color(45, 46, 52)
+        Gui.rect(0, 0, 800, 50)
+        Gui.color(100, 200, 255)
+        Gui.text(20, 15, "WYN GUI DEMO", 2)
+        Gui.color(100, 100, 115)
+        Gui.text(600, 20, "ESC to quit", 1)
+
+        // Animated color wheel
+        hue = (hue + 1) % 360
+        var r1 = 128 + (hue * 3) % 128
+        var g1 = 128 + ((hue + 120) * 3) % 128
+        var b1 = 128 + ((hue + 240) * 3) % 128
+
+        // Drawing area -- animated shapes
+        Gui.color(r1, g1, b1)
+        var cx = 400 + frame % 200 - 100
+        var cy = 200
+        Gui.circle(cx, cy, 40)
+
+        // Bouncing rectangles
+        var bx = (frame * 2) % 700 + 50
+        Gui.color(255, 100, 100)
+        Gui.rect(bx, 280, 30, 30)
+        Gui.color(100, 255, 100)
+        Gui.rect(800 - bx, 320, 30, 30)
+        Gui.color(100, 100, 255)
+        Gui.rect(bx / 2 + 200, 360, 30, 30)
+
+        // Mouse trail
+        for i in 0..20 {
+            var ti = (trail_idx - i - 1 + 200) % 20
+            var alpha = 255 - i * 12
+            if alpha < 0 { alpha = 0 }
+            Gui.color(255, 200, 50)
+            var sz = 10 - i / 3
+            if sz < 2 { sz = 2 }
+            Gui.rect(mouse_trail_x[ti] - sz / 2, mouse_trail_y[ti] - sz / 2, sz, sz)
+        }
+
+        // Mouse position display
+        Gui.color(60, 60, 70)
+        Gui.rect(550, 60, 230, 80)
+        Gui.color(180, 180, 190)
+        Gui.text(565, 70, "Mouse Position", 1)
+        Gui.color(255, 200, 100)
+        Gui.text(565, 95, "X: "${mx}, 2)
+        Gui.text(565, 115, "Y: "${my}, 2)
+
+        // Click counter
+        Gui.color(60, 60, 70)
+        Gui.rect(550, 150, 230, 60)
+        Gui.color(180, 180, 190)
+        Gui.text(565, 160, "Clicks", 1)
+        Gui.color(100, 255, 150)
+        Gui.text(565, 180, click_count.to_string(), 3)
+
+        // Info panel
+        Gui.color(40, 41, 46)
+        Gui.rect(20, 400, 760, 80)
+        Gui.color(130, 130, 145)
+        Gui.text(35, 410, "This window is rendered by Wyn using SDL2.", 1)
+        Gui.text(35, 428, "Everything you see -- shapes, text, animation -- is drawn with the Gui module.", 1)
+        Gui.text(35, 446, "No HTML, no CSS, no browser. Just Wyn code compiled to a native binary.", 1)
+
+        // Button
+        Gui.color(50, 130, 200)
+        Gui.rect(50, 500, 200, 45)
+        Gui.color(255, 255, 255)
+        Gui.text(105, 515, "CLICK ME", 2)
+
+        // Frame counter
+        Gui.color(60, 60, 70)
+        Gui.text(700, 560, "Frame: "${frame}, 1)
+
+        Gui.present()
+        Gui.delay(16)
+        frame += 1
+    }
+
+    Gui.destroy()
+    println("GUI demo closed. Rendered "${frame} + " frames.")
+    return 0
+}

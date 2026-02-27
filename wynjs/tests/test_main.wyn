@@ -1,0 +1,18 @@
+// WynJS Test Runner
+fn main() -> int {
+    println("=== WynJS Test Suite ===")
+
+    // Copy test file for wynjs to read
+    System_exec("cp tests/test.js /tmp/_wynjs_input.js")
+
+    // Run wynjs
+    var output = System_exec("timeout 30 ../../wyn/wyn run src/main.wyn 2>/dev/null")
+
+    if output.contains("0 fail") {
+        println("✓ " + output.trim())
+        return 0
+    }
+    println("✗ Test failed:")
+    println(output)
+    return 1
+}

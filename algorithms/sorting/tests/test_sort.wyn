@@ -1,0 +1,19 @@
+test "array sort" {
+    var arr = [5, 3, 1, 4, 2]
+    arr.sort()
+    assert_eq(arr[0], 1)
+    assert_eq(arr[4], 5)
+}
+
+test "already sorted" {
+    var arr = [1, 2, 3]
+    arr.sort()
+    assert_eq(arr[0], 1)
+    assert_eq(arr[2], 3)
+}
+
+test "single element" {
+    var arr = [42]
+    arr.sort()
+    assert_eq(arr[0], 42)
+}

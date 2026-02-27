@@ -1,0 +1,51 @@
+// todo-finder -- Scan source files for action item comments
+// Demonstrates: spawn for concurrent file scanning, string interpolation
+
+fn find_todos(filename: string) -> int {
+    var content = File.read(filename)
+    var lines = content.split("\n")
+    var found = 0
+    var line_num = 1
+    for line in lines {
+        if line.contains("TODO") {
+            println("  ${filename}:${line_num} [TODO] ${line.trim()}")
+            found += 1
+        }
+        if line.contains("FIXME") {
+            println("  ${filename}:${line_num} [FIXME] ${line.trim()}")
+            found += 1
+        }
+        if line.contains("HACK") {
+            println("  ${filename}:${line_num} [HACK] ${line.trim()}")
+            found += 1
+        }
+        line_num += 1
+    }
+    return found
+}
+
+fn main() -> int {
+    println("=== TODO Finder ===")
+    println("")
+
+    var files = [
+        "../sample-apps/cli-tools/loc/src/main.wyn",
+        "../sample-apps/cli-tools/todo-finder/src/main.wyn",
+        "../sample-apps/cli-tools/word-counter/src/main.wyn",
+        "../sample-apps/cli-tools/config-reader/src/main.wyn",
+        "../sample-apps/cli-tools/md-toc/src/main.wyn",
+        "../sample-apps/cli-tools/twux/main.wyn"
+    ]
+    var count = files.len()
+    var total = 0
+
+    for i in 0..count {
+        if File.exists(files[i]) {
+            total += find_todos(files[i])
+        }
+    }
+
+    println("")
+    println("Total items found: ${total}")
+    return 0
+}

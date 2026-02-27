@@ -1,0 +1,89 @@
+// dockermon -- Docker container monitor dashboard
+// Demonstrates: spawn for concurrent data gathering, string interpolation, ANSI output
+// Non-interactive: prints and exits
+
+struct DockerInfo { total: int, running: int, stopped: int, images: string, volumes: string, networks: string }
+
+fn gather_docker_info(info: [DockerInfo], idx: int) {
+    var raw = System.exec("docker info --format '{{.Containers}} {{.ContainersRunning}} {{.ContainersStopped}} {{.Images}}' 2>/dev/null").trim()
+    var total = 0
+    var running = 0
+    var stopped = 0
+    if raw.len() > 0 {
+        total = raw.split_at(" ", 0).to_int()
+        running = raw.split_at(" ", 1).to_int()
+        stopped = raw.split_at(" ", 2).to_int()
+    }
+    var images = System.exec("docker images --format '{{.ID}}' 2>/dev/null | wc -l").trim()
+    var volumes = System.exec("docker volume ls -q 2>/dev/null | wc -l").trim()
+    var networks = System.exec("docker network ls -q 2>/dev/null | wc -l").trim()
+    info[idx] = DockerInfo { total: total, running: running, stopped: stopped, images: images, volumes: volumes, networks: networks }
+}
+
+fn main() -> int {
+    println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
+    println("\x1b[1;36m║\x1b[0m           \x1b[1mdockermon\x1b[0m -- Docker Container Monitor               \x1b[1;36m║\x1b[0m")
+    println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
+
+    var docker_ok = System.exec_code("docker info >/dev/null 2>&1")
+    if docker_ok != 0 {
+        println("")
+        println("  \x1b[31m✗ Docker is not running or not installed\x1b[0m")
+        println("")
+        return 1
+    }
+
+    var info = [DockerInfo { total: 0, running: 0, stopped: 0, images: "0", volumes: "0", networks: "0" }]
+    spawn gather_docker_info(info, 0)
+    Time.sleep(2000)
+
+    var d = info[0]
+    println("")
+    println("  \x1b[1;33m═══ Overview ═══\x1b[0m")
+    println("")
+    println("  Containers: ${d.total} total  \x1b[32m${d.running} running\x1b[0m  \x1b[31m${d.stopped} stopped\x1b[0m")
+    println("  Images:     ${d.images}")
+    println("  Volumes:    ${d.volumes}")
+    println("  Networks:   ${d.networks}")
+
+    println("")
+    println("  \x1b[1;33m═══ Running Containers ═══\x1b[0m")
+    println("")
+    var ps = System.exec("docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null")
+    if ps.len() > 0 {
+        var line_start = 0
+        var plen = ps.len()
+        var line_num = 0
+        for idx in 0..plen {
+            if ps[idx] == "\n" {
+                var line = ps.substring(line_start, idx).trim()
+                line_start = idx + 1
+                line_num += 1
+                if line.len() == 0 { continue }
+                if line_num == 1 { println("  \x1b[1;37m${line}\x1b[0m") }
+                else { println("  \x1b[32m●\x1b[0m ${line}") }
+            }
+        }
+    } else {
+        println("  \x1b[90mNo running containers\x1b[0m")
+    }
+
+    if d.stopped > 0 {
+        println("")
+        println("  \x1b[1;33m═══ Stopped Containers ═══\x1b[0m")
+        println("")
+        var stopped = System.exec("docker ps -f status=exited --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null | head -10")
+        var line_start = 0
+        var slen = stopped.len()
+        for idx in 0..slen {
+            if stopped[idx] == "\n" {
+                var line = stopped.substring(line_start, idx).trim()
+                line_start = idx + 1
+                if line.len() > 0 { println("  \x1b[31m●\x1b[0m ${line}") }
+            }
+        }
+    }
+
+    println("")
+    return 0
+}

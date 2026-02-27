@@ -1,0 +1,28 @@
+test "hashmap CRUD" {
+    var items = HashMap.new()
+    items.set("1", "{\"id\":1,\"name\":\"test\"}")
+    assert(items.has("1"))
+    assert_eq(items.len(), 1)
+
+    items.set("2", "{\"id\":2,\"name\":\"other\"}")
+    assert_eq(items.len(), 2)
+
+    items.remove("1")
+    assert_eq(items.len(), 1)
+    assert_eq(items.has("1"), 0)
+}
+
+test "string interpolation for JSON" {
+    var id = 1
+    var name = "test"
+    var json = "{\"id\":${id},\"name\":\"${name}\"}"
+    assert(json.contains("\"id\":1"))
+    assert(json.contains("\"name\":\"test\""))
+}
+
+test "path parsing" {
+    var path = "/api/items/42"
+    assert(path.starts_with("/api/items/"))
+    var id = path.substring(11, path.len())
+    assert_eq(id, "42")
+}

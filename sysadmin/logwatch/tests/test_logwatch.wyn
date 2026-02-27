@@ -1,0 +1,38 @@
+enum Level { LvError, LvWarn, LvInfo, LvDebug }
+
+fn detect_level(line: string) -> Level {
+    if line.contains("ERROR") { return Level.LvError }
+    if line.contains("WARN") { return Level.LvWarn }
+    if line.contains("DEBUG") { return Level.LvDebug }
+    return Level.LvInfo
+}
+
+test "detect error" {
+    var lv = detect_level("[08:04:22] ERROR Out of memory")
+    match lv {
+        LvError => assert(1 == 1)
+        LvWarn => assert(1 == 0)
+        LvInfo => assert(1 == 0)
+        LvDebug => assert(1 == 0)
+    }
+}
+
+test "detect info" {
+    var lv = detect_level("[08:00:01] INFO Server started")
+    match lv {
+        LvInfo => assert(1 == 1)
+        LvError => assert(1 == 0)
+        LvWarn => assert(1 == 0)
+        LvDebug => assert(1 == 0)
+    }
+}
+
+test "detect warn" {
+    var lv = detect_level("[08:02:34] WARN Retrying connection")
+    match lv {
+        LvWarn => assert(1 == 1)
+        LvError => assert(1 == 0)
+        LvInfo => assert(1 == 0)
+        LvDebug => assert(1 == 0)
+    }
+}

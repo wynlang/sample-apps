@@ -1,0 +1,2700 @@
+// WynJS — A JavaScript runtime written in Wyn
+// Lexer + recursive descent parser + tree-walk interpreter
+// Supports: ES6 classes, arrow functions, closures, destructuring,
+// async/await, promises, modules, Map/Set, RegExp, and more.
+
+// === Token type constants ===
+const T_NUM = 1
+const T_STR = 2
+const T_ID = 3
+const T_KW = 4
+const T_PLUS = 10
+const T_MINUS = 11
+const T_STAR = 12
+const T_SLASH = 13
+const T_PCT = 14
+const T_EQ = 15
+const T_BANG = 16
+const T_LT = 17
+const T_GT = 18
+const T_AMP = 19
+const T_OR = 20
+const T_EQEQ = 21
+const T_NEQ = 22
+const T_LTE = 23
+const T_GTE = 24
+const T_AND = 25
+const T_OROR = 26
+const T_AMPAMP = 27
+const T_PIPE = 28
+const T_QQ = 29
+const T_LPAREN = 30
+const T_RPAREN = 31
+const T_LBRACE = 32
+const T_RBRACE = 33
+const T_LBRACK = 34
+const T_RBRACK = 35
+const T_COMMA = 36
+const T_SEMI = 37
+const T_DOT = 38
+const T_COLON = 39
+const T_ARROW = 40
+const T_INC = 41
+const T_PLUSEQ = 42
+const T_DEC = 43
+const T_MINUSEQ = 44
+const T_POW = 45
+const T_MULEQ = 46
+const T_DIVEQ = 47
+const T_MODEQ = 48
+const T_EQEQEQ = 49
+const T_NEQEQ = 50
+const T_FUNCTION = 53
+const T_TYPEOF = 90
+const T_QDOT = 96
+const T_TERNARY = 97
+const T_SPREAD = 98
+const T_IN = 93
+const T_OF = 94
+const T_QQEQ = 100
+const T_OREQ = 101
+const T_ANDEQ = 102
+
+// === Globals ===
+var src = ""
+var pos = 0
+var tt = 0
+var tv = ""
+var DIGITS = "0123456789"
+var ALPHA = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$"
+
+// === Value encoding: "TAG:data" ===
+// n=number s=string b=bool N=null u=undefined f=func a=array o=object
+fn vtag(v: string) -> string { return v.substring(0, 1) }
+fn vdata(v: string) -> string { if v.len() < 3 { return "" } return v.substring(2, v.len()) }
+fn vnum(n: int) -> string { return "n:" + n.to_string() }
+fn vfloat(f: float) -> string { return "n:" + f.to_string() }
+fn vstr(s: string) -> string { return "s:" + s }
+fn vbool(b: int) -> string { if b == 1 { return "b:true" } return "b:false" }
+fn vnull() -> string { return "N:" }
+fn vundef() -> string { return "u:" }
+fn vfn(id: int) -> string { return "f:" + id.to_string() }
+fn varr(id: int) -> string { return "a:" + id.to_string() }
+fn vobj(id: int) -> string { return "o:" + id.to_string() }
+
+fn vtostr(v: string) -> string {
+    var t = vtag(v)
+    if t == "s" { return vdata(v) }
+    if t == "n" {
+        var d = vdata(v)
+        // Strip trailing .0 for display
+        if d.ends_with(".0") { return d.substring(0, d.len() - 2) }
+        return d
+    }
+    if t == "b" { return vdata(v) }
+    if t == "N" { return "null" }
+    if t == "u" { return "undefined" }
+    if t == "a" { return "[array]" }
+    if t == "o" { return "[object Object]" }
+    return v
+}
+
+fn vtonum(v: string) -> int {
+    var t = vtag(v)
+    if t == "n" {
+        var d = vdata(v)
+        if d.contains(".") { return d.to_int() }
+        return d.to_int()
+    }
+    if t == "b" { if vdata(v) == "true" { return 1 } return 0 }
+    if t == "s" {
+        var d = vdata(v)
+        if d.len() == 0 { return 0 }
+        return d.to_int()
+    }
+    return 0
+}
+
+fn vtofloat(v: string) -> float {
+    var t = vtag(v)
+    if t == "n" { return vdata(v).to_float() }
+    if t == "b" { if vdata(v) == "true" { return 1.0 } return 0.0 }
+    if t == "s" { var d = vdata(v).trim(); if d.len() > 0 { return d.to_float() }; return 0.0 }
+    return 0.0
+}
+
+fn vtruthy(v: string) -> int {
+    var t = vtag(v)
+    if t == "b" { if vdata(v) == "true" { return 1 } return 0 }
+    if t == "n" { var d = vdata(v); if d == "0" || d == "0.0" || d == "NaN" { return 0 } return 1 }
+    if t == "s" { if vdata(v).len() > 0 { return 1 } return 0 }
+    if t == "N" { return 0 }
+    if t == "u" { return 0 }
+    return 1
+}
+
+fn vis_num_str(v: string) -> int {
+    var d = vdata(v)
+    if d.len() == 0 { return 0 }
+    var i = 0
+    if d.substring(0, 1) == "-" { i = 1 }
+    var has_dot = 0
+    while i < d.len() {
+        var c = d.substring(i, i + 1)
+        if c == "." { if has_dot == 1 { return 0 } has_dot = 1 }
+        elseif !DIGITS.contains(c) { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+// === Environment ===
+var ekeys = [""]
+var evals = [""]
+var ecnt: int = 0
+var smarks = [0]
+var sdepth: int = 0
+
+fn epush() { smarks[sdepth] = ecnt; sdepth = sdepth + 1 }
+fn epop() { sdepth = sdepth - 1; ecnt = smarks[sdepth] }
+
+fn edef(name: string, val: string) {
+    ekeys[ecnt] = name
+    evals[ecnt] = val
+    ecnt = ecnt + 1
+}
+
+fn eset(name: string, val: string) {
+    for j in 0..ecnt {
+        var i = ecnt - 1 - j
+        if ekeys[i] == name { evals[i] = val; return }
+    }
+    edef(name, val)
+}
+
+fn eget(name: string) -> string {
+    for j in 0..ecnt {
+        var i = ecnt - 1 - j
+        if ekeys[i] == name { return evals[i] }
+    }
+    return vundef()
+}
+
+// === Function storage ===
+var fbodies = [""]
+var fparams = [""]
+var fthis = [""]
+var fcap_keys = [""]
+var fcap_vals = [""]
+var fcnt = 0
+
+fn capture_env() -> string {
+    var result = ""
+    var i = 0
+    while i < ecnt {
+        if ekeys[i].len() > 0 && ekeys[i] != "this" && ekeys[i] != "arguments" {
+            if result.len() > 0 { result = result + "\x02" }
+            result = result + ekeys[i] + "\x01" + evals[i]
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn restore_captures(fid: int) {
+    var cap_k = fcap_keys[fid]
+    var cap_v = fcap_vals[fid]
+    if cap_k.len() == 0 { return }
+    var keys = cap_k.split("\x02")
+    var vals = cap_v.split("\x02")
+    var i = 0
+    while i < keys.len() {
+        if i < vals.len() { edef(keys[i], vals[i]) }
+        i = i + 1
+    }
+}
+
+fn save_captures(fid: int) {
+    var cap_k = fcap_keys[fid]
+    if cap_k.len() == 0 { return }
+    var keys = cap_k.split("\x02")
+    var new_vals = ""
+    var i = 0
+    while i < keys.len() {
+        if i > 0 { new_vals = new_vals + "\x02" }
+        new_vals = new_vals + eget(keys[i])
+        i = i + 1
+    }
+    fcap_vals[fid] = new_vals
+}
+
+// === Array storage ===
+var astore = [""]
+var alens = [0]
+var abases = [0]
+var acnt = 0
+var anext = 0
+
+fn anew() -> int { var id = acnt; abases[id] = anext; alens[id] = 0; acnt = acnt + 1; return id }
+fn apush(id: int, v: string) { var s = abases[id] + alens[id]; astore[s] = v; alens[id] = alens[id] + 1; anext = s + 1 }
+fn aget(id: int, i: int) -> string { if i < 0 { return vundef() } if i >= alens[id] { return vundef() } return astore[abases[id] + i] }
+fn aset(id: int, i: int, v: string) { if i >= 0 && i < alens[id] { astore[abases[id] + i] = v } }
+
+fn acopy(id: int) -> int {
+    var nid = anew()
+    var i = 0
+    while i < alens[id] { apush(nid, aget(id, i)); i = i + 1 }
+    return nid
+}
+
+fn vtostr_full(v: string) -> string {
+    var t = vtag(v)
+    if t == "a" {
+        var id = vdata(v).to_int()
+        var r = ""
+        var i = 0
+        while i < alens[id] {
+            if i > 0 { r = r + "," }
+            r = r + vtostr_full(aget(id, i))
+            i = i + 1
+        }
+        return r
+    }
+    if t == "o" {
+        var id = vdata(v).to_int()
+        return "[object Object]"
+    }
+    return vtostr(v)
+}
+
+// === Object storage (HashMap-based) ===
+var omaps = [HashMap.new()]
+var oprotos = [-1]
+var ocnt = 0
+
+fn onew() -> int {
+    var id = ocnt
+    var m = HashMap.new()
+    omaps.push(m)
+    oprotos.push(-1)
+    ocnt = ocnt + 1
+    return id
+}
+
+fn oset(id: int, k: string, v: string) {
+    var m = omaps[id]
+    m.set(k, v)
+}
+
+fn oget(id: int, k: string) -> string {
+    var cur = id
+    while cur >= 0 {
+        var m = omaps[cur]
+        if m.has(k) { return m.get(k) }
+        cur = oprotos[cur]
+    }
+    return vundef()
+}
+
+fn ohas(id: int, k: string) -> int {
+    var m = omaps[id]
+    if m.has(k) { return 1 }
+    return 0
+}
+
+fn okeys_arr(id: int) -> int {
+    var aid = anew()
+    var m = omaps[id]
+    var ks = m.keys()
+    for k in ks {
+        if !k.starts_with("__") { apush(aid, vstr(k)) }
+    }
+    return aid
+}
+
+// === Class storage ===
+var cnames = [""]
+var cprotos = [0]
+var cconstructors = [-1]
+var cparents = [-1]
+var ccnt = 0
+
+// === this stack ===
+var this_stack = [""]
+var this_depth = 0
+fn this_push(v: string) { this_stack[this_depth] = v; this_depth = this_depth + 1 }
+fn this_pop() { this_depth = this_depth - 1 }
+fn this_cur() -> string { if this_depth > 0 { return this_stack[this_depth - 1] } return vundef() }
+
+// === Return/break/continue/throw flags ===
+var retval = ""
+var retflag = 0
+var brkflag = 0
+var contflag = 0
+var throwval = ""
+var throwflag = 0
+
+// === Module cache ===
+var mod_paths = [""]
+var mod_exports = [""]
+var mod_cnt = 0
+
+// === Builtin registry ===
+var bnames = [""]
+var bcnt = 0
+
+fn init_env() {
+    ekeys = []; evals = []
+    for i in 0..4096 { ekeys.push(""); evals.push("") }
+    smarks = []
+    for i in 0..256 { smarks.push(0) }
+    fbodies = []; fparams = []; fthis = []; fcap_keys = []; fcap_vals = []
+    for i in 0..1024 { fbodies.push(""); fparams.push(""); fthis.push(""); fcap_keys.push(""); fcap_vals.push("") }
+    astore = []
+    for i in 0..8192 { astore.push("") }
+    alens = []; abases = []
+    for i in 0..1024 { alens.push(0); abases.push(0) }
+    omaps = [HashMap.new()]; oprotos = []
+    for i in 0..1024 { oprotos.push(-1) }
+    cnames = []; cprotos = []; cconstructors = []; cparents = []
+    for i in 0..128 { cnames.push(""); cprotos.push(0); cconstructors.push(-1); cparents.push(-1) }
+    this_stack = []
+    for i in 0..128 { this_stack.push("") }
+    mod_paths = []; mod_exports = []
+    for i in 0..64 { mod_paths.push(""); mod_exports.push("") }
+    bnames = []
+    for i in 0..256 { bnames.push("") }
+}
+
+// === Lexer ===
+fn ch() -> string { if pos >= src.len() { return "" } return src.substring(pos, pos + 1) }
+fn adv() -> string { var c = ch(); pos = pos + 1; return c }
+fn peek2() -> string { if pos + 1 >= src.len() { return "" } return src.substring(pos + 1, pos + 2) }
+
+fn skipws() {
+    while pos < src.len() {
+        var c = ch()
+        if c == " " || c == "\t" || c == "\r" || c == "\n" { pos = pos + 1 }
+        elseif c == "/" {
+            var n = peek2()
+            if n == "/" { pos = pos + 2; while pos < src.len() { if ch() == "\n" { pos = pos + 1; break } pos = pos + 1 } }
+            elseif n == "*" { pos = pos + 2; while pos < src.len() { if ch() == "*" && peek2() == "/" { pos = pos + 2; break } pos = pos + 1 } }
+            else { return }
+        } else { return }
+    }
+}
+
+fn next() {
+    skipws()
+    if pos >= src.len() { tt = 0; tv = ""; return }
+    var c = ch()
+    // Numbers
+    if DIGITS.contains(c) {
+        var n = ""
+        while pos < src.len() { c = ch(); if DIGITS.contains(c) || c == "." { n = n + c; pos = pos + 1 } else { break } }
+        tt = 1; tv = n; return
+    }
+    // Strings
+    if c == "\"" { pos = pos + 1; var s = ""; while pos < src.len() { c = ch(); if c == "\"" { pos = pos + 1; break } elseif c == "\\" { pos = pos + 1; var e = adv(); if e == "n" { s = s + "\n" } elseif e == "t" { s = s + "\t" } elseif e == "r" { s = s + "\r" } elseif e == "\\" { s = s + "\\" } elseif e == "\"" { s = s + "\"" } elseif e == "'" { s = s + "'" } else { s = s + e } } else { s = s + c; pos = pos + 1 } } tt = 2; tv = s; return }
+    if c == "'" { pos = pos + 1; var s = ""; while pos < src.len() { c = ch(); if c == "'" { pos = pos + 1; break } elseif c == "\\" { pos = pos + 1; var e = adv(); if e == "n" { s = s + "\n" } elseif e == "t" { s = s + "\t" } elseif e == "'" { s = s + "'" } elseif e == "\\" { s = s + "\\" } else { s = s + e } } else { s = s + c; pos = pos + 1 } } tt = 2; tv = s; return }
+    // Template literal
+    if c == "`" { pos = pos + 1; var s = ""; while pos < src.len() { c = ch(); if c == "`" { pos = pos + 1; break } elseif c == "\\" { pos = pos + 1; var e = adv(); if e == "n" { s = s + "\n" } else { s = s + e } } elseif c == "$" { if peek2() == "{" { pos = pos + 2; tt = 61; tv = s; return } s = s + c; pos = pos + 1 } else { s = s + c; pos = pos + 1 } } tt = 2; tv = s; return }
+    // Identifiers / keywords
+    if ALPHA.contains(c) {
+        var id = ""
+        while pos < src.len() { c = ch(); if ALPHA.contains(c) || DIGITS.contains(c) { id = id + c; pos = pos + 1 } else { break } }
+        if id == "let" { tt = 50 } elseif id == "const" { tt = 51 } elseif id == "var" { tt = 52 }
+        elseif id == "function" { tt = 53 } elseif id == "return" { tt = 54 }
+        elseif id == "if" { tt = 55 } elseif id == "else" { tt = 56 }
+        elseif id == "while" { tt = 57 } elseif id == "for" { tt = 58 }
+        elseif id == "break" { tt = 59 } elseif id == "continue" { tt = 60 }
+        elseif id == "class" { tt = 70 } elseif id == "new" { tt = 71 }
+        elseif id == "this" { tt = 72 } elseif id == "extends" { tt = 73 }
+        elseif id == "super" { tt = 74 } elseif id == "static" { tt = 75 }
+        elseif id == "typeof" { tt = 76 } elseif id == "instanceof" { tt = 77 }
+        elseif id == "switch" { tt = 78 } elseif id == "case" { tt = 79 }
+        elseif id == "default" { tt = 80 } elseif id == "do" { tt = 81 }
+        elseif id == "throw" { tt = 82 } elseif id == "try" { tt = 83 }
+        elseif id == "catch" { tt = 84 } elseif id == "finally" { tt = 85 }
+        elseif id == "import" { tt = 86 } elseif id == "export" { tt = 87 }
+        elseif id == "from" { tt = 88 } elseif id == "async" { tt = 89 }
+        elseif id == "await" { tt = 90 } elseif id == "yield" { tt = 91 }
+        elseif id == "delete" { tt = 92 } elseif id == "in" { tt = 93 }
+        elseif id == "of" { tt = 94 } elseif id == "void" { tt = 95 }
+        elseif id == "true" { tt = 4; tv = "true"; return }
+        elseif id == "false" { tt = 4; tv = "false"; return }
+        elseif id == "null" { tt = 5; tv = "null"; return }
+        elseif id == "undefined" { tt = 6; tv = "undefined"; return }
+        else { tt = 3 }
+        tv = id; return
+    }
+    // Operators
+    pos = pos + 1
+    if c == "+" { if ch() == "+" { pos = pos + 1; tt = 41; tv = "++"; return } if ch() == "=" { pos = pos + 1; tt = 42; tv = "+="; return } tt = 10; tv = "+"; return }
+    if c == "-" { if ch() == "-" { pos = pos + 1; tt = 43; tv = "--"; return } if ch() == "=" { pos = pos + 1; tt = 44; tv = "-="; return } if ch() == ">" { pos = pos + 1; tt = 40; tv = "=>"; return } tt = 11; tv = "-"; return }
+    if c == "*" { if ch() == "*" { pos = pos + 1; tt = 45; tv = "**"; return } if ch() == "=" { pos = pos + 1; tt = 46; tv = "*="; return } tt = 12; tv = "*"; return }
+    if c == "/" { if ch() == "=" { pos = pos + 1; tt = 47; tv = "/="; return } tt = 13; tv = "/"; return }
+    if c == "%" { if ch() == "=" { pos = pos + 1; tt = 48; tv = "%="; return } tt = 14; tv = "%"; return }
+    if c == "=" { if ch() == "=" { pos = pos + 1; if ch() == "=" { pos = pos + 1; tt = 17; tv = "==="; return } tt = 16; tv = "=="; return } if ch() == ">" { pos = pos + 1; tt = 40; tv = "=>"; return } tt = 15; tv = "="; return }
+    if c == "!" { if ch() == "=" { pos = pos + 1; if ch() == "=" { pos = pos + 1; tt = 19; tv = "!=="; return } tt = 18; tv = "!="; return } tt = 24; tv = "!"; return }
+    if c == "<" { if ch() == "=" { pos = pos + 1; tt = 22; tv = "<="; return } tt = 20; tv = "<"; return }
+    if c == ">" { if ch() == "=" { pos = pos + 1; tt = 23; tv = ">="; return } tt = 21; tv = ">"; return }
+    if c == "&" { if ch() == "&" { pos = pos + 1; if ch() == "=" { pos = pos + 1; tt = 102; tv = "&&="; return }; tt = 25; tv = "&&"; return } tt = 27; tv = "&"; return }
+    if c == "|" { if ch() == "|" { pos = pos + 1; if ch() == "=" { pos = pos + 1; tt = 101; tv = "||="; return }; tt = 26; tv = "||"; return } tt = 28; tv = "|"; return }
+    if c == "?" { if ch() == "?" { pos = pos + 1; if ch() == "=" { pos = pos + 1; tt = 100; tv = "??="; return }; tt = 29; tv = "??"; return } if ch() == "." { pos = pos + 1; tt = 96; tv = "?."; return } tt = 97; tv = "?"; return }
+    if c == "(" { tt = 30; tv = "("; return }
+    if c == ")" { tt = 31; tv = ")"; return }
+    if c == "{" { tt = 32; tv = "{"; return }
+    if c == "}" { tt = 33; tv = "}"; return }
+    if c == "[" { tt = 34; tv = "["; return }
+    if c == "]" { tt = 35; tv = "]"; return }
+    if c == "," { tt = 36; tv = ","; return }
+    if c == ";" { tt = 37; tv = ";"; return }
+    if c == "." { if ch() == "." { pos = pos + 1; if ch() == "." { pos = pos + 1; tt = 98; tv = "..."; return } } tt = 38; tv = "."; return }
+    if c == ":" { tt = 39; tv = ":"; return }
+    if c == "~" { tt = 99; tv = "~"; return }
+    tt = 0; tv = ""
+}
+
+fn eat(t: int) { next() }
+
+// === Parser/Interpreter — expressions ===
+fn p_expr() -> string { return p_ternary() }
+
+fn p_ternary() -> string {
+    var left = p_nullish()
+    if tt == 97 {
+        next(); var then_val = p_ternary()
+        if tt == 39 { next() }
+        var else_val = p_ternary()
+        if vtruthy(left) == 1 { return then_val }
+        return else_val
+    }
+    return left
+}
+
+fn p_nullish() -> string {
+    var left = p_or()
+    while tt == 29 {
+        next(); var right = p_or()
+        var t = vtag(left)
+        if t == "N" || t == "u" { left = right }
+    }
+    return left
+}
+
+fn p_or() -> string {
+    var left = p_and()
+    while tt == 26 { next(); var right = p_and(); if vtruthy(left) == 1 { left = left } else { left = right } }
+    return left
+}
+
+fn p_and() -> string {
+    var left = p_eq()
+    while tt == 25 { next(); var right = p_eq(); if vtruthy(left) == 0 { left = left } else { left = right } }
+    return left
+}
+
+fn p_eq() -> string {
+    var left = p_cmp()
+    while tt == 16 || tt == 17 || tt == 18 || tt == 19 {
+        var op = tt; next(); var right = p_cmp()
+        if op == 16 || op == 17 {
+            if vtag(left) == vtag(right) && vtostr(left) == vtostr(right) { left = vbool(1) } else { left = vbool(0) }
+        } else {
+            if vtag(left) == vtag(right) && vtostr(left) == vtostr(right) { left = vbool(0) } else { left = vbool(1) }
+        }
+    }
+    return left
+}
+
+fn p_cmp() -> string {
+    var left = p_add()
+    if tt == 77 {
+        next(); var right = p_add()
+        if vtag(left) == "o" && vtag(right) == "o" {
+            var cls_name = vtostr(right)
+            var oid = vdata(left).to_int()
+            var proto_tag = oget(oid, "__class__")
+            if vtostr(proto_tag) == cls_name { return vbool(1) }
+        }
+        return vbool(0)
+    }
+    while tt == 20 || tt == 21 || tt == 22 || tt == 23 || tt == 93 {
+        var op = tt; next(); var right = p_add()
+        if op == 93 {
+            if vtag(right) == "o" { left = vbool(ohas(vdata(right).to_int(), vtostr(left))); continue }
+            left = vbool(0); continue
+        }
+        // String comparison
+        if vtag(left) == "s" && vtag(right) == "s" {
+            var ls = vdata(left); var rs = vdata(right)
+            if op == 20 { left = vbool(if ls < rs { 1 } else { 0 }) }
+            elseif op == 21 { left = vbool(if ls > rs { 1 } else { 0 }) }
+            elseif op == 22 { left = vbool(if ls <= rs { 1 } else { 0 }) }
+            else { left = vbool(if ls >= rs { 1 } else { 0 }) }
+            continue
+        }
+        var ln = vtofloat(left); var rn = vtofloat(right)
+        if op == 20 { if ln < rn { left = vbool(1) } else { left = vbool(0) } }
+        elseif op == 21 { if ln > rn { left = vbool(1) } else { left = vbool(0) } }
+        elseif op == 22 { if ln <= rn { left = vbool(1) } else { left = vbool(0) } }
+        else { if ln >= rn { left = vbool(1) } else { left = vbool(0) } }
+    }
+    return left
+}
+
+fn p_add() -> string {
+    var left = p_mul()
+    while tt == 10 || tt == 11 {
+        var op = tt; next(); var right = p_mul()
+        if op == 10 {
+            if vtag(left) == "s" || vtag(right) == "s" { left = vstr(vtostr(left) + vtostr(right)) }
+            else { left = vfloat(vtofloat(left) + vtofloat(right)) }
+        } else { left = vfloat(vtofloat(left) - vtofloat(right)) }
+    }
+    return left
+}
+
+fn p_mul() -> string {
+    var left = p_power()
+    while tt == 12 || tt == 13 || tt == 14 {
+        var op = tt; next(); var right = p_power()
+        if op == 12 { left = vfloat(vtofloat(left) * vtofloat(right)) }
+        elseif op == 13 { var d = vtofloat(right); if d != 0.0 { left = vfloat(vtofloat(left) / d) } else { left = vstr("Infinity") } }
+        else { left = vnum(vtonum(left) % vtonum(right)) }
+    }
+    return left
+}
+
+fn p_power() -> string {
+    var left = p_unary()
+    if tt == 45 { next(); var right = p_power(); left = vfloat(Math.pow(vtofloat(left), vtofloat(right))) }
+    return left
+}
+
+fn p_unary() -> string {
+    if tt == 11 { next(); return vfloat(0.0 - vtofloat(p_unary())) }
+    if tt == 24 { next(); if vtruthy(p_unary()) == 1 { return vbool(0) } return vbool(1) }
+    if tt == 76 {
+        next(); var val = p_unary()
+        var t = vtag(val)
+        if t == "n" { return vstr("number") }
+        if t == "s" { return vstr("string") }
+        if t == "b" { return vstr("boolean") }
+        if t == "f" { return vstr("function") }
+        if t == "u" { return vstr("undefined") }
+        if t == "N" { return vstr("object") }
+        if t == "a" { return vstr("object") }
+        if t == "y" { return vstr("symbol") }
+        if t == "o" { return vstr("object") }
+        return vstr("undefined")
+    }
+    if tt == 95 { next(); p_unary(); return vundef() }
+    if tt == 92 {
+        next()
+        if tt == 3 { var name = tv; next(); eset(name, vundef()); return vbool(1) }
+        return vbool(1)
+    }
+    if tt == 90 { next(); return p_unary() }
+    if tt == 98 {
+        next(); var val = p_unary()
+        if vtag(val) == "a" { return val }
+        return val
+    }
+    return p_post()
+}
+
+// === Postfix: member access, calls, indexing ===
+fn p_post() -> string {
+    var left = p_primary()
+    while tt == 38 || tt == 96 || tt == 34 || tt == 30 || tt == 41 || tt == 43 {
+        // ++ / --
+        if tt == 41 { next(); if vtag(left) == "n" { return left } return left }
+        if tt == 43 { next(); return left }
+        // optional chaining ?.
+        if tt == 96 {
+            next()
+            if vtag(left) == "N" || vtag(left) == "u" { skip_chain(); left = vundef(); continue }
+            var prop = tv; next()
+            left = do_member(left, prop)
+            continue
+        }
+        // dot access
+        if tt == 38 {
+            next(); var prop = tv; next()
+            // Property assignment: obj.prop = expr
+            if tt == 15 {
+                next(); var val = p_expr()
+                if vtag(left) == "o" { oset(vdata(left).to_int(), prop, val) }
+                elseif vtag(left) == "s" { static_set(vdata(left), prop, val) }
+                left = val; continue
+            }
+            // Compound property assignment: obj.prop += expr
+            if tt == 42 || tt == 44 || tt == 46 {
+                var aop = tt; next(); var rhs = p_expr()
+                if vtag(left) == "o" {
+                    var oid = vdata(left).to_int()
+                    var cur = oget(oid, prop)
+                    var val = vundef()
+                    if aop == 42 { val = vfloat(vtofloat(cur) + vtofloat(rhs)) }
+                    elseif aop == 44 { val = vfloat(vtofloat(cur) - vtofloat(rhs)) }
+                    else { val = vfloat(vtofloat(cur) * vtofloat(rhs)) }
+                    oset(oid, prop, val)
+                    left = val
+                }
+                continue
+            }
+            // ++ on property
+            if tt == 41 { next(); left = do_prop_inc(left, prop); continue }
+            left = do_member(left, prop)
+            continue
+        }
+        // bracket access
+        if tt == 34 {
+            next(); var idx = p_expr(); if tt == 35 { next() }
+            // Bracket assignment: obj[key] = expr
+            if tt == 15 {
+                next(); var val = p_expr()
+                if vtag(left) == "o" { oset(vdata(left).to_int(), vtostr(idx), val) }
+                elseif vtag(left) == "a" { aset(vdata(left).to_int(), vtonum(idx), val) }
+                left = val; continue
+            }
+            if vtag(left) == "a" { left = aget(vdata(left).to_int(), vtonum(idx)) }
+            elseif vtag(left) == "s" {
+                var si = vtonum(idx)
+                var sd = vdata(left)
+                if si >= 0 && si < sd.len() { left = vstr(sd.substring(si, si + 1)) } else { left = vundef() }
+            }
+            elseif vtag(left) == "o" { left = oget(vdata(left).to_int(), vtostr(idx)) }
+            else { left = vundef() }
+            continue
+        }
+        // function call
+        if tt == 30 {
+            next()
+            var args = [""]
+            args = []
+            while tt != 31 && tt != 0 {
+                if tt == 98 { next(); var sp = p_expr(); if vtag(sp) == "a" { var si = 0; while si < alens[vdata(sp).to_int()] { args.push(aget(vdata(sp).to_int(), si)); si = si + 1 } } else { args.push(sp) } }
+                else { args.push(p_expr()) }
+                if tt == 36 { next() }
+            }
+            if tt == 31 { next() }
+            left = callfn(left, args)
+            continue
+        }
+        break
+    }
+    return left
+}
+
+fn skip_chain() {
+    if tt == 38 { next(); next() }
+    elseif tt == 30 { next(); var d = 1; while d > 0 && tt != 0 { if tt == 30 { d = d + 1 } if tt == 31 { d = d - 1 } if d > 0 { next() } } if tt == 31 { next() } }
+    elseif tt == 34 { next(); p_expr(); if tt == 35 { next() } }
+}
+
+fn do_prop_inc(obj: string, prop: string) -> string {
+    if vtag(obj) == "o" {
+        var oold = oget(vdata(obj).to_int(), prop)
+        var num = vtofloat(oold) + 1.0
+        oset(vdata(obj).to_int(), prop, vfloat(num))
+        return oold
+    }
+    var sold = static_get(vdata(obj), prop)
+    if vtag(sold) != "u" {
+        var snum = vtofloat(sold) + 1.0
+        static_set(vdata(obj), prop, vfloat(snum))
+        return sold
+    }
+    return vundef()
+}
+
+fn static_get(cn: string, prop: string) -> string {
+    var si = 0
+    while si < ccnt { if cnames[si] == cn { return oget(cprotos[si], "__static_" + prop) }; si = si + 1 }
+    return vundef()
+}
+
+fn static_set(cn: string, prop: string, val: string) -> int {
+    var si = 0
+    while si < ccnt { if cnames[si] == cn { oset(cprotos[si], "__static_" + prop, val); return 0 }; si = si + 1 }
+    return 0
+}
+
+fn static_access(cn: string, prop: string) -> string {
+    var si = 0
+    while si < ccnt {
+        if cnames[si] == cn {
+            var result = oget(cprotos[si], "__static_" + prop)
+            if vtag(result) == "u" { break }
+            return result
+        }
+        si = si + 1
+    }
+    return "NOSTATIC"
+}
+
+fn do_member(left: string, prop: string) -> string {
+    // console.log / console.error / console.warn
+    if vtag(left) == "s" && vdata(left) == "_console" {
+        if prop == "log" || prop == "warn" || prop == "error" { return do_console_log() }
+        return vundef()
+    }
+    // Math builtins
+    if vtag(left) == "s" && vdata(left) == "_Math" {
+        if prop == "PI" { return vfloat(3.141592653589793) }
+        if prop == "E" { return vfloat(2.718281828459045) }
+        if prop == "SQRT2" { return vfloat(1.4142135623730951) }
+        if prop == "LN2" { return vfloat(0.6931471805599453) }
+        return register_builtin("_Math_" + prop)
+    }
+    // JSON builtins
+    if vtag(left) == "s" && vdata(left) == "_JSON" {
+        return register_builtin("_JSON_" + prop)
+    }
+    // Object builtins
+    if vtag(left) == "s" && vdata(left) == "_Object" {
+        return register_builtin("_Object_" + prop)
+    }
+    // Array builtins
+    if vtag(left) == "s" && vdata(left) == "_Array" {
+        return register_builtin("_Array_" + prop)
+    }
+    // Promise.resolve / Promise.reject / Promise.all
+    if vtag(left) == "s" && vdata(left) == "_Promise" {
+        if prop == "resolve" {
+            if tt == 30 { next(); var v = p_expr(); if tt == 31 { next() }
+                var oid = onew()
+                oset(oid, "__type__", vstr("Promise"))
+                oset(oid, "__state__", vstr("fulfilled"))
+                oset(oid, "__value__", v)
+                return vobj(oid)
+            }
+            return vundef()
+        }
+        if prop == "reject" {
+            if tt == 30 { next(); var v = p_expr(); if tt == 31 { next() }
+                var oid = onew()
+                oset(oid, "__type__", vstr("Promise"))
+                oset(oid, "__state__", vstr("rejected"))
+                oset(oid, "__value__", v)
+                return vobj(oid)
+            }
+            return vundef()
+        }
+        return vundef()
+    }
+    // Number methods
+    if vtag(left) == "n" {
+        if prop == "toString" { if tt == 30 { next(); if tt == 31 { next() } } return vstr(vdata(left)) }
+        if prop == "toFixed" {
+            if tt == 30 { next()
+                var digits = vtonum(p_expr())
+                if tt == 31 { next() }
+                var n = vtofloat(left)
+                var s = n.to_string()
+                var dot = s.index_of(".")
+                if dot < 0 { s = s + "."; dot = s.len() - 1 }
+                // Pad or truncate decimals
+                var dec_len = s.len() - dot - 1
+                while dec_len < digits { s = s + "0"; dec_len = dec_len + 1 }
+                if dec_len > digits { s = s.substring(0, dot + 1 + digits) }
+                return vstr(s)
+            }
+            return vstr(vdata(left))
+        }
+        return vundef()
+    }
+    // Static class member access
+    if vtag(left) == "s" {
+        var scr = static_access(vdata(left), prop)
+        if scr != "NOSTATIC" { return scr }
+    }
+    // String methods
+    if vtag(left) == "s" { return str_method(left, prop) }
+    // Array methods
+    if vtag(left) == "a" { return arr_method(left, prop) }
+    // Object property or method
+    if vtag(left) == "o" {
+        var oid = vdata(left).to_int()
+        // Check for Map/Set/Promise methods
+        var type_val = oget(oid, "__type__")
+        if vtag(type_val) == "s" {
+            var ts = vdata(type_val)
+            if ts == "Map" || ts == "Set" || ts == "Promise" { return map_set_method(oid, prop) }
+            if ts == "Generator" {
+                if prop == "next" {
+                    eat_parens()
+                    var ya = oget(oid, "__yields__")
+                    var yi = vtonum(oget(oid, "__yidx__"))
+                    var rid = onew()
+                    if vtag(ya) == "a" {
+                        var yaid = vdata(ya).to_int()
+                        if yi < alens[yaid] {
+                            oset(rid, "value", aget(yaid, yi))
+                            oset(rid, "done", vbool(0))
+                            oset(oid, "__yidx__", vnum(yi + 1))
+                        } else {
+                            oset(rid, "value", vundef())
+                            oset(rid, "done", vbool(1))
+                        }
+                    }
+                    return vobj(rid)
+                }
+                if prop == "return" { eat_parens(); var rid = onew(); oset(rid, "value", vundef()); oset(rid, "done", vbool(1)); return vobj(rid) }
+                return vundef()
+            }
+            if ts == "Error" {
+                if prop == "message" { return oget(oid, "message") }
+                if prop == "name" { return oget(oid, "name") }
+                if prop == "stack" { return vstr("") }
+            }
+        }
+        var val = oget(oid, prop)
+        // Object prototype methods
+        if vtag(val) == "u" {
+            if prop == "hasOwnProperty" { var key = vtostr(eat_args1()); if ohas(oid, key) { return vbool(1) }; return vbool(0) }
+            if prop == "toString" { eat_parens(); return vstr("[object Object]") }
+            if prop == "valueOf" { eat_parens(); return left }
+        }
+        if vtag(val) == "f" { this_push(left) }
+        return val
+    }
+    return vundef()
+}
+
+fn do_console_log() -> string {
+    if tt != 30 { return vundef() }
+    next()
+    var first = 1
+    while tt != 31 && tt != 0 {
+        if first == 0 { print(" ") }
+        var v = p_expr()
+        print(vtostr_full(v))
+        first = 0
+        if tt == 36 { next() }
+    }
+    if tt == 31 { next() }
+    println("")
+    return vundef()
+}
+
+// === Helpers for method dispatch ===
+fn eat_parens() -> int { if tt == 30 { next(); if tt == 31 { next() } }; return 0 }
+fn eat_args1() -> string { if tt == 30 { next() }; var v = p_expr(); if tt == 31 { next() }; return v }
+fn eat_args2() -> [string] {
+    if tt == 30 { next() }
+    var a = p_expr()
+    if tt == 36 { next() }
+    var b = p_expr()
+    if tt == 31 { next() }
+    return [a, b]
+}
+
+// === String prototype methods ===
+fn str_method(left: string, prop: string) -> string {
+    var s = vdata(left)
+    if prop == "length" { return vnum(s.len()) }
+    // Zero-arg methods
+    if prop == "toUpperCase" { eat_parens(); return vstr(s.upper()) }
+    if prop == "toLowerCase" { eat_parens(); return vstr(s.lower()) }
+    if prop == "trim" { eat_parens(); return vstr(s.trim()) }
+    if prop == "trimStart" || prop == "trimLeft" { eat_parens(); return vstr(s.trim_left()) }
+    if prop == "trimEnd" || prop == "trimRight" { eat_parens(); return vstr(s.trim_right()) }
+    if prop == "toString" || prop == "valueOf" { eat_parens(); return left }
+    // One-arg methods
+    if prop == "charAt" { var i = vtonum(eat_args1()); if i >= 0 && i < s.len() { return vstr(s.substring(i, i + 1)) }; return vstr("") }
+    if prop == "at" { var i = vtonum(eat_args1()); if i < 0 { i = s.len() + i }; if i >= 0 && i < s.len() { return vstr(s.substring(i, i + 1)) }; return vundef() }
+    if prop == "indexOf" { return vnum(s.index_of(vtostr(eat_args1()))) }
+    if prop == "lastIndexOf" { return vnum(s.last_index_of(vtostr(eat_args1()))) }
+    if prop == "search" { return vnum(s.index_of(vtostr(eat_args1()))) }
+    if prop == "includes" { if s.contains(vtostr(eat_args1())) { return vbool(1) }; return vbool(0) }
+    if prop == "startsWith" { if s.starts_with(vtostr(eat_args1())) { return vbool(1) }; return vbool(0) }
+    if prop == "endsWith" { if s.ends_with(vtostr(eat_args1())) { return vbool(1) }; return vbool(0) }
+    if prop == "repeat" { return vstr(s.repeat(vtonum(eat_args1()))) }
+    if prop == "concat" { return vstr(s + vtostr(eat_args1())) }
+    if prop == "match" { eat_args1(); return vnull() }
+    if prop == "charCodeAt" { var i = vtonum(eat_args1()); if i >= 0 && i < s.len() { return vnum(s.substring(i, i+1).ascii()) }; return vstr("NaN") }
+    if prop == "slice" || prop == "substring" {
+        if tt == 30 { next()
+            var start = vtonum(p_expr())
+            var end_val = s.len()
+            if tt == 36 { next(); end_val = vtonum(p_expr()) }
+            if tt == 31 { next() }
+            if start < 0 { start = s.len() + start; if start < 0 { start = 0 } }
+            if end_val < 0 { end_val = s.len() + end_val }
+            if start > s.len() { start = s.len() }
+            if end_val > s.len() { end_val = s.len() }
+            if start > end_val { return vstr("") }
+            return vstr(s.substring(start, end_val))
+        }
+        return vundef()
+    }
+    if prop == "split" { var delim = vtostr(eat_args1()); var parts = s.split(delim); var aid = anew(); for p in parts { apush(aid, vstr(p)) }; return varr(aid) }
+    if prop == "replace" { var args = eat_args2(); var old_s = vtostr(args[0]); var new_s = vtostr(args[1]); var idx = s.index_of(old_s); if idx >= 0 { return vstr(s.substring(0, idx) + new_s + s.substring(idx + old_s.len(), s.len())) }; return left }
+    if prop == "replaceAll" { var args = eat_args2(); return vstr(s.replace(vtostr(args[0]), vtostr(args[1]))) }
+    if prop == "padStart" { if tt == 30 { next(); var w = vtonum(p_expr()); var pad = " "; if tt == 36 { next(); pad = vtostr(p_expr()) }; if tt == 31 { next() }; while s.len() < w { s = pad + s }; return vstr(s) }; return vundef() }
+    if prop == "padEnd" { if tt == 30 { next(); var w = vtonum(p_expr()); var pad = " "; if tt == 36 { next(); pad = vtostr(p_expr()) }; if tt == 31 { next() }; while s.len() < w { s = s + pad }; return vstr(s) }; return vundef() }
+    if prop == "toFixed" {
+        if tt == 30 { next()
+            var digits = vtonum(p_expr())
+            if tt == 31 { next() }
+            var ns = vtofloat(left).to_string()
+            var dot = ns.index_of(".")
+            if dot < 0 { ns = ns + "."; dot = ns.len() - 1 }
+            var dec_len = ns.len() - dot - 1
+            while dec_len < digits { ns = ns + "0"; dec_len = dec_len + 1 }
+            if dec_len > digits { ns = ns.substring(0, dot + 1 + digits) }
+            return vstr(ns)
+        }
+        return vstr(vdata(left))
+    }
+    return vundef()
+}
+
+// === Array prototype methods ===
+fn arr_method(left: string, prop: string) -> string {
+    var id = vdata(left).to_int()
+    if prop == "length" { return vnum(alens[id]) }
+    if prop == "push" { if tt == 30 { next(); while tt != 31 && tt != 0 { apush(id, p_expr()); if tt == 36 { next() } } if tt == 31 { next() } return vnum(alens[id]) } return vundef() }
+    if prop == "pop" { if tt == 30 { next(); if tt == 31 { next() } } if alens[id] > 0 { var v = aget(id, alens[id] - 1); alens[id] = alens[id] - 1; return v } return vundef() }
+    if prop == "at" { if tt == 30 { next(); var ai = vtonum(p_expr()); if tt == 31 { next() } if ai < 0 { ai = alens[id] + ai }; return aget(id, ai) } return vundef() }
+    if prop == "shift" { if tt == 30 { next(); if tt == 31 { next() } } if alens[id] > 0 { var v = aget(id, 0); var i = 0; while i < alens[id] - 1 { aset(id, i, aget(id, i + 1)); i = i + 1 } alens[id] = alens[id] - 1; return v } return vundef() }
+    if prop == "unshift" { if tt == 30 { next(); var v = p_expr(); if tt == 31 { next() } apush(id, vundef()); var i = alens[id] - 1; while i > 0 { aset(id, i, aget(id, i - 1)); i = i - 1 } aset(id, 0, v); return vnum(alens[id]) } return vundef() }
+    if prop == "indexOf" { if tt == 30 { next(); var v = p_expr(); if tt == 31 { next() } var i = 0; while i < alens[id] { if vtostr(aget(id, i)) == vtostr(v) { return vnum(i) } i = i + 1 } return vnum(-1) } return vundef() }
+    if prop == "includes" { if tt == 30 { next(); var v = p_expr(); if tt == 31 { next() } var i = 0; while i < alens[id] { if vtostr(aget(id, i)) == vtostr(v) { return vbool(1) } i = i + 1 } return vbool(0) } return vundef() }
+    if prop == "join" { if tt == 30 { next(); var sep = vtostr(p_expr()); if tt == 31 { next() } var r = ""; var i = 0; while i < alens[id] { if i > 0 { r = r + sep } r = r + vtostr(aget(id, i)); i = i + 1 } return vstr(r) } return vundef() }
+    if prop == "reverse" { if tt == 30 { next(); if tt == 31 { next() } } var i = 0; var j = alens[id] - 1; while i < j { var tmp = aget(id, i); aset(id, i, aget(id, j)); aset(id, j, tmp); i = i + 1; j = j - 1 } return left }
+    if prop == "concat" {
+        if tt == 30 { next()
+            var nid = acopy(id)
+            while tt != 31 && tt != 0 {
+                var arg = p_expr()
+                if vtag(arg) == "a" { var ai = 0; var aid2 = vdata(arg).to_int(); while ai < alens[aid2] { apush(nid, aget(aid2, ai)); ai = ai + 1 } }
+                else { apush(nid, arg) }
+                if tt == 36 { next() }
+            }
+            if tt == 31 { next() }
+            return varr(nid)
+        }
+        return vundef()
+    }
+    if prop == "slice" {
+        if tt == 30 { next()
+            var start = 0
+            var end = alens[id]
+            if tt != 31 { start = vtonum(p_expr()); if tt == 36 { next(); end = vtonum(p_expr()) } }
+            if tt == 31 { next() }
+            if start < 0 { start = alens[id] + start; if start < 0 { start = 0 } }
+            if end < 0 { end = alens[id] + end }
+            var nid = anew()
+            var i = start
+            while i < end && i < alens[id] { apush(nid, aget(id, i)); i = i + 1 }
+            return varr(nid)
+        }
+        return vundef()
+    }
+    if prop == "splice" {
+        if tt == 30 { next()
+            var start = vtonum(p_expr()); var del = alens[id] - start
+            if tt == 36 { next(); del = vtonum(p_expr()) }
+            var inserts = [""]
+            inserts = []
+            while tt == 36 { next(); inserts.push(p_expr()) }
+            if tt == 31 { next() }
+            var removed = anew()
+            var i = 0; while i < del && start + i < alens[id] { apush(removed, aget(id, start + i)); i = i + 1 }
+            // Rebuild: keep [0..start], add inserts, add [start+del..]
+            var nid = anew()
+            i = 0; while i < start { apush(nid, aget(id, i)); i = i + 1 }
+            for ins in inserts { apush(nid, ins) }
+            i = start + del; while i < alens[id] { apush(nid, aget(id, i)); i = i + 1 }
+            // Copy back
+            alens[id] = alens[nid]; abases[id] = abases[nid]
+            return varr(removed)
+        }
+        return vundef()
+    }
+    if prop == "map" { return arr_hof(id, "map") }
+    if prop == "filter" { return arr_hof(id, "filter") }
+    if prop == "reduce" { return arr_hof(id, "reduce") }
+    if prop == "forEach" { return arr_hof(id, "forEach") }
+    if prop == "flatMap" { return arr_hof(id, "flatMap") }
+    if prop == "find" { return arr_hof(id, "find") }
+    if prop == "findIndex" { return arr_hof(id, "findIndex") }
+    if prop == "findLast" { return arr_hof(id, "findLast") }
+    if prop == "findLastIndex" { return arr_hof(id, "findLastIndex") }
+    if prop == "some" { return arr_hof(id, "some") }
+    if prop == "every" { return arr_hof(id, "every") }
+    if prop == "flat" {
+        if tt == 30 { next(); if tt != 31 { p_expr() }; if tt == 31 { next() } }
+        var felems: [string] = []
+        var i = 0
+        while i < alens[id] {
+            var elem = aget(id, i)
+            if vtag(elem) == "a" {
+                var sid = vdata(elem).to_int()
+                var j = 0
+                while j < alens[sid] { felems.push(aget(sid, j)); j = j + 1 }
+            } else { felems.push(elem) }
+            i = i + 1
+        }
+        var nid = anew()
+        for fe in felems { apush(nid, fe) }
+        return varr(nid)
+    }
+    if prop == "fill" {
+        if tt == 30 { next(); var v = p_expr(); if tt == 31 { next() } var i = 0; while i < alens[id] { aset(id, i, v); i = i + 1 } return left }
+        return vundef()
+    }
+    if prop == "sort" {
+        if tt == 30 { next()
+            var has_fn = 0
+            var cmp_fn = vundef()
+            if tt != 31 { cmp_fn = p_expr(); has_fn = 1 }
+            if tt == 31 { next() }
+            // Simple bubble sort
+            var n = alens[id]
+            var i = 0
+            while i < n {
+                var j = 0
+                while j < n - 1 - i {
+                    var a = aget(id, j)
+                    var b = aget(id, j + 1)
+                    var swap = 0
+                    if has_fn == 1 {
+                        var r = callfn(cmp_fn, [a, b])
+                        if vtonum(r) > 0 { swap = 1 }
+                    } else {
+                        if vtostr(a) > vtostr(b) { swap = 1 }
+                    }
+                    if swap == 1 { aset(id, j, b); aset(id, j + 1, a) }
+                    j = j + 1
+                }
+                i = i + 1
+            }
+            return left
+        }
+        return vundef()
+    }
+    if prop == "isArray" { if tt == 30 { next(); var v = p_expr(); if tt == 31 { next() } if vtag(v) == "a" { return vbool(1) } return vbool(0) } return vundef() }
+    return vundef()
+}
+
+fn arr_hof(id: int, method: string) -> string {
+    if tt != 30 { return vundef() }
+    next()
+    var callback = p_expr()
+    var init_val = vundef()
+    if method == "reduce" && tt == 36 { next(); init_val = p_expr() }
+    if tt == 31 { next() }
+    if method == "map" {
+        var results: [string] = []
+        var i = 0
+        while i < alens[id] { results.push(callfn2(callback, aget(id, i), vnum(i))); i = i + 1 }
+        var nid = anew()
+        for r in results { apush(nid, r) }
+        return varr(nid)
+    }
+    if method == "filter" {
+        var results: [string] = []
+        var i = 0
+        while i < alens[id] { var v = aget(id, i); if vtruthy(callfn2(callback, v, vnum(i))) == 1 { results.push(v) }; i = i + 1 }
+        var nid = anew()
+        for r in results { apush(nid, r) }
+        return varr(nid)
+    }
+    if method == "reduce" {
+        var acc = init_val
+        var start = 0
+        if vtag(acc) == "u" { acc = aget(id, 0); start = 1 }
+        var i = start
+        while i < alens[id] { acc = callfn2(callback, acc, aget(id, i)); i = i + 1 }
+        return acc
+    }
+    if method == "forEach" { var i = 0; while i < alens[id] { callfn2(callback, aget(id, i), vnum(i)); i = i + 1 } return vundef() }
+    if method == "flatMap" {
+        var fmelems: [string] = []
+        var i = 0
+        while i < alens[id] {
+            var result = callfn2(callback, aget(id, i), vnum(i))
+            if vtag(result) == "a" {
+                var sid = vdata(result).to_int()
+                var j = 0
+                while j < alens[sid] { fmelems.push(aget(sid, j)); j = j + 1 }
+            } else { fmelems.push(result) }
+            i = i + 1
+        }
+        var nid = anew()
+        for fme in fmelems { apush(nid, fme) }
+        return varr(nid)
+    }
+    if method == "find" { var i = 0; while i < alens[id] { var v = aget(id, i); if vtruthy(callfn2(callback, v, vnum(i))) == 1 { return v } i = i + 1 } return vundef() }
+    if method == "findIndex" { var i = 0; while i < alens[id] { if vtruthy(callfn2(callback, aget(id, i), vnum(i))) == 1 { return vnum(i) } i = i + 1 } return vnum(-1) }
+    if method == "findLast" { var i = alens[id] - 1; while i >= 0 { var v = aget(id, i); if vtruthy(callfn2(callback, v, vnum(i))) == 1 { return v } i = i - 1 } return vundef() }
+    if method == "findLastIndex" { var i = alens[id] - 1; while i >= 0 { if vtruthy(callfn2(callback, aget(id, i), vnum(i))) == 1 { return vnum(i) } i = i - 1 } return vnum(-1) }
+    if method == "some" { var i = 0; while i < alens[id] { if vtruthy(callfn2(callback, aget(id, i), vnum(i))) == 1 { return vbool(1) } i = i + 1 } return vbool(0) }
+    if method == "every" { var i = 0; while i < alens[id] { if vtruthy(callfn2(callback, aget(id, i), vnum(i))) == 0 { return vbool(0) } i = i + 1 } return vbool(1) }
+    return vundef()
+}
+
+// === Simple JSON serializer/deserializer ===
+fn json_ser(v: string) -> string {
+    var t = vtag(v)
+    if t == "n" { return vdata(v) }
+    if t == "s" { return "\"" + vdata(v).replace("\"", "\\\"") + "\"" }
+    if t == "b" { return vdata(v) }
+    if t == "N" { return "null" }
+    if t == "u" { return "undefined" }
+    if t == "a" {
+        var id = vdata(v).to_int()
+        var r = "["
+        var i = 0
+        while i < alens[id] { if i > 0 { r = r + "," } r = r + json_ser(aget(id, i)); i = i + 1 }
+        return r + "]"
+    }
+    if t == "o" {
+        var id = vdata(v).to_int()
+        var r = "{"
+        var m = omaps[id]
+        var ks = m.keys()
+        var first = 1
+        for k in ks {
+            if first == 0 { r = r + "," }
+            r = r + "\"" + k + "\":" + json_ser(m.get(k))
+            first = 0
+        }
+        return r + "}"
+    }
+    return "null"
+}
+
+var jstr = ""
+var jpos = 0
+
+fn json_deser(s: string) -> string {
+    jstr = s; jpos = 0
+    return jparse()
+}
+
+fn jskip() { while jpos < jstr.len() { var c = jstr.substring(jpos, jpos + 1); if c == " " || c == "\n" || c == "\r" || c == "\t" { jpos = jpos + 1 } else { return } } }
+fn jch() -> string { if jpos >= jstr.len() { return "" } return jstr.substring(jpos, jpos + 1) }
+
+fn jparse() -> string {
+    jskip()
+    var c = jch()
+    if c == "\"" { return jparse_str() }
+    if c == "{" { return jparse_obj() }
+    if c == "[" { return jparse_arr() }
+    if c == "t" { jpos = jpos + 4; return vbool(1) }
+    if c == "f" { jpos = jpos + 5; return vbool(0) }
+    if c == "n" { jpos = jpos + 4; return vnull() }
+    var n = ""
+    while jpos < jstr.len() { c = jch(); if DIGITS.contains(c) || c == "." || c == "-" || c == "e" || c == "E" || c == "+" { n = n + c; jpos = jpos + 1 } else { break } }
+    if n.contains(".") { return vfloat(n.to_float()) }
+    return vnum(n.to_int())
+}
+
+fn jparse_str() -> string {
+    jpos = jpos + 1
+    var s = ""
+    while jpos < jstr.len() {
+        var c = jch()
+        if c == "\"" { jpos = jpos + 1; return vstr(s) }
+        if c == "\\" { jpos = jpos + 1; var e = jch(); jpos = jpos + 1; if e == "n" { s = s + "\n" } elseif e == "\"" { s = s + "\"" } else { s = s + e } }
+        else { s = s + c; jpos = jpos + 1 }
+    }
+    return vstr(s)
+}
+
+fn jparse_obj() -> string {
+    jpos = jpos + 1; jskip()
+    var oid = onew()
+    if jch() == "}" { jpos = jpos + 1; return vobj(oid) }
+    while jpos < jstr.len() {
+        jskip()
+        var key = vdata(jparse_str())
+        jskip(); jpos = jpos + 1; jskip()
+        oset(oid, key, jparse())
+        jskip()
+        if jch() == "," { jpos = jpos + 1 } else { break }
+    }
+    jskip(); if jch() == "}" { jpos = jpos + 1 }
+    return vobj(oid)
+}
+
+fn jparse_arr() -> string {
+    jpos = jpos + 1; jskip()
+    var aid = anew()
+    if jch() == "]" { jpos = jpos + 1; return varr(aid) }
+    while jpos < jstr.len() {
+        jskip()
+        apush(aid, jparse())
+        jskip()
+        if jch() == "," { jpos = jpos + 1 } else { break }
+    }
+    jskip(); if jch() == "]" { jpos = jpos + 1 }
+    return varr(aid)
+}
+
+// === Built-in objects: Math, JSON, Object, Number, parseInt, etc. ===
+fn call_builtin(name: string, args: [string]) -> string {
+    // Math
+    if name == "_Math_floor" { return vnum(Math.floor(vtofloat(args[0])).to_int()) }
+    if name == "_Math_ceil" { return vnum(Math.ceil(vtofloat(args[0])).to_int()) }
+    if name == "_Math_round" { return vnum(Math.round(vtofloat(args[0])).to_int()) }
+    if name == "_Math_abs" { var v = vtofloat(args[0]); if v < 0.0 { return vfloat(0.0 - v) } return vfloat(v) }
+    if name == "_Math_sqrt" { return vfloat(Math.sqrt(vtofloat(args[0]))) }
+    if name == "_Math_pow" { return vfloat(Math.pow(vtofloat(args[0]), vtofloat(args[1]))) }
+    if name == "_Math_min" {
+        if args.len() == 0 { return vstr("Infinity") }
+        var r = vtofloat(args[0])
+        var i = 1
+        while i < args.len() { var v = vtofloat(args[i]); if v < r { r = v } i = i + 1 }
+        return vfloat(r)
+    }
+    if name == "_Math_max" {
+        if args.len() == 0 { return vstr("-Infinity") }
+        var r = vtofloat(args[0])
+        var i = 1
+        while i < args.len() { var v = vtofloat(args[i]); if v > r { r = v } i = i + 1 }
+        return vfloat(r)
+    }
+    if name == "_Math_random" { return vfloat(Math.random()) }
+    if name == "_Math_log" { return vfloat(Math.log(vtofloat(args[0]))) }
+    if name == "_Math_sin" { return vfloat(Math.sin(vtofloat(args[0]))) }
+    if name == "_Math_cos" { return vfloat(Math.cos(vtofloat(args[0]))) }
+    if name == "_Math_tan" { return vfloat(Math.tan(vtofloat(args[0]))) }
+    if name == "_Math_trunc" { return vnum(vtofloat(args[0]).to_int()) }
+    // JSON
+    if name == "_JSON_stringify" {
+        return vstr(json_ser(args[0]))
+    }
+    if name == "_JSON_parse" {
+        return json_deser(vtostr(args[0]))
+    }
+    // parseInt / parseFloat / Number / String / Boolean / isNaN / isFinite
+    if name == "_parseInt" { return vnum(vtostr(args[0]).to_int()) }
+    if name == "_parseFloat" { return vfloat(vtostr(args[0]).to_float()) }
+    if name == "_Number" { return vfloat(vtofloat(args[0])) }
+    if name == "_String" { return vstr(vtostr(args[0])) }
+    if name == "_Boolean" { return vbool(vtruthy(args[0])) }
+    if name == "_isNaN" { var s = vtostr(args[0]); if s == "NaN" || s == "undefined" { return vbool(1) } return vbool(0) }
+    if name == "_isFinite" { return vbool(1) }
+    // Array.isArray
+    if name == "_Array_isArray" { if vtag(args[0]) == "a" { return vbool(1) } return vbool(0) }
+    if name == "_Array_of" {
+        var aid = anew()
+        for a in args { apush(aid, a) }
+        return varr(aid)
+    }
+    // Array.from
+    if name == "_Array_from" {
+        var elems: [string] = []
+        if vtag(args[0]) == "s" {
+            var s = vdata(args[0])
+            var i = 0
+            while i < s.len() { elems.push(vstr(s.substring(i, i + 1))); i = i + 1 }
+        } elseif vtag(args[0]) == "a" {
+            var sid = vdata(args[0]).to_int()
+            var i = 0
+            while i < alens[sid] { elems.push(aget(sid, i)); i = i + 1 }
+        }
+        var aid = anew()
+        for e in elems { apush(aid, e) }
+        return varr(aid)
+    }
+    // Object.keys / values / entries / assign / freeze
+    if name == "_Object_keys" { if vtag(args[0]) == "o" { return varr(okeys_arr(vdata(args[0]).to_int())) } return varr(anew()) }
+    if name == "_Object_values" {
+        if vtag(args[0]) == "o" {
+            var oid: int = vdata(args[0]).to_int()
+            var aid = anew()
+            var m = omaps[oid]; var ks = m.keys()
+            for k in ks { apush(aid, m.get(k)) }
+            return varr(aid)
+        }
+        return varr(anew())
+    }
+    if name == "_Object_entries" {
+        if vtag(args[0]) == "o" {
+            var oid: int = vdata(args[0]).to_int()
+            var aid = anew()
+            var m = omaps[oid]; var ks = m.keys()
+            for k in ks {
+                var pair = anew()
+                apush(pair, vstr(k))
+                apush(pair, m.get(k))
+                apush(aid, varr(pair))
+            }
+            return varr(aid)
+        }
+        return varr(anew())
+    }
+    if name == "_Object_assign" {
+        if args.len() >= 2 && vtag(args[0]) == "o" {
+            var tid: int = vdata(args[0]).to_int()
+            var i: int = 1
+            while i < args.len() {
+                if vtag(args[i]) == "o" {
+                    var sid: int = vdata(args[i]).to_int()
+                    var sm = omaps[sid]; var sks = sm.keys()
+                    for sk in sks { oset(tid, sk, sm.get(sk)) }
+                }
+                i = i + 1
+            }
+            return args[0]
+        }
+        return args[0]
+    }
+    if name == "_Object_freeze" { return args[0] }
+    if name == "_Object_fromEntries" {
+        var oid = onew()
+        if vtag(args[0]) == "a" {
+            var aid = vdata(args[0]).to_int()
+            var i = 0
+            while i < alens[aid] {
+                var entry = aget(aid, i)
+                if vtag(entry) == "a" {
+                    var eid = vdata(entry).to_int()
+                    if alens[eid] >= 2 { oset(oid, vtostr(aget(eid, 0)), aget(eid, 1)) }
+                }
+                i = i + 1
+            }
+        }
+        return vobj(oid)
+    }
+    if name == "_Object_create" {
+        var oid = onew()
+        if vtag(args[0]) == "o" { oprotos[oid] = vdata(args[0]).to_int() }
+        return vobj(oid)
+    }
+    if name == "_Object_getPrototypeOf" {
+        if vtag(args[0]) == "o" {
+            var oid = vdata(args[0]).to_int()
+            if oprotos[oid] >= 0 { return vobj(oprotos[oid]) }
+        }
+        return vnull()
+    }
+    if name == "_noop" { return vundef() }
+    return vundef()
+}
+
+// === Function calling with this binding ===
+fn callfn(callee: string, args: [string]) -> string {
+    if vtag(callee) != "f" { return vundef() }
+    var fid = vdata(callee).to_int()
+    // Builtin dispatch
+    if fid >= 9000 {
+        var bidx = fid - 9000
+        if bidx >= 0 && bidx < bcnt { return call_builtin(bnames[bidx], args) }
+        return vundef()
+    }
+    var psrc = fparams[fid]
+    var bsrc = fbodies[fid]
+    var s1 = src; var p1 = pos; var t1 = tt; var v1 = tv
+    epush()
+    // Bind this
+    var had_this = 0
+    if this_depth > 0 {
+        var t = this_stack[this_depth - 1]
+        if vtag(t) != "u" { edef("this", t); had_this = 1 }
+        this_pop()
+    }
+    // Bind params
+    if psrc.len() > 0 {
+        var ps = psrc.split(",")
+        for i in 0..ps.len() {
+            var pname = ps[i].trim()
+            if pname.len() > 0 {
+                // Check for default value: "param=defaultSrc"
+                var eq_pos = pname.index_of("=")
+                if eq_pos > 0 {
+                    var real_name = pname.substring(0, eq_pos)
+                    if i < args.len() && vtag(args[i]) != "u" { edef(real_name, args[i]) }
+                    else {
+                        // Evaluate default
+                        var dsrc = pname.substring(eq_pos + 1, pname.len())
+                        var ds = src; var dp = pos; var dt = tt; var dv = tv
+                        src = dsrc; pos = 0; next()
+                        var dval = p_expr()
+                        src = ds; pos = dp; tt = dt; tv = dv
+                        edef(real_name, dval)
+                    }
+                } elseif pname.starts_with("...") {
+                    // Rest parameter: collect remaining args into array
+                    var rest_name = pname.substring(3, pname.len())
+                    var rest_id = anew()
+                    var ri = i
+                    while ri < args.len() { apush(rest_id, args[ri]); ri = ri + 1 }
+                    edef(rest_name, varr(rest_id))
+                } else {
+                    if i < args.len() { edef(pname, args[i]) }
+                    else { edef(pname, vundef()) }
+                }
+            }
+        }
+    }
+    // Bind arguments object (only if needed — avoid array allocation overhead)
+    edef("arguments", vundef())
+    // Restore closure captures BEFORE param binding so params take precedence
+    restore_captures(fid)
+    // Re-bind params to override any captured values with same name
+    if psrc.len() > 0 {
+        var ps2 = psrc.split(",")
+        for i in 0..ps2.len() {
+            var pname2 = ps2[i].trim()
+            // Strip default value
+            var eq2 = pname2.index_of("=")
+            if eq2 > 0 { pname2 = pname2.substring(0, eq2) }
+            if pname2.len() > 0 {
+                if i < args.len() { edef(pname2, args[i]) }
+            }
+        }
+    }
+    src = bsrc; pos = 0; retflag = 0; next()
+    p_block_body()
+    var result = retval
+    if retflag == 0 { result = vundef() }
+    retflag = 0
+    // Save modified captures back
+    save_captures(fid)
+    epop()
+    src = s1; pos = p1; tt = t1; tv = v1
+    return result
+}
+
+// === Builtin registry ===
+fn register_builtin(name: string) -> string {
+    // Check if already registered
+    var i = 0
+    while i < bcnt { if bnames[i] == name { return "f:" + (9000 + i).to_string() } i = i + 1 }
+    bnames[bcnt] = name
+    var fid = 9000 + bcnt
+    bcnt = bcnt + 1
+    return "f:" + fid.to_string()
+}
+
+fn callfn2(callee: string, a0: string, a1: string) -> string {
+    if vtag(callee) != "f" { return vundef() }
+    var fid = vdata(callee).to_int()
+    if fid >= 9000 { var bidx = fid - 9000; if bidx >= 0 && bidx < bcnt { return call_builtin(bnames[bidx], [a0, a1]) } return vundef() }
+    var psrc = fparams[fid]
+    var bsrc = fbodies[fid]
+    var s1 = src; var p1 = pos; var t1 = tt; var v1 = tv
+    epush()
+    if this_depth > 0 { var t = this_stack[this_depth - 1]; if vtag(t) != "u" { edef("this", t) } this_pop() }
+    if psrc.len() > 0 {
+        var ps = psrc.split(",")
+        if ps.len() > 0 { var pn = ps[0].trim(); if pn.len() > 0 { edef(pn, a0) } }
+        if ps.len() > 1 { var pn = ps[1].trim(); if pn.len() > 0 { edef(pn, a1) } }
+    }
+    edef("arguments", vundef())
+    restore_captures(fid)
+    // Re-bind params to override captured values
+    if psrc.len() > 0 {
+        var ps2 = psrc.split(",")
+        if ps2.len() > 0 { var pn2 = ps2[0].trim(); if pn2.len() > 0 { edef(pn2, a0) } }
+        if ps2.len() > 1 { var pn2 = ps2[1].trim(); if pn2.len() > 0 { edef(pn2, a1) } }
+    }
+    src = bsrc; pos = 0; retflag = 0; next()
+    p_block_body()
+    var result = retval
+    if retflag == 0 { result = vundef() }
+    retflag = 0
+    save_captures(fid)
+    epop()
+    src = s1; pos = p1; tt = t1; tv = v1
+    return result
+}
+
+// === Primary expressions ===
+fn p_primary() -> string {
+    // Number
+    if tt == 1 {
+        var v = tv; next()
+        if v.contains(".") { return vfloat(v.to_float()) }
+        return vnum(v.to_int())
+    }
+    // String
+    if tt == 2 { var v = tv; next(); return vstr(v) }
+    // Boolean
+    if tt == 4 { var v = tv; next(); if v == "true" { return vbool(1) } return vbool(0) }
+    // null
+    if tt == 5 { next(); return vnull() }
+    // undefined
+    if tt == 6 { next(); return vundef() }
+    // this
+    if tt == 72 { next(); return eget("this") }
+    // super
+    if tt == 74 {
+        next()
+        // super(...) = call parent constructor
+        if tt == 30 {
+            next()
+            var args = [""]
+            args = []
+            while tt != 31 && tt != 0 { args.push(p_expr()); if tt == 36 { next() } }
+            if tt == 31 { next() }
+            // Find parent class constructor and call it with current this
+            var cur_this = eget("this")
+            if vtag(cur_this) == "o" {
+                var oid = vdata(cur_this).to_int()
+                var cls = vtostr(oget(oid, "__class__"))
+                // Find class id
+                var ci = 0
+                while ci < ccnt { if cnames[ci] == cls { break } ci = ci + 1 }
+                if ci < ccnt && cparents[ci] >= 0 {
+                    var pid = cparents[ci]
+                    if cconstructors[pid] >= 0 {
+                        this_push(cur_this)
+                        callfn(vfn(cconstructors[pid]), args)
+                    }
+                }
+            }
+            return vundef()
+        }
+        // super.method()
+        if tt == 38 { next(); var prop = tv; next(); return eget("this") }
+        return vundef()
+    }
+    // new
+    if tt == 71 {
+        next()
+        var cls_name = tv; next()
+        // new Map(), new Set(), new Error(), new RegExp()
+        if cls_name == "Map" { return new_map() }
+        if cls_name == "Set" { return new_set() }
+        if cls_name == "WeakMap" || cls_name == "WeakSet" || cls_name == "WeakRef" {
+            if tt == 30 { next(); if tt != 31 { p_expr() }; if tt == 31 { next() } }
+            var oid = onew()
+            oset(oid, "__type__", vstr(cls_name))
+            return vobj(oid)
+        }
+        if cls_name == "Proxy" {
+            if tt == 30 { next()
+                var target = p_expr()
+                if tt == 36 { next() }
+                var handler = p_expr()
+                if tt == 31 { next() }
+                // Create proxy: store target and handler
+                var oid = onew()
+                oset(oid, "__type__", vstr("Proxy"))
+                oset(oid, "__target__", target)
+                oset(oid, "__handler__", handler)
+                return vobj(oid)
+            }
+            return vundef()
+        }
+        if cls_name == "Error" || cls_name == "TypeError" || cls_name == "RangeError" || cls_name == "SyntaxError" || cls_name == "ReferenceError" || cls_name == "URIError" || cls_name == "EvalError" {
+            var oid = onew()
+            oset(oid, "__type__", vstr("Error"))
+            oset(oid, "name", vstr(cls_name))
+            if tt == 30 { next(); if tt != 31 { oset(oid, "message", p_expr()) }; if tt == 31 { next() } }
+            oset(oid, "stack", vstr(""))
+            return vobj(oid)
+        }
+        if cls_name == "RegExp" { return new_regexp() }
+        if cls_name == "Promise" { return new_promise() }
+        // User-defined class
+        return new_class(cls_name)
+    }
+    // Template literal
+    if tt == 61 {
+        var result = tv
+        // pos is right after ${ — we need to parse the expression
+        next()
+        while true {
+            var inner = p_expr()
+            result = result + vtostr(inner)
+            // tt should be 33 (}) — don't call next(), just advance pos manually
+            if tt == 33 {
+                // Read raw text after } until ` or ${
+                var more = ""
+                while pos < src.len() {
+                    var c = ch()
+                    if c == "`" { pos = pos + 1; next(); return vstr(result + more) }
+                    if c == "$" {
+                        if pos + 1 < src.len() && src.substring(pos + 1, pos + 2) == "{" {
+                            pos = pos + 2; next()
+                            result = result + more
+                            more = ""
+                            // Parse next expression
+                            inner = p_expr()
+                            result = result + vtostr(inner)
+                            continue
+                        }
+                    }
+                    more = more + c; pos = pos + 1
+                }
+                result = result + more
+                next()
+                return vstr(result)
+            }
+            break
+        }
+        return vstr(result)
+    }
+    // Parens or arrow
+    if tt == 30 {
+        next()
+        if tt == 31 { next(); if tt == 40 { next(); return p_arrow("") } return vundef() }
+        if tt == 3 {
+            var id1 = tv; var sp = pos; var st = tt; var sv = tv
+            next()
+            if tt == 31 || tt == 36 {
+                var params = id1
+                while tt == 36 { next(); params = params + "," + tv; next() }
+                if tt == 31 { next() }
+                if tt == 40 { next(); return p_arrow(params) }
+            }
+            pos = sp - id1.len(); next()
+        }
+        var v = p_expr()
+        while tt == 36 { next(); v = p_expr() }
+        if tt == 31 { next() }
+        return v
+    }
+    // Array literal
+    if tt == 34 { return p_array_literal() }
+    // Object literal
+    if tt == 32 { return p_object_literal() }
+    // async function
+    if tt == 89 {
+        next()
+        if tt == 53 { return p_func_expr() }
+        // async arrow: async (params) => body
+        if tt == 30 || tt == 3 { return p_primary() }
+        return vundef()
+    }
+    // function expression
+    if tt == 53 { return p_func_expr() }
+    // Identifier
+    if tt == 3 {
+        var name = tv; next()
+        if name == "console" { return vstr("_console") }
+        if name == "Math" { return vstr("_Math") }
+        if name == "JSON" { return vstr("_JSON") }
+        if name == "Object" { return vstr("_Object") }
+        if name == "Array" { return vstr("_Array") }
+        if name == "Date" { if tt == 38 { next(); var dp = tv; next(); if dp == "now" { if tt == 30 { next(); if tt == 31 { next() } }; return vnum(1000000) }; return vundef() }; return vundef() }
+        if name == "Number" { if tt == 38 { next(); var np = tv; next(); if np == "isInteger" { if tt == 30 { next(); var nv = p_expr(); if tt == 31 { next() }; return vbool(if !vtostr(nv).contains(".") && vtag(nv) == "n" { 1 } else { 0 }) }; return vundef() }; if np == "MAX_SAFE_INTEGER" { return vnum(9007199254740991) }; return vundef() }; return register_builtin("_Number") }
+        if name == "parseInt" { return register_builtin("_parseInt") }
+        if name == "parseFloat" { return register_builtin("_parseFloat") }
+        if name == "String" {
+            if tt == 38 { next()
+                var prop = tv; next()
+                if prop == "fromCharCode" {
+                    if tt == 30 { next(); var code = vtonum(p_expr()); if tt == 31 { next() }
+                        return vstr(String.char(code))
+                    }
+                }
+                return vundef()
+            }
+            return register_builtin("_String")
+        }
+        if name == "Boolean" { return register_builtin("_Boolean") }
+        if name == "Symbol" {
+            if tt == 30 { next(); var desc = ""; if tt != 31 { desc = vtostr(p_expr()) }; if tt == 31 { next() }
+                return "y:" + desc
+            }
+            if tt == 38 { next(); var sym_prop = tv; next()
+                if sym_prop == "iterator" { return "y:Symbol.iterator" }
+                if sym_prop == "toPrimitive" { return "y:Symbol.toPrimitive" }
+                return "y:Symbol." + sym_prop
+            }
+            return "y:"
+        }
+        if name == "isNaN" { return register_builtin("_isNaN") }
+        if name == "isFinite" { return register_builtin("_isFinite") }
+        // Compound assignment
+        if tt == 42 { next(); var right = p_expr(); var cur = eget(name); var v = vundef(); if vtag(cur) == "s" || vtag(right) == "s" { v = vstr(vtostr(cur) + vtostr(right)) } else { v = vfloat(vtofloat(cur) + vtofloat(right)) } eset(name, v); return v }
+        if tt == 44 { next(); var right = p_expr(); var v = vfloat(vtofloat(eget(name)) - vtofloat(right)); eset(name, v); return v }
+        if tt == 46 { next(); var right = p_expr(); var v = vfloat(vtofloat(eget(name)) * vtofloat(right)); eset(name, v); return v }
+        if tt == 47 { next(); var right = p_expr(); var v = vfloat(vtofloat(eget(name)) / vtofloat(right)); eset(name, v); return v }
+        if tt == 48 { next(); var right = p_expr(); var v = vnum(vtonum(eget(name)) % vtonum(right)); eset(name, v); return v }
+        // Logical/nullish assignment
+        if tt == 100 { next(); var right = p_expr(); var cur = eget(name); if vtag(cur) == "N" || vtag(cur) == "u" { eset(name, right); return right }; return cur }
+        if tt == 101 { next(); var right = p_expr(); var cur = eget(name); if vtruthy(cur) == 0 { eset(name, right); return right }; return cur }
+        if tt == 102 { next(); var right = p_expr(); var cur = eget(name); if vtruthy(cur) != 0 { eset(name, right); return right }; return cur }
+        // Single-identifier arrow: x => expr
+        if tt == 40 { next(); return p_arrow(name) }
+        // Assignment
+        if tt == 15 { next(); var right = p_expr(); eset(name, right); return right }
+        // Postfix ++/--
+        if tt == 41 { next(); var n = vtonum(eget(name)); eset(name, vnum(n + 1)); return vnum(n) }
+        if tt == 43 { next(); var n = vtonum(eget(name)); eset(name, vnum(n - 1)); return vnum(n) }
+        return eget(name)
+    }
+    next(); return vundef()
+}
+
+fn p_array_literal() -> string {
+    next()
+    var elems: [string] = []
+    while tt != 35 && tt != 0 {
+        if tt == 98 {
+            next()
+            var sp = p_expr()
+            if vtag(sp) == "a" {
+                var spid: int = vdata(sp).to_int()
+                var si: int = 0
+                while si < alens[spid] { elems.push(aget(spid, si)); si = si + 1 }
+            } else { elems.push(sp) }
+        } else { elems.push(p_expr()) }
+        if tt == 36 { next() }
+    }
+    if tt == 35 { next() }
+    var aid = anew()
+    for e in elems { apush(aid, e) }
+    return varr(aid)
+}
+
+fn p_object_literal() -> string {
+    next()
+    var oid = onew()
+    while tt != 33 && tt != 0 {
+        if tt == 98 {
+            next()
+            var sp2 = p_expr()
+            if vtag(sp2) == "o" {
+                var sid: int = vdata(sp2).to_int()
+                var sm = omaps[sid]; var sks = sm.keys()
+                for sk in sks { oset(oid, sk, sm.get(sk)) }
+            }
+            if tt == 36 { next() }
+            continue
+        }
+        if tt == 34 { next(); var key = vtostr(p_expr()); if tt == 35 { next() } if tt == 39 { next() } oset(oid, key, p_expr()); if tt == 36 { next() } continue }
+        var key = tv; next()
+        if tt == 30 {
+            var fid = fcnt; next()
+            var params = ""
+            while tt != 31 && tt != 0 { if params.len() > 0 { params = params + "," } params = params + tv; next(); if tt == 36 { next() } }
+            if tt == 31 { next() }
+            var bstart = pos; if tt == 32 { next() }
+            var depth = 1
+            while depth > 0 && tt != 0 { if tt == 32 { depth = depth + 1 } if tt == 33 { depth = depth - 1; if depth == 0 { break } } next() }
+            var bend = pos - 1; if bend < bstart { bend = bstart }
+            fparams[fid] = params; fbodies[fid] = src.substring(bstart, bend); fcnt = fcnt + 1
+            next()
+            oset(oid, key, vfn(fid))
+            if tt == 36 { next() }
+            continue
+        }
+        if tt == 39 { next(); oset(oid, key, p_expr()) }
+        else { oset(oid, key, eget(key)) }
+        if tt == 36 { next() }
+    }
+    if tt == 33 { next() }
+    return vobj(oid)
+}
+
+fn p_func_expr() -> string {
+    next()
+    var name = ""
+    if tt == 3 { name = tv; next() }
+    if tt == 30 { next() }
+    var params = ""
+    while tt != 31 && tt != 0 {
+        if params.len() > 0 { params = params + "," }
+        // Rest parameter: ...name
+        if tt == 98 { next(); params = params + "..." }
+        params = params + tv; next()
+        if tt == 15 {
+            // Default param: store default value directly
+            next()
+            // For string defaults, store with quotes for re-parsing
+            if tt == 2 {
+                params = params + "=\"" + tv + "\""
+                next()
+            } elseif tt == 1 {
+                params = params + "=" + tv
+                next()
+            } elseif tt == 4 {
+                params = params + "=" + tv
+                next()
+            } else {
+                // Complex default — capture source
+                var ds = pos - tv.len()
+                p_expr()
+                params = params + "=" + src.substring(ds, pos).trim()
+            }
+        }
+        if tt == 36 { next() }
+    }
+    if tt == 31 { next() }
+    var bstart = pos; if tt == 32 { next() }
+    var depth = 1
+    while depth > 0 && tt != 0 { if tt == 32 { depth = depth + 1 } if tt == 33 { depth = depth - 1; if depth == 0 { break } } next() }
+    var bend = pos - 1; if bend < bstart { bend = bstart }
+    var fid = fcnt; fparams[fid] = params; fbodies[fid] = src.substring(bstart, bend); fcnt = fcnt + 1
+    // Capture closure environment
+    var cap = capture_env()
+    if cap.len() > 0 {
+        var parts = cap.split("\x02")
+        var ck = ""
+        var cv = ""
+        for p in parts {
+            var sep = p.index_of("\x01")
+            if sep > 0 {
+                if ck.len() > 0 { ck = ck + "\x02"; cv = cv + "\x02" }
+                ck = ck + p.substring(0, sep)
+                cv = cv + p.substring(sep + 1, p.len())
+            }
+        }
+        fcap_keys[fid] = ck
+        fcap_vals[fid] = cv
+    }
+    next()
+    if name.len() > 0 { edef(name, vfn(fid)) }
+    return vfn(fid)
+}
+
+fn p_arrow(params: string) -> string {
+    var fid = fcnt
+    fparams[fid] = params
+    if tt == 32 {
+        next()
+        var depth = 1; var bstart = pos
+        while depth > 0 && tt != 0 { if tt == 32 { depth = depth + 1 } if tt == 33 { depth = depth - 1; if depth == 0 { break } } next() }
+        fbodies[fid] = src.substring(bstart, pos - 1)
+        next()
+    } else {
+        // Expression body: capture raw source text
+        // pos is currently at the start of the first token of the body
+        // We need to capture everything until ), ;, ,, or }
+        var estart = pos - tv.len()
+        // For string/template tokens, pos includes quotes but tv doesn't
+        if tt == 2 { estart = pos - tv.len() - 2 }
+        if tt == 61 { estart = pos - tv.len() - 2 }
+        var eend = pos
+        var edepth = 0
+        while tt != 0 {
+            if tt == 34 || tt == 30 { edepth = edepth + 1 }
+            if tt == 35 || tt == 31 { if edepth > 0 { edepth = edepth - 1 } else { break } }
+            if edepth == 0 && (tt == 37 || tt == 36 || tt == 33) { break }
+            eend = pos; next()
+        }
+        fbodies[fid] = "return " + src.substring(estart, eend) + ";"
+    }
+    fcnt = fcnt + 1
+    // Capture closure environment for arrow functions
+    var cap = capture_env()
+    if cap.len() > 0 {
+        var parts = cap.split("\x02")
+        var ck = ""
+        var cv = ""
+        for p in parts {
+            var sep = p.index_of("\x01")
+            if sep > 0 {
+                if ck.len() > 0 { ck = ck + "\x02"; cv = cv + "\x02" }
+                ck = ck + p.substring(0, sep)
+                cv = cv + p.substring(sep + 1, p.len())
+            }
+        }
+        fcap_keys[fid] = ck
+        fcap_vals[fid] = cv
+    }
+    return vfn(fid)
+}
+
+// === new Map/Set/Error/RegExp/Promise ===
+fn new_map() -> string {
+    if tt == 30 { next(); if tt == 31 { next() } }
+    var oid = onew()
+    oset(oid, "__type__", vstr("Map"))
+    oset(oid, "__data__", vobj(onew()))
+    return vobj(oid)
+}
+
+fn new_set() -> string {
+    if tt == 30 { next()
+        var items = [""]
+        items = []
+        if tt != 31 { var arg = p_expr(); if vtag(arg) == "a" { var i = 0; while i < alens[vdata(arg).to_int()] { items.push(aget(vdata(arg).to_int(), i)); i = i + 1 } } }
+        if tt == 31 { next() }
+        var oid = onew()
+        oset(oid, "__type__", vstr("Set"))
+        var did = onew()
+        for item in items { oset(did, vtostr(item), item) }
+        oset(oid, "__data__", vobj(did))
+        return vobj(oid)
+    }
+    var oid = onew()
+    oset(oid, "__type__", vstr("Set"))
+    oset(oid, "__data__", vobj(onew()))
+    return vobj(oid)
+}
+
+fn new_error() -> string {
+    var msg = ""
+    if tt == 30 { next(); if tt != 31 { msg = vtostr(p_expr()) } if tt == 31 { next() } }
+    var oid = onew()
+    oset(oid, "__type__", vstr("Error"))
+    oset(oid, "message", vstr(msg))
+    oset(oid, "name", vstr("Error"))
+    return vobj(oid)
+}
+
+fn new_regexp() -> string {
+    var pattern = ""
+    var flags = ""
+    if tt == 30 { next(); if tt != 31 { pattern = vtostr(p_expr()); if tt == 36 { next(); flags = vtostr(p_expr()) } } if tt == 31 { next() } }
+    var oid = onew()
+    oset(oid, "__type__", vstr("RegExp"))
+    oset(oid, "source", vstr(pattern))
+    oset(oid, "flags", vstr(flags))
+    return vobj(oid)
+}
+
+fn new_promise() -> string {
+    if tt != 30 { return vundef() }
+    next()
+    var executor = p_expr()
+    if tt == 31 { next() }
+    var oid = onew()
+    oset(oid, "__type__", vstr("Promise"))
+    oset(oid, "__state__", vstr("pending"))
+    oset(oid, "__value__", vundef())
+    // Create resolve/reject functions
+    var resolve_fid = fcnt
+    fparams[resolve_fid] = "v"
+    fbodies[resolve_fid] = ""
+    fcnt = fcnt + 1
+    // Execute the executor synchronously
+    var resolve_val = vundef()
+    // We'll use a simple approach: executor calls resolve(v), we capture it
+    // Store promise id for resolve to find
+    edef("__promise_oid__", vnum(oid))
+    var rfid = fcnt
+    fparams[rfid] = "v"
+    fbodies[rfid] = "this.__state__ = \"fulfilled\"; this.__value__ = v;"
+    fcnt = fcnt + 1
+    var rjfid = fcnt
+    fparams[rjfid] = "v"
+    fbodies[rjfid] = "this.__state__ = \"rejected\"; this.__value__ = v;"
+    fcnt = fcnt + 1
+    this_push(vobj(oid))
+    callfn(executor, [vfn(rfid), vfn(rjfid)])
+    return vobj(oid)
+}
+
+fn new_class(cls_name: string) -> string {
+    // Find class
+    var ci = 0
+    while ci < ccnt { if cnames[ci] == cls_name { break } ci = ci + 1 }
+    if ci >= ccnt {
+        // Not a class, try as function constructor
+        var ctor = eget(cls_name)
+        if vtag(ctor) == "f" {
+            var oid = onew()
+            if tt == 30 { next()
+                var args = [""]
+                args = []
+                while tt != 31 && tt != 0 { args.push(p_expr()); if tt == 36 { next() } }
+                if tt == 31 { next() }
+                this_push(vobj(oid))
+                callfn(ctor, args)
+            }
+            return vobj(oid)
+        }
+        if tt == 30 { next(); while tt != 31 && tt != 0 { p_expr(); if tt == 36 { next() } } if tt == 31 { next() } }
+        return vobj(onew())
+    }
+    // Create instance
+    var oid = onew()
+    oprotos[oid] = cprotos[ci]
+    oset(oid, "__class__", vstr(cls_name))
+    // Call constructor
+    if tt == 30 {
+        next()
+        var args = [""]
+        args = []
+        while tt != 31 && tt != 0 { args.push(p_expr()); if tt == 36 { next() } }
+        if tt == 31 { next() }
+        if cconstructors[ci] >= 0 {
+            this_push(vobj(oid))
+            callfn(vfn(cconstructors[ci]), args)
+        }
+    }
+    return vobj(oid)
+}
+
+// === Statements ===
+fn p_stmt() {
+    if retflag == 1 || throwflag == 1 { return }
+    if brkflag == 1 || contflag == 1 { return }
+    // Labeled statement: handled in expression fallthrough
+    // (labels are identifier followed by colon, detected below)
+    // let/const/var with destructuring
+    if tt == 50 || tt == 51 || tt == 52 {
+        next()
+        // Array destructuring: let [a, b] = expr
+        if tt == 34 {
+            next()
+            var names = [""]
+            names = []
+            while tt != 35 && tt != 0 {
+                if tt == 36 { next(); names.push(""); continue }
+                if tt == 98 { next(); names.push("..." + tv); next(); if tt == 36 { next() }; continue }
+                names.push(tv); next(); if tt == 36 { next() }
+            }
+            if tt == 35 { next() }
+            if tt == 15 { next() }
+            var val = p_expr()
+            if vtag(val) == "a" {
+                var aid = vdata(val).to_int()
+                var i = 0
+                for n in names {
+                    if n.starts_with("...") {
+                        var rest_name = n.substring(3, n.len())
+                        var rid = anew()
+                        while i < alens[aid] { apush(rid, aget(aid, i)); i = i + 1 }
+                        edef(rest_name, varr(rid))
+                    } elseif n.len() > 0 { edef(n, aget(aid, i)) }
+                    i = i + 1
+                }
+            }
+            if tt == 37 { next() }
+            return
+        }
+        // Object destructuring: let {a, b} = expr
+        if tt == 32 {
+            next()
+            var onames = [""]
+            onames = []
+            while tt != 33 && tt != 0 { onames.push(tv); next(); if tt == 39 { next(); onames[onames.len()-1] = tv; next() }; if tt == 36 { next() } }
+            if tt == 33 { next() }
+            if tt == 15 { next() }
+            var val = p_expr()
+            if vtag(val) == "o" {
+                var oid = vdata(val).to_int()
+                for n in onames { edef(n, oget(oid, n)) }
+            }
+            if tt == 37 { next() }
+            return
+        }
+        var name = tv; next()
+        var val = vundef()
+        if tt == 15 { next(); val = p_expr() }
+        edef(name, val)
+        // Handle comma-separated declarations: let a = 1, b = 2
+        while tt == 36 { next(); var n2 = tv; next(); var v2 = vundef(); if tt == 15 { next(); v2 = p_expr() }; edef(n2, v2) }
+        if tt == 37 { next() }
+        return
+    }
+    // function declaration
+    if tt == 53 || (tt == 89 && peek_is_function()) {
+        if tt == 89 { next() }
+        next()
+        var name = tv; next()
+        if tt == 30 { next() }
+        var params = ""
+        while tt != 31 && tt != 0 {
+            if params.len() > 0 { params = params + "," }
+            if tt == 98 { next(); params = params + "..." }
+            params = params + tv; next()
+            if tt == 15 {
+                next()
+                if tt == 2 { params = params + "=\"" + tv + "\""; next() }
+                elseif tt == 1 { params = params + "=" + tv; next() }
+                elseif tt == 4 { params = params + "=" + tv; next() }
+                else { var ds = pos - tv.len(); p_expr(); params = params + "=" + src.substring(ds, pos).trim() }
+            }
+            if tt == 36 { next() }
+        }
+        if tt == 31 { next() }
+        var bstart = pos; if tt == 32 { next() }
+        var depth = 1
+        while depth > 0 && tt != 0 { if tt == 32 { depth = depth + 1 } if tt == 33 { depth = depth - 1; if depth == 0 { break } } next() }
+        var bend = pos - 1; if bend < bstart { bend = bstart }
+        var fid = fcnt; fparams[fid] = params; fbodies[fid] = src.substring(bstart, bend); fcnt = fcnt + 1
+        next()
+        edef(name, vfn(fid))
+        return
+    }
+    // class declaration
+    if tt == 70 {
+        next()
+        var name = tv; next()
+        var parent_id = -1
+        if tt == 73 { next(); var pname = tv; next()
+            var pi = 0; while pi < ccnt { if cnames[pi] == pname { parent_id = pi; break } pi = pi + 1 }
+        }
+        if tt == 32 { next() }
+        var ci = ccnt
+        cnames[ci] = name
+        var proto_oid = onew()
+        if parent_id >= 0 { oprotos[proto_oid] = cprotos[parent_id] }
+        cprotos[ci] = proto_oid
+        cconstructors[ci] = -1
+        cparents[ci] = parent_id
+        ccnt = ccnt + 1
+        // Parse class body
+        while tt != 33 && tt != 0 {
+            var is_st = 0
+            if tv == "static" { is_st = 1; next() }
+            if tv == "get" || tv == "set" { next() }
+            var mname = tv; next()
+            if is_st == 1 && tt == 15 { next(); oset(proto_oid, "__static_" + mname, p_expr()); if tt == 37 { next() }; continue }
+            if tt == 30 { next() }
+            var params = ""
+            while tt != 31 && tt != 0 { if params.len() > 0 { params = params + "," } params = params + tv; next(); if tt == 36 { next() } }
+            if tt == 31 { next() }
+            var bstart = pos; if tt == 32 { next() }
+            var depth = 1
+            while depth > 0 && tt != 0 { if tt == 32 { depth = depth + 1 } if tt == 33 { depth = depth - 1; if depth == 0 { break } } next() }
+            var bend = pos - 1; if bend < bstart { bend = bstart }
+            var fid = fcnt; fparams[fid] = params; fbodies[fid] = src.substring(bstart, bend); fcnt = fcnt + 1
+            next()
+            if mname == "constructor" { cconstructors[ci] = fid }
+            else { if is_st == 1 { oset(proto_oid, "__static_" + mname, vfn(fid)) } else { oset(proto_oid, mname, vfn(fid)) } }
+            if tt == 37 { next() }
+        }
+        if tt == 33 { next() }
+        edef(name, vstr(name))
+        return
+    }
+    // return
+    if tt == 54 {
+        next()
+        if tt == 37 || tt == 33 { retval = vundef() }
+        else { retval = p_expr() }
+        retflag = 1
+        if tt == 37 { next() }
+        return
+    }
+    // yield (stub — skip expression)
+    if tt == 91 { next(); if tt != 37 && tt != 33 { p_expr() }; if tt == 37 { next() }; return }
+    // throw
+    if tt == 82 {
+        next()
+        throwval = p_expr()
+        throwflag = 1
+        if tt == 37 { next() }
+        return
+    }
+    // try/catch/finally
+    if tt == 83 {
+        next()
+        if tt == 32 { next() }
+        epush()
+        var saved_throw = throwflag
+        throwflag = 0
+        p_block_body()
+        epop()
+        var had_throw = throwflag
+        var thrown = throwval
+        throwflag = 0
+        // catch
+        if tt == 84 {
+            next()
+            var catch_var = ""
+            if tt == 30 { next(); catch_var = tv; next(); if tt == 31 { next() } }
+            if had_throw == 1 {
+                if tt == 32 { next() }
+                epush()
+                if catch_var.len() > 0 { edef(catch_var, thrown) }
+                p_block_body()
+                epop()
+            } else {
+                skip_block_raw()
+            }
+        }
+        // finally
+        if tt == 85 {
+            next()
+            if tt == 32 { next() }
+            epush(); p_block_body(); epop()
+        }
+        return
+    }
+    // if
+    if tt == 55 {
+        next(); if tt == 30 { next() }
+        var cond = p_expr()
+        if tt == 31 { next() }
+        if vtruthy(cond) == 1 {
+            p_block_or_stmt()
+            while tt == 56 {
+                next()
+                if tt == 55 { next(); if tt == 30 { next() } p_expr(); if tt == 31 { next() } skip_block_or_stmt() }
+                else { skip_block_or_stmt() }
+            }
+        } else {
+            skip_block_or_stmt()
+            if tt == 56 {
+                next()
+                if tt == 55 { p_stmt() }
+                else { p_block_or_stmt() }
+            }
+        }
+        return
+    }
+    // switch
+    if tt == 78 {
+        next(); if tt == 30 { next() }
+        var val = p_expr()
+        if tt == 31 { next() }
+        if tt == 32 { next() }
+        var matched = 0
+        while tt != 33 && tt != 0 {
+            if tt == 79 {
+                next()
+                var case_val = p_expr()
+                if tt == 39 { next() }
+                if matched == 1 || vtostr(val) == vtostr(case_val) {
+                    matched = 1
+                    while tt != 79 && tt != 80 && tt != 33 && tt != 0 {
+                        if brkflag == 1 { break }
+                        p_stmt()
+                    }
+                    if brkflag == 1 { brkflag = 0; break }
+                } else {
+                    while tt != 79 && tt != 80 && tt != 33 && tt != 0 { skip_stmt() }
+                }
+            } elseif tt == 80 {
+                next(); if tt == 39 { next() }
+                if matched == 0 {
+                    matched = 1
+                    while tt != 79 && tt != 33 && tt != 0 {
+                        if brkflag == 1 { break }
+                        p_stmt()
+                    }
+                    if brkflag == 1 { brkflag = 0; break }
+                } else {
+                    while tt != 79 && tt != 33 && tt != 0 { skip_stmt() }
+                }
+            } else { next() }
+        }
+        if tt == 33 { next() }
+        else {
+            // Skip remaining switch body after break
+            var depth = 1
+            while depth > 0 && tt != 0 {
+                if tt == 32 { depth = depth + 1 }
+                if tt == 33 { depth = depth - 1; if depth == 0 { break } }
+                next()
+            }
+            if tt == 33 { next() }
+        }
+        return
+    }
+    // while
+    if tt == 57 {
+        next(); if tt == 30 { next() }
+        var cstart = pos - tv.len()
+        var depth = 0
+        while tt != 31 || depth > 0 { if tt == 30 { depth = depth + 1 } if tt == 31 { if depth > 0 { depth = depth - 1 } else { break } } next() }
+        var csrc = src.substring(cstart, pos - 1)
+        next()
+        var bstart = pos; if tt == 32 { bstart = pos; next() }
+        depth = 1
+        while depth > 0 && tt != 0 { if tt == 32 { depth = depth + 1 } if tt == 33 { depth = depth - 1; if depth == 0 { break } } next() }
+        var bsrc = src.substring(bstart, pos - 1)
+        next()
+        var s1 = src; var p1 = pos; var t1 = tt; var v1 = tv
+        var iter = 0
+        while iter < 1000000 {
+            src = csrc; pos = 0; next(); var cv = p_expr()
+            if vtruthy(cv) == 0 { break }
+            src = bsrc; pos = 0; next(); epush(); p_block_body(); epop()
+            if retflag == 1 || throwflag == 1 { break }
+            if brkflag == 1 { brkflag = 0; break }
+            contflag = 0
+            iter = iter + 1
+        }
+        src = s1; pos = p1; tt = t1; tv = v1
+        return
+    }
+    // do...while
+    if tt == 81 {
+        next()
+        var bstart = pos; if tt == 32 { bstart = pos; next() }
+        var depth = 1
+        while depth > 0 && tt != 0 { if tt == 32 { depth = depth + 1 } if tt == 33 { depth = depth - 1; if depth == 0 { break } } next() }
+        var bsrc = src.substring(bstart, pos - 1)
+        next()
+        // expect 'while'
+        if tt == 57 { next() }
+        if tt == 30 { next() }
+        var cstart = pos - tv.len()
+        depth = 0
+        while tt != 31 || depth > 0 { if tt == 30 { depth = depth + 1 } if tt == 31 { if depth > 0 { depth = depth - 1 } else { break } } next() }
+        var csrc = src.substring(cstart, pos - 1)
+        next()
+        if tt == 37 { next() }
+        var s1 = src; var p1 = pos; var t1 = tt; var v1 = tv
+        var iter = 0
+        while iter < 1000000 {
+            src = bsrc; pos = 0; next(); epush(); p_block_body(); epop()
+            if retflag == 1 || throwflag == 1 { break }
+            if brkflag == 1 { brkflag = 0; break }
+            contflag = 0
+            src = csrc; pos = 0; next(); var cv = p_expr()
+            if vtruthy(cv) == 0 { break }
+            iter = iter + 1
+        }
+        src = s1; pos = p1; tt = t1; tv = v1
+        return
+    }
+    // for...in / for...of / C-style for
+    if tt == 58 {
+        next(); if tt == 30 { next() }
+        // Check for for...in / for...of
+        var decl_type = 0
+        if tt == 50 || tt == 51 || tt == 52 { decl_type = tt; next() }
+        if tt == 3 {
+            var vname = tv; var sp = pos; next()
+            // for (x in obj)
+            if tt == 93 {
+                next()
+                var obj = p_expr()
+                if tt == 31 { next() }
+                // Capture block source
+                var bstart = pos; if tt == 32 { bstart = pos; next() }
+                var depth = 1
+                while depth > 0 && tt != 0 { if tt == 32 { depth = depth + 1 } if tt == 33 { depth = depth - 1; if depth == 0 { break } } next() }
+                var bsrc = src.substring(bstart, pos - 1)
+                next()
+                var s1 = src; var p1 = pos; var t1 = tt; var v1 = tv
+                epush()
+                if vtag(obj) == "o" {
+                    var oid = vdata(obj).to_int()
+                    var m = omaps[oid]
+                    var ks = m.keys()
+                    for k in ks {
+                        if !k.starts_with("__") {
+                            edef(vname, vstr(k))
+                            src = bsrc; pos = 0; next(); p_block_body()
+                            if retflag == 1 || throwflag == 1 { break }
+                            if brkflag == 1 { brkflag = 0; break }
+                            contflag = 0
+                        }
+                    }
+                } elseif vtag(obj) == "a" {
+                    var aid = vdata(obj).to_int()
+                    var i = 0
+                    while i < alens[aid] {
+                        edef(vname, vstr(i.to_string()))
+                        src = bsrc; pos = 0; next(); p_block_body()
+                        if retflag == 1 || throwflag == 1 { break }
+                        if brkflag == 1 { brkflag = 0; break }
+                        contflag = 0
+                        i = i + 1
+                    }
+                }
+                epop()
+                src = s1; pos = p1; tt = t1; tv = v1
+                return
+            }
+            // for (x of arr)
+            if tt == 94 {
+                next()
+                var obj = p_expr()
+                if tt == 31 { next() }
+                // Capture block source
+                var bstart = pos; if tt == 32 { bstart = pos; next() }
+                var depth = 1
+                while depth > 0 && tt != 0 { if tt == 32 { depth = depth + 1 } if tt == 33 { depth = depth - 1; if depth == 0 { break } } next() }
+                var bsrc = src.substring(bstart, pos - 1)
+                next()
+                var s1 = src; var p1 = pos; var t1 = tt; var v1 = tv
+                epush()
+                if vtag(obj) == "a" {
+                    var aid = vdata(obj).to_int()
+                    var i = 0
+                    while i < alens[aid] {
+                        edef(vname, aget(aid, i))
+                        src = bsrc; pos = 0; next(); p_block_body()
+                        if retflag == 1 || throwflag == 1 { break }
+                        if brkflag == 1 { brkflag = 0; break }
+                        contflag = 0
+                        i = i + 1
+                    }
+                }
+                if vtag(obj) == "s" {
+                    var str_val = vdata(obj)
+                    var i = 0
+                    while i < str_val.len() {
+                        edef(vname, vstr(str_val.substring(i, i + 1)))
+                        src = bsrc; pos = 0; next(); p_block_body()
+                        if retflag == 1 || throwflag == 1 { break }
+                        if brkflag == 1 { brkflag = 0; break }
+                        contflag = 0
+                        i = i + 1
+                    }
+                }
+                epop()
+                src = s1; pos = p1; tt = t1; tv = v1
+                return
+            }
+            // C-style for — backtrack
+            pos = sp - vname.len()
+            if decl_type > 0 { pos = pos - 4 }
+            next()
+        }
+        // C-style for
+        epush()
+        if tt != 37 { p_stmt() } else { next() }
+        var cstart = pos - tv.len()
+        while tt != 37 && tt != 0 { next() }
+        var csrc = src.substring(cstart, pos - 1)
+        next()
+        var ustart = pos - tv.len()
+        var depth = 0
+        while tt != 31 || depth > 0 { if tt == 30 { depth = depth + 1 } if tt == 31 { if depth > 0 { depth = depth - 1 } else { break } } next() }
+        var usrc = src.substring(ustart, pos - 1)
+        next()
+        var bstart = pos; if tt == 32 { bstart = pos; next() }
+        depth = 1
+        while depth > 0 && tt != 0 { if tt == 32 { depth = depth + 1 } if tt == 33 { depth = depth - 1; if depth == 0 { break } } next() }
+        var bsrc = src.substring(bstart, pos - 1)
+        next()
+        var s1 = src; var p1 = pos; var t1 = tt; var v1 = tv
+        var iter = 0
+        while iter < 1000000 {
+            src = csrc; pos = 0; next(); var cv = p_expr()
+            if vtruthy(cv) == 0 { break }
+            src = bsrc; pos = 0; next(); p_block_body()
+            if retflag == 1 || throwflag == 1 { break }
+            if brkflag == 1 { brkflag = 0; break }
+            contflag = 0
+            src = usrc; pos = 0; next(); p_expr(); while tt == 36 { next(); p_expr() }
+            iter = iter + 1
+        }
+        epop()
+        src = s1; pos = p1; tt = t1; tv = v1
+        return
+    }
+    // break
+    if tt == 59 { next(); brkflag = 1; if tt == 37 { next() } return }
+    // continue
+    if tt == 60 { next(); contflag = 1; if tt == 37 { next() } return }
+    // import
+    if tt == 86 { p_import(); return }
+    // export
+    if tt == 87 { next(); p_stmt(); return }
+    // block
+    if tt == 32 { next(); epush(); p_block_body(); epop(); return }
+    // empty statement
+    if tt == 37 { next(); return }
+    // expression statement
+    p_expr()
+    if tt == 37 { next() }
+}
+
+fn peek_is_function() -> int {
+    var sp = pos
+    skipws()
+    if pos < src.len() {
+        var c = ch()
+        pos = sp
+        if c == "f" { return 1 }
+    }
+    pos = sp
+    return 0
+}
+
+fn p_block_or_stmt() {
+    if tt == 32 { next(); epush(); p_block_body(); epop() }
+    else { p_stmt() }
+}
+
+fn p_block_or_stmt_rewind() {
+    // Used by for-in: we need to re-execute the block each iteration
+    // The caller handles the rewind
+    p_block_or_stmt()
+}
+
+fn skip_block_raw() {
+    if tt == 32 {
+        next(); var depth = 1
+        while depth > 0 && tt != 0 { if tt == 32 { depth = depth + 1 } if tt == 33 { depth = depth - 1; if depth == 0 { break } } next() }
+        next()
+    }
+}
+
+fn skip_block_or_stmt() {
+    if tt == 32 { skip_block_raw() }
+    else { while tt != 37 && tt != 0 && tt != 33 { next() } if tt == 37 { next() } }
+}
+
+fn skip_stmt() {
+    if tt == 32 { skip_block_raw() }
+    else { while tt != 37 && tt != 79 && tt != 80 && tt != 33 && tt != 0 { next() } if tt == 37 { next() } }
+}
+
+fn p_block_body() {
+    while tt != 33 && tt != 0 {
+        if retflag == 1 || brkflag == 1 || contflag == 1 || throwflag == 1 { break }
+        p_stmt()
+    }
+    if tt == 33 { next() }
+}
+
+fn p_import() {
+    next()
+    // import { a, b } from "file"
+    if tt == 32 {
+        next()
+        var names = [""]
+        names = []
+        while tt != 33 && tt != 0 { names.push(tv); next(); if tt == 36 { next() } }
+        if tt == 33 { next() }
+        if tt == 88 { next() }
+        var path = vtostr(p_expr())
+        if tt == 37 { next() }
+        var exports = load_module(path)
+        if vtag(exports) == "o" {
+            var oid = vdata(exports).to_int()
+            for n in names { edef(n, oget(oid, n)) }
+        }
+        return
+    }
+    // import x from "file"
+    if tt == 3 {
+        var name = tv; next()
+        if tt == 88 { next() }
+        var path = vtostr(p_expr())
+        if tt == 37 { next() }
+        var exports = load_module(path)
+        edef(name, exports)
+        return
+    }
+    // import "file" (side effects only)
+    var path = vtostr(p_expr())
+    if tt == 37 { next() }
+    load_module(path)
+}
+
+fn load_module(path: string) -> string {
+    // Check cache
+    var i = 0
+    while i < mod_cnt { if mod_paths[i] == path { return mod_exports[i] } i = i + 1 }
+    // Resolve path relative to current file
+    var code = File.read(path)
+    if code.len() == 0 { return vobj(onew()) }
+    var s1 = src; var p1 = pos; var t1 = tt; var v1 = tv
+    var exports_oid = onew()
+    epush()
+    edef("module", vobj(exports_oid))
+    src = code; pos = 0; next()
+    while tt != 0 { p_stmt(); if retflag == 1 { break } }
+    retflag = 0
+    epop()
+    src = s1; pos = p1; tt = t1; tv = v1
+    mod_paths[mod_cnt] = path
+    mod_exports[mod_cnt] = vobj(exports_oid)
+    mod_cnt = mod_cnt + 1
+    return vobj(exports_oid)
+}
+
+// === Map/Set method dispatch (in do_member) ===
+fn map_set_method(oid: int, prop: string) -> string {
+    var type_val = oget(oid, "__type__")
+    var type_s = vtostr(type_val)
+    var did = vdata(oget(oid, "__data__")).to_int()
+    if type_s == "Map" {
+        if prop == "set" { if tt == 30 { next(); var k = vtostr(p_expr()); if tt == 36 { next() } var v = p_expr(); if tt == 31 { next() } oset(did, k, v); return vobj(oid) } return vundef() }
+        if prop == "get" { if tt == 30 { next(); var k = vtostr(p_expr()); if tt == 31 { next() } return oget(did, k) } return vundef() }
+        if prop == "has" { if tt == 30 { next(); var k = vtostr(p_expr()); if tt == 31 { next() } return vbool(ohas(did, k)) } return vundef() }
+        if prop == "delete" { if tt == 30 { next(); var k = vtostr(p_expr()); if tt == 31 { next() } oset(did, k, vundef()); return vbool(1) } return vundef() }
+        if prop == "size" { var m = omaps[did]; return vnum(m.len()) }
+        if prop == "keys" { if tt == 30 { next(); if tt == 31 { next() } } return varr(okeys_arr(did)) }
+        if prop == "values" {
+            if tt == 30 { next(); if tt == 31 { next() } }
+            var aid = anew()
+            var m = omaps[did]; var ks = m.keys()
+            for k in ks { apush(aid, m.get(k)) }
+            return varr(aid)
+        }
+        if prop == "forEach" {
+            if tt == 30 { next(); var cb = p_expr(); if tt == 31 { next() }
+                var m = omaps[did]; var ks = m.keys()
+                for k in ks { callfn(cb, [m.get(k), vstr(k)]) }
+            }
+            return vundef()
+        }
+    }
+    if type_s == "Set" {
+        if prop == "add" { if tt == 30 { next(); var v = p_expr(); if tt == 31 { next() } oset(did, vtostr(v), v); return vobj(oid) } return vundef() }
+        if prop == "has" { if tt == 30 { next(); var v = p_expr(); if tt == 31 { next() } return vbool(ohas(did, vtostr(v))) } return vundef() }
+        if prop == "delete" { if tt == 30 { next(); var v = p_expr(); if tt == 31 { next() } return vbool(1) } return vundef() }
+        if prop == "size" { var m = omaps[did]; return vnum(m.len()) }
+        if prop == "forEach" {
+            if tt == 30 { next(); var cb = p_expr(); if tt == 31 { next() }
+                var m = omaps[did]; var ks = m.keys()
+                for k in ks { callfn(cb, [m.get(k)]) }
+            }
+            return vundef()
+        }
+    }
+    if type_s == "Promise" {
+        if prop == "then" { if tt == 30 { next(); var cb = p_expr(); if tt == 31 { next() }
+            var state = vtostr(oget(oid, "__state__"))
+            if state == "fulfilled" { callfn(cb, [oget(oid, "__value__")]) }
+            return vobj(oid)
+        } return vundef() }
+        if prop == "catch" { if tt == 30 { next(); var cb = p_expr(); if tt == 31 { next() }
+            var state = vtostr(oget(oid, "__state__"))
+            if state == "rejected" { callfn(cb, [oget(oid, "__value__")]) }
+            return vobj(oid)
+        } return vundef() }
+    }
+    return vundef()
+}
+
+// === Main ===
+fn setup_globals() {
+    // Math constants
+    edef("Infinity", vstr("Infinity"))
+    edef("NaN", vstr("NaN"))
+    // setTimeout/setInterval (synchronous approximation)
+    var st_fid = fcnt
+    fparams[st_fid] = "fn,ms"
+    fbodies[st_fid] = "fn();"
+    fcnt = fcnt + 1
+    edef("setTimeout", vfn(st_fid))
+    edef("setInterval", vfn(st_fid))
+    edef("clearTimeout", register_builtin("_noop"))
+    edef("clearInterval", register_builtin("_noop"))
+    // Promise.resolve / Promise.reject
+    edef("Promise", vstr("_Promise"))
+}
+
+fn main() -> int {
+    init_env()
+    setup_globals()
+    var args = System.args()
+    var js_file = ""
+    // Check args: look for -- separator or last .js arg
+    var found = 0
+    for arg in args {
+        if found == 1 { js_file = arg; break }
+        if arg == "--" { found = 1 }
+    }
+    if js_file == "" {
+        if args.len() > 1 { js_file = args[args.len() - 1] }
+    }
+    // Fallback: read from env or /tmp/_wynjs_input.js
+    if js_file == "" || !js_file.ends_with(".js") {
+        var env_file = System.env("WYNJS_FILE")
+        if env_file.len() > 0 { js_file = env_file }
+    }
+    if js_file == "" || !js_file.ends_with(".js") {
+        var tmp = File.read("/tmp/_wynjs_input.js")
+        if tmp.len() > 0 { js_file = "/tmp/_wynjs_input.js" }
+    }
+    if js_file == "" { println("Usage: wynjs <file.js>"); return 1 }
+
+    var code = File.read(js_file)
+    if code.len() == 0 { println("Error: cannot read ${js_file}"); return 1 }
+
+    src = code; pos = 0; next()
+    while tt != 0 { p_stmt(); if retflag == 1 { break } }
+    return 0
+}

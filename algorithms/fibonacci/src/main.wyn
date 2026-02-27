@@ -1,0 +1,58 @@
+// Fibonacci -- Recursive, iterative, and spawn-based parallel computation
+// Demonstrates: recursion, structs, spawn for parallel work, string interpolation
+
+fn fib_recursive(n: int) -> int {
+    if n <= 1 { return n }
+    return fib_recursive(n - 1) + fib_recursive(n - 2)
+}
+
+fn fib_iterative(n: int) -> int {
+    if n <= 1 { return n }
+    var a = 0
+    var b = 1
+    for i in 2..(n + 1) {
+        var temp = a + b
+        a = b
+        b = temp
+    }
+    return b
+}
+
+struct FibResult { n: int, recursive: int, iterative: int }
+
+fn compute_fib(n: int, results: [FibResult], idx: int) {
+    results[idx] = FibResult { n: n, recursive: fib_recursive(n), iterative: fib_iterative(n) }
+}
+
+fn main() -> int {
+    println("=== Fibonacci Comparison ===")
+    println("")
+
+    var test_values = [0, 1, 5, 10, 15, 20]
+    var count = test_values.len()
+    var results: [FibResult] = []
+
+    for i in 0..count {
+        results.push(FibResult { n: 0, recursive: 0, iterative: 0 })
+    }
+
+    // Compute all fibonacci values concurrently
+    for i in 0..count {
+        spawn compute_fib(test_values[i], results, i)
+    }
+
+    Time.sleep(500)
+
+    for i in 0..count {
+        var r = results[i]
+        println("  fib(${r.n}) = ${r.recursive} [recursive] / ${r.iterative} [iterative]")
+        if r.recursive != r.iterative {
+            println("  ✗ MISMATCH!")
+            return 1
+        }
+    }
+
+    println("")
+    println("  ✓ All results match!")
+    return 0
+}

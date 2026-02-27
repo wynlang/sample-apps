@@ -1,0 +1,60 @@
+// wyn-web-demo -- Web app using the wyn-web framework
+// Demonstrates: Web.get/post, Web.match, Web.render, spawn-per-request, Db
+// Run: wyn run main.wyn
+
+fn on_request(method: string, path: string, body: string, fd: int, db: int) {
+    var handler = Web.match(method, path)
+
+    if handler == 1 {
+        // Home
+        var count = Db.query_one(db, "SELECT COUNT(*) FROM notes")
+        var html = Web.render("layout.html", "title=Home\ncontent=<div class=card><h2>Welcome</h2><p>A web app built with wyn-web.</p><p>" + count + " notes stored.</p></div>\n")
+        Http.respond(fd, 200, "text/html", html)
+    } else if handler == 2 {
+        // About
+        var html = Web.render("layout.html", "title=About\ncontent=<div class=card><h2>About</h2><p>Built with Wyn v1.8 -- zero external dependencies.</p></div>\n")
+        Http.respond(fd, 200, "text/html", html)
+    } else if handler == 3 {
+        // API: current time
+        var now = DateTime.to_iso(DateTime.now())
+        Http.respond(fd, 200, "application/json", "{\"time\":\"" + now + "\"}")
+    } else if handler == 4 {
+        // Create note
+        var doc = Json.parse(body)
+        var text = Json.get(doc, "text")
+        Db.exec(db, "INSERT INTO notes(text) VALUES('" + Db.escape(text) + "')")
+        Http.respond(fd, 201, "application/json", "{\"ok\":true}")
+    } else {
+        Http.respond(fd, 404, "text/html", "<h1>404</h1><p>Not found</p>")
+    }
+}
+
+fn main() -> int {
+    // Setup routes
+    Web.get("/", 1)
+    Web.get("/about", 2)
+    Web.get("/api/time", 3)
+    Web.post("/api/notes", 4)
+    Web.templates("templates")
+
+    // Setup database
+    var db = Db.open("/tmp/wyn_web_demo.db")
+    Db.exec(db, "CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, text TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+
+    var port = 8080
+    var server = Http.serve(port)
+    println("wyn-web-demo running on http://localhost:"${port})
+    println("Routes: ${Web.route_count()} registered")
+    println("Press Ctrl+C to stop")
+
+    while 1 == 1 {
+        var req = Http.accept(server)
+        var method = req.split_at("|", 0)
+        var path = req.split_at("|", 1)
+        var body = req.split_at("|", 2)
+        var fd = req.split_at("|", 3).to_int()
+        if fd > 0 {
+            spawn on_request(method, path, body, fd, db)
+        }
+    }
+}

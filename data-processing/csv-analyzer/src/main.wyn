@@ -1,0 +1,63 @@
+// CSV Analyzer -- Read student grades, compute statistics
+// Demonstrates: File.read, string interpolation, structs, computed grades
+
+fn main() -> int {
+    println("=== Student Grade Analyzer ===")
+    println("")
+
+    var content = File.read("../sample-apps/data-processing/csv-analyzer/data.csv")
+    var line_start = 0
+    var total_len = content.len()
+    var count = 0
+    var sum_math = 0
+    var sum_sci = 0
+    var sum_eng = 0
+    var best_avg = 0
+    var best_name = ""
+
+    println("Name       Math  Sci   Eng   Avg  Grade")
+    println("─────────────────────────────────────────")
+
+    for idx in 0..total_len {
+        if content[idx] == "\n" {
+            var line = content.substring(line_start, idx).trim()
+            line_start = idx + 1
+
+            if line.len() == 0 { continue }
+            if line.contains(",") == 0 { continue }
+
+            var name = line.split_at(",", 0)
+            var math_score = line.split_at(",", 1).to_int()
+            var sci_score = line.split_at(",", 2).to_int()
+            var eng_score = line.split_at(",", 3).to_int()
+            var avg = (math_score + sci_score + eng_score) / 3
+
+            var grade = "F"
+            if avg >= 90 { grade = "A" }
+            else if avg >= 80 { grade = "B" }
+            else if avg >= 70 { grade = "C" }
+            else if avg >= 60 { grade = "D" }
+
+            println("${name}     ${math_score}    ${sci_score}    ${eng_score}    ${avg}   ${grade}")
+
+            sum_math += math_score
+            sum_sci += sci_score
+            sum_eng += eng_score
+            count += 1
+
+            if avg > best_avg {
+                best_avg = avg
+                best_name = name
+            }
+        }
+    }
+
+    println("─────────────────────────────────────────")
+    println("")
+    println("Students:     ${count}")
+    println("Avg Math:     ${sum_math / count}")
+    println("Avg Science:  ${sum_sci / count}")
+    println("Avg English:  ${sum_eng / count}")
+    println("Top Student:  ${best_name} (avg: ${best_avg})")
+    return 0
+}

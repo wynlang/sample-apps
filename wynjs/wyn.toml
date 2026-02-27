@@ -1,0 +1,7 @@
+[project]
+name = "wynjs"
+version = "0.1.0"
+entry = "src/main.wyn"
+
+[dependencies]
+# Add dependencies here

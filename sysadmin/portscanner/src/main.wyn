@@ -1,0 +1,78 @@
+// portscanner -- Concurrent port scanner using spawn
+// Demonstrates: spawn for parallel I/O, structs, string interpolation, for..in
+// Non-interactive: prints and exits
+
+struct ScanResult { port: int, name: string, open: int }
+
+fn port_name(port: int) -> string {
+    if port == 22 { return "SSH" }
+    if port == 80 { return "HTTP" }
+    if port == 443 { return "HTTPS" }
+    if port == 3000 { return "Dev Server" }
+    if port == 3306 { return "MySQL" }
+    if port == 5432 { return "PostgreSQL" }
+    if port == 6379 { return "Redis" }
+    if port == 8080 { return "HTTP Alt" }
+    if port == 8443 { return "HTTPS Alt" }
+    if port == 9090 { return "Prometheus" }
+    if port == 27017 { return "MongoDB" }
+    return "Unknown"
+}
+
+fn scan_port(host: string, port: int, results: [ScanResult], idx: int) {
+    var cmd = "nc -z -w1 ${host} ${port} 2>&1; echo $?"
+    var result = System.exec(cmd).trim()
+    var last_nl = result.last_index_of("\n")
+    var exit_str = result
+    if last_nl >= 0 {
+        exit_str = result.substring(last_nl + 1, result.len()).trim()
+    }
+    results[idx] = ScanResult { port: port, name: port_name(port), open: exit_str.to_int() == 0 }
+}
+
+fn main() -> int {
+    println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
+    println("\x1b[1;36m║\x1b[0m           \x1b[1mportscanner\x1b[0m -- Concurrent Port Scanner             \x1b[1;36m║\x1b[0m")
+    println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
+    println("")
+
+    var host = "localhost"
+    var ports = [22, 80, 443, 3000, 3306, 5432, 6379, 8080, 8443, 9090, 27017]
+    var count = ports.len()
+    var results = []
+
+    // Pre-allocate results
+    for i in 0..count {
+        results.push(ScanResult { port: 0, name: "", open: 0 })
+    }
+
+    println("  Scanning \x1b[1m${host}\x1b[0m (${count} ports concurrently)...")
+    println("")
+
+    // Spawn all port scans concurrently -- this is the Wyn way
+    for i in 0..count {
+        spawn scan_port(host, ports[i], results, i)
+    }
+
+    // Wait for all spawns to complete
+    Time.sleep(2000)
+
+    println("  ${"PORT".pad_right(8, " ")}${"SERVICE".pad_right(15, " ")}STATUS")
+    println("  ${"────".pad_right(8, " ")}${"───────".pad_right(15, " ")}──────")
+
+    var open_count = 0
+    for i in 0..count {
+        var r = results[i]
+        var status = "\x1b[90m○ closed\x1b[0m"
+        if r.open {
+            status = "\x1b[32m● OPEN\x1b[0m"
+            open_count += 1
+        }
+        println("  ${r.port.to_string().pad_right(8, " ")}${r.name.pad_right(15, " ")}${status}")
+    }
+
+    println("")
+    println("  \x1b[90mFound ${open_count} open port(s) on ${host}\x1b[0m")
+    println("")
+    return 0
+}

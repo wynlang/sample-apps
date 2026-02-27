@@ -1,0 +1,29 @@
+fn is_ignored(name: string) -> int {
+    if name == ".git" || name == "node_modules" || name == "target" { return 1 }
+    return 0
+}
+
+fn is_binary(name: string) -> int {
+    if name.ends_with(".o") || name.ends_with(".a") || name.ends_with(".so") { return 1 }
+    if name.ends_with(".png") || name.ends_with(".jpg") { return 1 }
+    return 0
+}
+
+test "ignored directories" {
+    assert_eq(is_ignored(".git"), 1)
+    assert_eq(is_ignored("node_modules"), 1)
+    assert_eq(is_ignored("src"), 0)
+    assert_eq(is_ignored("main.wyn"), 0)
+}
+
+test "binary detection" {
+    assert_eq(is_binary("main.o"), 1)
+    assert_eq(is_binary("photo.png"), 1)
+    assert_eq(is_binary("main.wyn"), 0)
+    assert_eq(is_binary("README.md"), 0)
+}
+
+test "string contains" {
+    assert("hello world".contains("world"))
+    assert("fn main()".contains("fn"))
+}

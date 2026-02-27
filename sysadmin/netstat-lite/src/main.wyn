@@ -1,0 +1,116 @@
+// netstat-lite -- Network connections and interface monitor
+// Demonstrates: System.exec, string parsing, formatted output
+// Non-interactive: prints and exits
+
+fn main() -> int {
+    println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
+    println("\x1b[1;36m║\x1b[0m          \x1b[1mnetstat-lite\x1b[0m -- Network Status Monitor               \x1b[1;36m║\x1b[0m")
+    println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
+    println("")
+
+    // Hostname and IPs
+    var hostname = System.exec("hostname").trim()
+    var ip = System.exec("ifconfig 2>/dev/null | grep 'inet ' | grep -v 127.0.0.1 | head -1 | awk '{print $2}'").trim()
+    println("  \x1b[1mHost:\x1b[0m " + hostname)
+    println("  \x1b[1mIP:\x1b[0m   " + ip)
+    println("")
+
+    // Network interfaces
+    println("  \x1b[1;33m═══ Interfaces ═══\x1b[0m")
+    println("")
+    var ifaces = System.exec("ifconfig 2>/dev/null | grep -E '^[a-z]|inet |status' | head -30")
+    var line_start = 0
+    var ilen = ifaces.len()
+    for idx in 0..ilen {
+        if ifaces[idx] == "\n" {
+            var line = ifaces.substring(line_start, idx)
+            line_start = idx + 1
+            var trimmed = line.trim()
+            if trimmed.len() == 0 { continue }
+
+            if trimmed.contains("flags=") {
+                // Interface name line
+                var name = trimmed.split_at(":", 0)
+                println("  \x1b[1;37m" + name + "\x1b[0m")
+            } else if trimmed.contains("inet ") {
+                    println("    \x1b[32m" + trimmed + "\x1b[0m")
+                } else {
+                    println("    \x1b[90m" + trimmed + "\x1b[0m")
+                }
+            }
+        }
+    }
+
+    // Listening ports
+    println("")
+    println("  \x1b[1;33m═══ Listening Ports ═══\x1b[0m")
+    println("")
+    var ports = System.exec("lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null | tail -20 || ss -tlnp 2>/dev/null | tail -20")
+    if ports.len() > 0 {
+        var line_start = 0
+        var plen = ports.len()
+        var line_num = 0
+        for idx in 0..plen {
+            if ports[idx] == "\n" {
+                var line = ports.substring(line_start, idx).trim()
+                line_start = idx + 1
+                line_num += 1
+                if line.len() == 0 { continue }
+                if line_num == 1 {
+                    println("  \x1b[1;37m" + line + "\x1b[0m")
+                } else {
+                    println("  " + line)
+                }
+            }
+        }
+    } else {
+        println("  \x1b[90mNo listening ports found (may need elevated privileges)\x1b[0m")
+    }
+
+    // Active connections
+    println("")
+    println("  \x1b[1;33m═══ Active Connections ═══\x1b[0m")
+    println("")
+    var conns = System.exec("netstat -an 2>/dev/null | grep ESTABLISHED | head -15")
+    if conns.len() > 0 {
+        var conn_count = 0
+        var line_start = 0
+        var clen = conns.len()
+        for idx in 0..clen {
+            if conns[idx] == "\n" {
+                var line = conns.substring(line_start, idx).trim()
+                line_start = idx + 1
+                if line.len() > 0 {
+                    println("  " + line)
+                    conn_count += 1
+                }
+            }
+        }
+        println("")
+        println("  \x1b[90m"${conn_count} + " established connection(s) shown\x1b[0m")
+    } else {
+        println("  \x1b[90mNo established connections\x1b[0m")
+    }
+
+    // DNS
+    println("")
+    println("  \x1b[1;33m═══ DNS ═══\x1b[0m")
+    println("")
+    var dns = System.exec("cat /etc/resolv.conf 2>/dev/null | grep nameserver | head -5")
+    if dns.len() > 0 {
+        var line_start = 0
+        var dlen = dns.len()
+        for idx in 0..dlen {
+            if dns[idx] == "\n" {
+                var line = dns.substring(line_start, idx).trim()
+                line_start = idx + 1
+                if line.len() > 0 {
+                    println("  " + line)
+                }
+            }
+        }
+    }
+
+    println("")
+    return 0
+}

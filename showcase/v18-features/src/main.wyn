@@ -1,0 +1,100 @@
+// Wyn v1.8 Feature Showcase
+// Every major language feature in one file
+
+// --- Structs ---
+struct Vec2 { x: float, y: float }
+
+fn vec2_add(a: Vec2, b: Vec2) -> Vec2 {
+    return Vec2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+fn vec2_mag(v: Vec2) -> float {
+    return Math.sqrt(v.x * v.x + v.y * v.y)
+}
+
+// --- Enums ---
+enum Color { Red, Green, Blue }
+
+fn color_name(c: Color) -> string {
+    match c {
+        Red => return "red"
+        Green => return "green"
+        Blue => return "blue"
+    }
+    return "unknown"
+}
+
+// --- Default params + Result + ? operator ---
+fn safe_divide(a: int, b: int = 1) -> ResultInt {
+    if b == 0 { return ResultInt_Err("division by zero") }
+    return ResultInt_Ok(a / b)
+}
+
+fn compute_ratio(x: int, y: int) -> ResultInt {
+    var result = safe_divide(x, y)?
+    return ResultInt_Ok(result * 100)
+}
+
+// --- Pipe operator ---
+fn double(n: int) -> int { return n * 2 }
+fn add10(n: int) -> int { return n + 10 }
+
+// --- Higher-order functions ---
+fn apply_twice(x: int, f: fn(int) -> int) -> int {
+    return f(f(x))
+}
+
+// --- Spawn ---
+fn fib(n: int) -> int {
+    if n <= 1 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn main() -> int {
+    println("=== Wyn v1.8 Feature Showcase ===")
+    println("")
+
+    // Structs
+    var a = Vec2 { x: 3.0, y: 4.0 }
+    var b = Vec2 { x: 1.0, y: 2.0 }
+    var c = vec2_add(a, b)
+    println("Structs:   (${a.x}, ${a.y}) + (${b.x}, ${b.y}) = (${c.x}, ${c.y})")
+    println("           magnitude = ${vec2_mag(a)}")
+
+    // Enums + match
+    println("Enums:     ${color_name(Color.Red)}, ${color_name(Color.Green)}, ${color_name(Color.Blue)}")
+
+    // Default params + Result + ?
+    var r1 = compute_ratio(100, 3)
+    var r2 = compute_ratio(100, 0)
+    println("Result:    100/3 ok=${ResultInt_is_ok(r1)}, 100/0 err=${ResultInt_is_err(r2)}")
+
+    // Pipe operator
+    var piped = 5 |> double |> add10
+    println("Pipe:      5 |> double |> add10 = ${piped}")
+
+    // Higher-order functions + closures
+    var offset = 100
+    var add_offset = fn(x: int) -> int { return x + offset }
+    println("Closures:  apply_twice(5, double) = ${apply_twice(5, double)}")
+    println("           captured: add_offset(42) = ${add_offset(42)}")
+
+    // HashMap
+    var scores = HashMap.new()
+    scores.set("alice", "95")
+    scores.set("bob", "87")
+    println("HashMap:   alice=${scores.get("alice")}, bob=${scores.get("bob")}")
+
+    // String interpolation
+    var name = "Wyn"
+    println("Interp:    ${name} v1.8 -- ${name.len()} chars, upper=${name.upper()}")
+
+    // Spawn + await (parallel fibonacci)
+    var f1 = spawn fib(30)
+    var f2 = spawn fib(31)
+    println("Spawn:     fib(30)=${await f1}, fib(31)=${await f2}")
+
+    println("")
+    println("All features working! ")
+    return 0
+}

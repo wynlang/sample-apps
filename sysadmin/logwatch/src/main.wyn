@@ -1,0 +1,105 @@
+// logwatch -- Log file analyzer with pattern highlighting
+// Demonstrates: enums, match, string interpolation, for..in
+
+enum Level { LvError, LvWarn, LvInfo, LvDebug }
+
+fn level_color(lv: Level) -> string {
+    match lv {
+        LvError => return "\x1b[31m"
+        LvWarn => return "\x1b[33m"
+        LvInfo => return "\x1b[32m"
+        LvDebug => return "\x1b[90m"
+    }
+    return "\x1b[0m"
+}
+
+fn detect_level(line: string) -> Level {
+    if line.contains("ERROR") { return Level.LvError }
+    if line.contains("WARN") { return Level.LvWarn }
+    if line.contains("DEBUG") { return Level.LvDebug }
+    return Level.LvInfo
+}
+
+fn main() -> int {
+    println("\x1b[1;36m======================================================\x1b[0m")
+    println("             \x1b[1mlogwatch\x1b[0m -- Log File Analyzer")
+    println("\x1b[1;36m======================================================\x1b[0m")
+    println("")
+
+    var logdata = "[2026-02-11 08:00:01] INFO  Server started on port 8080\n"
+    logdata += "[2026-02-11 08:00:02] INFO  Database connection established\n"
+    logdata += "[2026-02-11 08:01:15] INFO  Request GET /api/users (200) 45ms\n"
+    logdata += "[2026-02-11 08:02:33] ERROR Connection timeout to redis:6379\n"
+    logdata += "[2026-02-11 08:02:34] WARN  Retrying redis connection (attempt 1/3)\n"
+    logdata += "[2026-02-11 08:02:35] WARN  Retrying redis connection (attempt 2/3)\n"
+    logdata += "[2026-02-11 08:02:36] INFO  Redis connection restored\n"
+    logdata += "[2026-02-11 08:03:01] WARN  Rate limit approaching for IP 10.0.0.5\n"
+    logdata += "[2026-02-11 08:04:22] ERROR Out of memory: heap allocation failed\n"
+    logdata += "[2026-02-11 08:04:23] ERROR Service crash: restarting worker pid 1234\n"
+    logdata += "[2026-02-11 08:04:25] INFO  Worker restarted successfully\n"
+    logdata += "[2026-02-11 08:05:00] DEBUG GC cycle completed: freed 45MB\n"
+    logdata += "[2026-02-11 08:05:30] INFO  Request GET /api/metrics (200) 5ms\n"
+
+    var error_count = 0
+    var warn_count = 0
+    var info_count = 0
+    var debug_count = 0
+    var total = 0
+    var errors = ["", "", "", "", "", "", "", "", "", ""]
+    var error_idx = 0
+    var lines = logdata.split("\n")
+
+    println("  \x1b[1mLog Output:\x1b[0m")
+    println("")
+
+    for line in lines {
+        if line.len() == 0 { continue }
+        total += 1
+        var lv = detect_level(line)
+        var color = level_color(lv)
+
+        match lv {
+            LvError => {
+                error_count += 1
+                if error_idx < 10 {
+                    errors[error_idx] = line
+                    error_idx += 1
+                }
+            }
+            LvWarn => warn_count = warn_count + 1
+            LvDebug => debug_count = debug_count + 1
+            LvInfo => info_count = info_count + 1
+        }
+
+        println("  ${color}${line}\x1b[0m")
+    }
+
+    println("")
+    println("  \x1b[1m=== Summary ===\x1b[0m")
+    println("")
+    println("  Total lines:  ${total}")
+    println("  \x1b[31m* Errors:     ${error_count}\x1b[0m")
+    println("  \x1b[33m* Warnings:   ${warn_count}\x1b[0m")
+    println("  \x1b[32m* Info:       ${info_count}\x1b[0m")
+    println("  \x1b[90m* Debug:      ${debug_count}\x1b[0m")
+
+    if error_count > 0 {
+        println("")
+        println("  \x1b[1;31m=== Errors ===\x1b[0m")
+        for i in 0..error_idx {
+            println("  \x1b[31m  -> ${errors[i]}\x1b[0m")
+        }
+    }
+
+    println("")
+    if error_count == 0 {
+        println("  \x1b[32mSystem healthy -- no errors detected\x1b[0m")
+    } else if error_count <= 2 {
+        println("  \x1b[33mSystem degraded -- ${error_count} error(s) found\x1b[0m")
+    } else {
+        println("  \x1b[31mSystem critical -- ${error_count} errors require attention\x1b[0m")
+    }
+    println("")
+
+    return 0
+}

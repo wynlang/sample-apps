@@ -1,0 +1,99 @@
+// wyn-grep -- Fast file search tool written in Wyn
+// Usage: wyn-grep <pattern> [path] [-n]
+
+fn is_ignored(name: string) -> int {
+    if name == ".git" || name == "node_modules" || name == "target" { return 1 }
+    if name == ".cache" || name == ".DS_Store" || name == "vendor" { return 1 }
+    return 0
+}
+
+fn is_binary(name: string) -> int {
+    if name.ends_with(".o") || name.ends_with(".a") || name.ends_with(".so") { return 1 }
+    if name.ends_with(".png") || name.ends_with(".jpg") || name.ends_with(".pdf") { return 1 }
+    if name.ends_with(".zip") || name.ends_with(".gz") || name.ends_with(".exe") { return 1 }
+    if name.ends_with(".dylib") || name.ends_with(".wasm") || name.ends_with(".pch") { return 1 }
+    return 0
+}
+
+fn search_file(path: string, pattern: string, show_ln: int) -> int {
+    var content = File.read(path)
+    if content.len() == 0 { return 0 }
+
+    var lines = content.split("\n")
+    var matches = 0
+    var file_printed = 0
+
+    for i in 0..lines.len() {
+        var line = lines[i]
+        if line.contains(pattern) {
+            if file_printed == 0 {
+                println("\x1b[35m${path}\x1b[0m")
+                file_printed = 1
+            }
+            if show_ln == 1 {
+                println("\x1b[32m${i + 1}\x1b[0m:${line}")
+            } else {
+                println("  ${line.trim()}")
+            }
+            matches += 1
+        }
+    }
+    return matches
+}
+
+fn walk_and_search(dir: string, pattern: string, show_ln: int) -> int {
+    var total = 0
+    var entries = File.list_dir(dir)
+    var names = entries.split("\n")
+
+    for name in names {
+        if name.len() == 0 { continue }
+        if is_ignored(name) == 1 { continue }
+
+        var path = "${dir}/${name}"
+
+        if File.is_dir(path) {
+            total += walk_and_search(path, pattern, show_ln)
+        } else if is_binary(name) == 0 {
+            total += search_file(path, pattern, show_ln)
+        }
+    }
+    return total
+}
+
+fn main() -> int {
+    var args = System.args()
+    if args.len() < 2 {
+        println("wyn-grep -- search files for patterns")
+        println("")
+        println("Usage: wyn-grep <pattern> [path] [-n]")
+        println("  -n    Show line numbers")
+        println("")
+        println("Examples:")
+        println("  wyn-grep TODO .")
+        println("  wyn-grep 'fn main' src -n")
+        return 1
+    }
+
+    var pattern = args[1]
+    var search_path = "."
+    var show_ln = 0
+
+    for i in 2..args.len() {
+        if args[i] == "-n" { show_ln = 1 }
+        else { search_path = args[i] }
+    }
+
+    var total = 0
+    if File.is_dir(search_path) {
+        total = walk_and_search(search_path, pattern, show_ln)
+    } else {
+        total = search_file(search_path, pattern, show_ln)
+    }
+
+    if total == 0 {
+        println("No matches found.")
+    }
+
+    return 0
+}

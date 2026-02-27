@@ -1,0 +1,28 @@
+test "parse key=value" {
+    var line = "port=8080"
+    var eq_pos = line.index_of("=")
+    assert(eq_pos > 0)
+    var key = line.substring(0, eq_pos)
+    var value = line.substring(eq_pos + 1, line.len())
+    assert_eq(key, "port")
+    assert_eq(value, "8080")
+}
+
+test "skip comments" {
+    var line = "# this is a comment"
+    assert(line.starts_with("#"))
+}
+
+test "skip empty lines" {
+    var line = "   "
+    assert_eq(line.trim().len(), 0)
+}
+
+test "hashmap storage" {
+    var config = HashMap.new()
+    config.set("host", "localhost")
+    config.set("port", "8080")
+    assert_eq(config.get("host"), "localhost")
+    assert_eq(config.get("port"), "8080")
+    assert_eq(config.len(), 2)
+}

@@ -1,0 +1,83 @@
+// envdiff -- Compare environment variables between shells/configs
+// Demonstrates: System.exec, HashMap, string parsing, diff output
+// Non-interactive: prints and exits
+
+fn main() -> int {
+    println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
+    println("\x1b[1;36m║\x1b[0m             \x1b[1menvdiff\x1b[0m -- Environment Inspector                  \x1b[1;36m║\x1b[0m")
+    println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
+    println("")
+
+    // Important env vars for devops
+    var keys = [
+        "HOME", "USER", "SHELL", "PATH", "EDITOR",
+        "LANG", "LC_ALL", "TERM", "COLORTERM",
+        "SSH_AUTH_SOCK", "GPG_TTY",
+        "AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION",
+        "DOCKER_HOST", "KUBECONFIG",
+        "NODE_ENV", "GOPATH", "CARGO_HOME", "RUSTUP_HOME",
+        "VIRTUAL_ENV", "CONDA_DEFAULT_ENV",
+        "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+        "XDG_CONFIG_HOME", "XDG_DATA_HOME"
+    ]
+
+    var set_count = 0
+    var unset_count = 0
+
+    println("  \x1b[1;33m═══ Environment Variables ═══\x1b[0m")
+    println("")
+    println("  " + "Variable".pad_right(24, " ") + "Value")
+    println("  " + "────────────────────────".pad_right(24, " ") + "─────────────────────────────────")
+
+    for i in 0..26 {
+        var key = keys[i]
+        var val = System.env(key)
+        if val.len() > 0 {
+            // Truncate long values
+            var display = val
+            if display.len() > 50 {
+                display = display.substring(0, 47) + "..."
+            }
+            println("  \x1b[32m●\x1b[0m " + key.pad_right(22, " ") + display)
+            set_count += 1
+        } else {
+            println("  \x1b[90m○ " + key.pad_right(22, " ") + "(not set)\x1b[0m")
+            unset_count += 1
+        }
+    }
+
+    // PATH analysis
+    println("")
+    println("  \x1b[1;33m═══ PATH Analysis ═══\x1b[0m")
+    println("")
+    var path = System.env("PATH")
+    var path_count = System.exec("echo $PATH | tr ':' '\\n' | wc -l").trim()
+    println("  Entries: " + path_count)
+    println("")
+
+    // Show first 10 PATH entries
+    var path_entries = System.exec("echo $PATH | tr ':' '\\n' | head -10")
+    var line_start = 0
+    var plen = path_entries.len()
+    var idx_num = 0
+    for idx in 0..plen {
+        if path_entries[idx] == "\n" {
+            var entry = path_entries.substring(line_start, idx).trim()
+            line_start = idx + 1
+            if entry.len() > 0 {
+                idx_num += 1
+                var exists = System.exec_code("test -d '" + entry + "'")
+                var icon = "\x1b[32m✓\x1b[0m"
+                if exists != 0 { icon = "\x1b[31m✗\x1b[0m" }
+                println("  " + icon + " "${idx_num}.pad_left(2, " ") + ". " + entry)
+            }
+        }
+    }
+
+    // Summary
+    println("")
+    println("  \x1b[90m"${set_count} + " set, "${unset_count} + " unset out of " + (set_count + unset_count).to_string() + " checked\x1b[0m")
+    println("")
+
+    return 0
+}

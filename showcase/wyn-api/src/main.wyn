@@ -1,0 +1,93 @@
+// wyn-api -- A complete REST API in Wyn
+// Demonstrates: HTTP server, spawn, HashMap, string interpolation, pattern matching
+
+var items = HashMap.new()
+var next_id = 1
+
+fn handle(method: string, path: string, body: string, fd: int) {
+    // GET /api/items -- list all
+    if method == "GET" && path == "/api/items" {
+        var keys = items.keys()
+        var parts = [""]
+        parts = []
+        for k in keys { parts.push(items.get(k)) }
+        Http.respond(fd, 200, "application/json", "[${parts.join(",")}]")
+        return
+    }
+
+    // GET /api/items/:id -- get one
+    if method == "GET" && path.starts_with("/api/items/") {
+        var id = path.substring(11, path.len())
+        if items.has(id) {
+            Http.respond(fd, 200, "application/json", items.get(id))
+        } else {
+            Http.respond(fd, 404, "application/json", "{\"error\":\"not found\"}")
+        }
+        return
+    }
+
+    // POST /api/items -- create
+    if method == "POST" && path == "/api/items" {
+        var name = body.trim()
+        if name.len() == 0 { name = "untitled" }
+        var id = next_id
+        next_id += 1
+        var json = "{\"id\":${id},\"name\":\"${name}\",\"done\":false}"
+        items.set("${id}", json)
+        Http.respond(fd, 201, "application/json", json)
+        println("  + Created item ${id}: ${name}")
+        return
+    }
+
+    // DELETE /api/items/:id -- delete
+    if method == "DELETE" && path.starts_with("/api/items/") {
+        var id = path.substring(11, path.len())
+        if items.has(id) {
+            items.remove(id)
+            Http.respond(fd, 200, "application/json", "{\"deleted\":${id}}")
+            println("  - Deleted item ${id}")
+        } else {
+            Http.respond(fd, 404, "application/json", "{\"error\":\"not found\"}")
+        }
+        return
+    }
+
+    // GET /api/health
+    if method == "GET" && path == "/api/health" {
+        Http.respond(fd, 200, "application/json", "{\"status\":\"ok\",\"items\":${items.len()}}")
+        return
+    }
+
+    Http.respond(fd, 404, "application/json", "{\"error\":\"not found\"}")
+}
+
+fn main() -> int {
+    var port = 8080
+    var server = Http.serve(port)
+    if server < 0 { println("Failed to start server"); return 1 }
+
+    println(" wyn-api running on http://localhost:${port}")
+    println("")
+    println("  GET    /api/health        -- health check")
+    println("  GET    /api/items         -- list items")
+    println("  GET    /api/items/:id     -- get item")
+    println("  POST   /api/items         -- create item (body = name)")
+    println("  DELETE /api/items/:id     -- delete item")
+    println("")
+    println("Try:")
+    println("  curl localhost:${port}/api/health")
+    println("  curl -X POST -d 'Buy milk' localhost:${port}/api/items")
+    println("  curl localhost:${port}/api/items")
+
+    while 1 == 1 {
+        var req = Http.accept(server)
+        if req.len() == 0 { continue }
+        var method = req.split_at("|", 0)
+        var path = req.split_at("|", 1)
+        var body = req.split_at("|", 2)
+        var fd = req.split_at("|", 3).to_int()
+        spawn handle(method, path, body, fd)
+    }
+
+    return 0
+}

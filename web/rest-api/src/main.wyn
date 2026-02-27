@@ -1,0 +1,63 @@
+// REST API server with SQLite persistence and concurrent request handling
+// Demonstrates: spawn for concurrent requests, Http.serve, Db, JSON, string interpolation
+
+fn process_request(method: string, path: string, body: string, fd: int) {
+    if method == "GET" {
+        if path == "/api/items" {
+            var db = Db.open("/tmp/wyn_api.db")
+            var rows = Db.query(db, "SELECT id, name, done FROM items ORDER BY id")
+            Db.close(db)
+            Http.respond(fd, 200, "application/json", "{\"data\":\"${rows.replace("\n", "; ").replace("\"", "'")}\"}")
+            return
+        }
+        if path == "/api/health" {
+            Http.respond(fd, 200, "application/json", "{\"status\":\"ok\"}")
+            return
+        }
+    }
+    if method == "POST" {
+        if path == "/api/items" {
+            var db = Db.open("/tmp/wyn_api.db")
+            Db.exec(db, "INSERT INTO items (name, done) VALUES ('${body}', 0)")
+            var id = Db.last_insert_id(db)
+            Db.close(db)
+            Http.respond(fd, 201, "application/json", "{\"id\":${id}}")
+            return
+        }
+    }
+    Http.respond(fd, 404, "application/json", "{\"error\":\"not found\"}")
+}
+
+fn main() -> int {
+    var db = Db.open("/tmp/wyn_api.db")
+    Db.exec(db, "CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT, done INTEGER)")
+    Db.exec(db, "INSERT INTO items (name, done) VALUES ('Buy milk', 0)")
+    Db.exec(db, "INSERT INTO items (name, done) VALUES ('Write code', 1)")
+    Db.close(db)
+
+    var port = 18090
+    var server = Http.serve(port)
+    if server < 0 {
+        println("Failed to start server")
+        return 0
+    }
+    println("REST API running on http://localhost:${port}")
+    println("Endpoints: GET /api/health, GET /api/items, POST /api/items")
+    println("Press Ctrl+C to stop")
+
+    while 1 == 1 {
+        var req = Http.accept(server)
+        if req.len() == 0 { continue }
+        var method = req.split_at("|", 0)
+        var path = req.split_at("|", 1)
+        var body = req.split_at("|", 2)
+        var fd = req.split_at("|", 3).to_int()
+
+        println("${method} ${path}")
+
+        // Handle each request concurrently -- non-blocking server
+        spawn process_request(method, path, body, fd)
+    }
+
+    Http.close_server(server)
+}

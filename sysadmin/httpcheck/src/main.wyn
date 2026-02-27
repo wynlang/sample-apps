@@ -1,0 +1,79 @@
+// httpcheck -- Concurrent HTTP endpoint health checker
+// Demonstrates: spawn for parallel HTTP checks, structs, string interpolation
+// Non-interactive: prints and exits
+
+struct HealthResult { label: string, code: int, time_s: string }
+
+fn check_endpoint(url: string, label: string, results: [HealthResult], idx: int) {
+    var code_str = System.exec("curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 '${url}' 2>/dev/null").trim()
+    var time_str = System.exec("curl -s -o /dev/null -w '%{time_total}' --connect-timeout 3 --max-time 5 '${url}' 2>/dev/null").trim()
+    results[idx] = HealthResult { label: label, code: code_str.to_int(), time_s: time_str }
+}
+
+fn status_icon(code: int) -> string {
+    if code >= 200 && code < 300 { return "\x1b[32m✓\x1b[0m" }
+    if code >= 300 && code < 400 { return "\x1b[33m→\x1b[0m" }
+    return "\x1b[31m✗\x1b[0m"
+}
+
+fn main() -> int {
+    println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
+    println("\x1b[1;36m║\x1b[0m           \x1b[1mhttpcheck\x1b[0m -- Concurrent Health Checker             \x1b[1;36m║\x1b[0m")
+    println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
+    println("")
+
+    var urls = [
+        "https://httpbin.org/status/200",
+        "https://httpbin.org/status/404",
+        "https://httpbin.org/delay/1",
+        "https://example.com",
+        "https://aws.amazon.com",
+        "https://this-does-not-exist-xyz.com",
+        "http://localhost:8080",
+        "http://localhost:3000"
+    ]
+    var labels = [
+        "httpbin 200", "httpbin 404", "httpbin delay", "example.com",
+        "aws.amazon.com", "nonexistent.com", "localhost:8080", "localhost:3000"
+    ]
+    var count = urls.len()
+    var results = []
+
+    for i in 0..count {
+        results.push(HealthResult { label: "", code: 0, time_s: "0" })
+    }
+
+    println("  Checking ${count} endpoints concurrently...")
+    println("")
+
+    // Spawn all health checks in parallel -- much faster than sequential
+    for i in 0..count {
+        spawn check_endpoint(urls[i], labels[i], results, i)
+    }
+
+    // Wait for all checks to complete
+    Time.sleep(6000)
+
+    println("  ${"Endpoint".pad_right(22, " ")}Status  Code  Time")
+    println("  ${"────────────────────".pad_right(22, " ")}──────  ────  ────")
+
+    var up = 0
+    var down = 0
+
+    for i in 0..count {
+        var r = results[i]
+        var icon = status_icon(r.code)
+        var code_str = r.code.to_string()
+        if r.code == 0 { code_str = "---" }
+
+        println("  ${r.label.pad_right(22, " ")}${icon}       ${code_str.pad_right(6, " ")}${r.time_s}s")
+
+        if r.code >= 200 && r.code < 400 { up = up + 1 }
+        else { down = down + 1 }
+    }
+
+    println("")
+    println("  \x1b[32m● Up: ${up}\x1b[0m  \x1b[31m● Down: ${down}\x1b[0m")
+    println("")
+    return 0
+}

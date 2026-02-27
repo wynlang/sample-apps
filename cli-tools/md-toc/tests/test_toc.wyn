@@ -1,0 +1,12 @@
+test "detect headings" {
+    assert("# Title".starts_with("# "))
+    assert("## Section".starts_with("## "))
+    assert("### Sub".starts_with("### "))
+    assert("Normal text".starts_with("# ") == 0)
+}
+
+test "extract heading text" {
+    var line = "## My Section"
+    var title = line.substring(3, line.len())
+    assert_eq(title, "My Section")
+}

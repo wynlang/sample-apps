@@ -1,0 +1,46 @@
+// Word Counter -- Count word frequency in source files
+// Demonstrates: HashMap, string interpolation, File.read
+
+fn main() -> int {
+    println("=== Word Frequency Counter ===")
+    println("")
+
+    var content = File.read("../sample-apps/cli-tools/word-counter/main.wyn")
+    if content.len() == 0 {
+        println("Error: could not read input file")
+        return 1
+    }
+
+    var counts = HashMap.new()
+    var line_start = 0
+    var total_words = 0
+    var total_len = content.len()
+
+    for idx in 0..total_len {
+        var ch = content[idx]
+        if ch == " " || ch == "\n" || ch == "\t" || ch == "(" || ch == ")" || ch == "{" || ch == "}" || ch == "," || ch == ":" {
+            if idx > line_start {
+                var word = content.substring(line_start, idx).trim()
+                if word.len() > 0 {
+                    var current = counts.get_int(word)
+                    counts.insert_int(word, current + 1)
+                    total_words += 1
+                }
+            }
+            line_start = idx + 1
+        }
+    }
+
+    println("Total words: ${total_words}")
+    println("")
+
+    var keywords = ["fn", "var", "return", "if", "for", "println", "int", "string", "HashMap"]
+    for i in 0..9 {
+        var kw = keywords[i]
+        var c = counts.get_int(kw)
+        if c > 0 {
+            println("  ${kw}: ${c}")
+        }
+    }
+    return 0
+}

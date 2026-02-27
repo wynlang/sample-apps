@@ -1,0 +1,71 @@
+// diskmon -- Disk usage monitor with visual bars
+// Demonstrates: System.exec, string interpolation, ANSI formatting
+// Non-interactive: prints and exits
+
+fn progress_bar(pct: int, width: int) -> string {
+    var filled = pct * width / 100
+    if filled > width { filled = width }
+    if filled < 0 { filled = 0 }
+    var color = "\x1b[32m"
+    if pct > 80 { color = "\x1b[31m" }
+    else if pct > 60 { color = "\x1b[33m" }
+    var bar = color
+    for i in 0..filled { bar = bar + "█" }
+    bar += "\x1b[90m"
+    for i in filled..width { bar = bar + "░" }
+    return "${bar}\x1b[0m"
+}
+
+fn main() -> int {
+    println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
+    println("\x1b[1;36m║\x1b[0m              \x1b[1mdiskmon\x1b[0m -- Disk Usage Monitor                  \x1b[1;36m║\x1b[0m")
+    println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
+    println("")
+
+    var df = System.exec("df -Ph 2>/dev/null | grep -v devfs | grep -v 'map '")
+    var line_start = 0
+    var dlen = df.len()
+    var line_num = 0
+    var total_disks = 0
+
+    println("  ${"Mount".pad_right(30, " ")} ${"Bar".pad_right(27, " ")} Use%  Used/Size")
+    println("  ${"─────────────────────────────"} ${"───────────────────────────"} ──── ─────────")
+
+    for idx in 0..dlen {
+        if df[idx] == "\n" {
+            var line = df.substring(line_start, idx).trim()
+            line_start = idx + 1
+            line_num += 1
+
+            if line_num == 1 { continue }
+            if line.len() == 0 { continue }
+
+            var fs = line.split_at(" ", 0)
+            var size = line.split_at(" ", 1)
+            var used = line.split_at(" ", 2)
+            var cap = line.split_at(" ", 4)
+
+            var mount = ""
+            var cap_idx = line.index_of(cap)
+            if cap_idx >= 0 {
+                var after = cap_idx + cap.len()
+                if after < line.len() {
+                    mount = line.substring(after, line.len()).trim()
+                }
+            }
+            if mount.len() == 0 { mount = fs }
+
+            var pct = cap.replace("%", "").to_int()
+            var label = mount
+            if label.len() > 28 { label = label.substring(0, 28) }
+
+            println("  ${label.pad_right(30, " ")} ${progress_bar(pct, 25)} ${pct.to_string().pad_left(3, " ")}%  ${used}/${size}")
+            total_disks += 1
+        }
+    }
+
+    println("")
+    println("  \x1b[90m${total_disks} filesystems  |  \x1b[32m█ <60%\x1b[0m  \x1b[33m█ 60-80%\x1b[0m  \x1b[31m█ >80%\x1b[0m")
+    println("")
+    return 0
+}

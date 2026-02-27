@@ -1,0 +1,78 @@
+// Dashboard -- System monitor using App (webview) module
+// System fonts, CSS, real-time data via JavaScript
+// Demonstrates: App.create, App.html, App.eval, System.exec, spawn
+
+fn get_stats_json() -> string {
+    var cpu_raw = System.exec("ps -A -o %cpu | awk '{s+=$1} END {printf \"%.0f\", s}'").trim()
+    var ncpu = System.exec("sysctl -n hw.ncpu 2>/dev/null || echo 4").trim().to_int()
+    if ncpu < 1 { ncpu = 1 }
+    var cpu = cpu_raw.to_int() / ncpu
+    if cpu > 100 { cpu = 100 }
+
+    var mem_total = System.exec("sysctl -n hw.memsize 2>/dev/null || echo 0").trim().to_int() / 1073741824
+    var df = System.exec("df -Ph / | tail -1").trim()
+    var disk_used = df.split_at(" ", 2)
+    var disk_total = df.split_at(" ", 1)
+    var disk_pct = df.split_at(" ", 4).replace("%", "").to_int()
+    var hostname = System.exec("hostname").trim()
+    var procs = System.exec("ps -e | wc -l").trim()
+
+    return "{\"cpu\":"${cpu} + ",\"mem_total\":"${mem_total} + ",\"disk_pct\":"${disk_pct} + ",\"disk_used\":\"" + disk_used + "\",\"disk_total\":\"" + disk_total + "\",\"hostname\":\"" + hostname + "\",\"procs\":" + procs + "}"
+}
+
+fn main() -> int {
+    var ok = App.create("Wyn Dashboard", 950, 600)
+    if ok < 0 { return 1 }
+
+    var stats = get_stats_json()
+
+    App.html("<!DOCTYPE html><html><head><meta charset='utf-8'><style>" +
+        "* { margin:0; padding:0; box-sizing:border-box; }" +
+        "body { font-family: -apple-system, system-ui, sans-serif; background:#0f0f1a; color:#e0e0e0; padding:20px; }" +
+        "h1 { color:#4fc3f7; margin-bottom:20px; font-size:1.4em; }" +
+        ".grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; margin-bottom:20px; }" +
+        ".card { background:#1a1a2e; border-radius:12px; padding:20px; }" +
+        ".card h3 { color:#888; font-size:0.85em; text-transform:uppercase; margin-bottom:12px; }" +
+        ".card .value { font-size:2.2em; font-weight:700; }" +
+        ".bar-bg { background:#2a2a3e; border-radius:6px; height:8px; margin-top:12px; }" +
+        ".bar-fill { height:8px; border-radius:6px; transition:width 0.5s; }" +
+        ".green { color:#4caf50; } .green .bar-fill { background:#4caf50; }" +
+        ".yellow { color:#ff9800; } .yellow .bar-fill { background:#ff9800; }" +
+        ".red { color:#f44336; } .red .bar-fill { background:#f44336; }" +
+        ".info { background:#1a1a2e; border-radius:12px; padding:20px; }" +
+        ".info-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }" +
+        ".info-item { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid #2a2a3e; }" +
+        ".info-item .label { color:#888; } .info-item .val { color:#ccc; }" +
+    "</style></head><body>" +
+        "<h1>Wyn System Dashboard</h1>" +
+        "<div class='grid'>" +
+            "<div class='card' id='cpu-card'><h3>CPU</h3><div class='value' id='cpu'>--%</div><div class='bar-bg'><div class='bar-fill' id='cpu-bar' style='width:0%'></div></div></div>" +
+            "<div class='card' id='mem-card'><h3>Memory</h3><div class='value' id='mem'>-- GB</div><div class='bar-bg'><div class='bar-fill' id='mem-bar' style='width:0%'></div></div></div>" +
+            "<div class='card' id='disk-card'><h3>Disk</h3><div class='value' id='disk'>--%</div><div class='bar-bg'><div class='bar-fill' id='disk-bar' style='width:0%'></div></div></div>" +
+        "</div>" +
+        "<div class='info'><h3 style='color:#888;font-size:0.85em;text-transform:uppercase;margin-bottom:12px'>System</h3><div class='info-grid' id='info'></div></div>" +
+    "<script>" +
+        "function colorClass(pct) { return pct > 80 ? 'red' : pct > 60 ? 'yellow' : 'green'; }" +
+        "function update(d) {" +
+            "document.getElementById('cpu').textContent = d.cpu + '%';" +
+            "document.getElementById('cpu-bar').style.width = d.cpu + '%';" +
+            "document.getElementById('cpu-card').className = 'card ' + colorClass(d.cpu);" +
+            "document.getElementById('mem').textContent = d.mem_total + ' GB';" +
+            "document.getElementById('mem-bar').style.width = '50%';" +
+            "document.getElementById('mem-card').className = 'card green';" +
+            "document.getElementById('disk').textContent = d.disk_pct + '%';" +
+            "document.getElementById('disk-bar').style.width = d.disk_pct + '%';" +
+            "document.getElementById('disk-card').className = 'card ' + colorClass(d.disk_pct);" +
+            "document.getElementById('info').innerHTML = " +
+                "'<div class=info-item><span class=label>Hostname</span><span class=val>' + d.hostname + '</span></div>' +" +
+                "'<div class=info-item><span class=label>Processes</span><span class=val>' + d.procs + '</span></div>' +" +
+                "'<div class=info-item><span class=label>Disk</span><span class=val>' + d.disk_used + ' / ' + d.disk_total + '</span></div>' +" +
+                "'<div class=info-item><span class=label>Engine</span><span class=val>Wyn v1.8.0</span></div>';" +
+        "}" +
+        "update(" + stats + ");" +
+    "</script></body></html>")
+
+    App.run()
+    App.destroy()
+    return 0
+}

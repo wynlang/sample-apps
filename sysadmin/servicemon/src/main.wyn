@@ -1,0 +1,115 @@
+// servicemon -- Concurrent service health monitor
+// Demonstrates: spawn for parallel health checks, structs, string interpolation
+// Non-interactive: checks all services concurrently and prints status
+
+struct ServiceCheck { name: string, desc: string, up: int }
+
+fn check_service(name: string, cmd: string, desc: string, results: [ServiceCheck], idx: int) {
+    var code = System.exec_code(cmd)
+    results[idx] = ServiceCheck { name: name, desc: desc, up: code == 0 }
+}
+
+fn main() -> int {
+    println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
+    println("\x1b[1;36m║\x1b[0m          \x1b[1mservicemon\x1b[0m -- Concurrent Health Monitor              \x1b[1;36m║\x1b[0m")
+    println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
+    println("")
+
+    var names = [
+        "DNS", "Internet", "Disk Space",
+        "SSH", "HTTP :80", "HTTP :8080", "HTTP :3000",
+        "MySQL", "PostgreSQL", "Redis", "MongoDB", "Docker"
+    ]
+    var cmds = [
+        "host -W1 localhost >/dev/null 2>&1",
+        "ping -c1 -W1 8.8.8.8 >/dev/null 2>&1",
+        "test $(df -Ph / | tail -1 | awk '{sub(/%/,\"\"); print $5}') -lt 95",
+        "nc -z localhost 22 2>/dev/null",
+        "nc -z localhost 80 2>/dev/null",
+        "nc -z localhost 8080 2>/dev/null",
+        "nc -z localhost 3000 2>/dev/null",
+        "nc -z localhost 3306 2>/dev/null",
+        "nc -z localhost 5432 2>/dev/null",
+        "nc -z localhost 6379 2>/dev/null",
+        "nc -z localhost 27017 2>/dev/null",
+        "docker info >/dev/null 2>&1"
+    ]
+    var descs = [
+        "DNS resolution", "External connectivity", "Root < 95% full",
+        "SSH server", "Web server", "Dev server", "Node/React",
+        "MySQL/MariaDB", "PostgreSQL", "Redis cache", "MongoDB", "Container runtime"
+    ]
+    var count = names.len()
+    var results = []
+
+    for i in 0..count {
+        results.push(ServiceCheck { name: "", desc: "", up: 0 })
+    }
+
+    println("  Checking ${count} services concurrently...")
+
+    // Spawn all checks in parallel -- finishes in ~1s instead of ~12s
+    for i in 0..count {
+        spawn check_service(names[i], cmds[i], descs[i], results, i)
+    }
+
+    Time.sleep(3000)
+
+    // System services
+    println("")
+    println("  \x1b[1;33m═══ System Services ═══\x1b[0m")
+    println("")
+    for i in 0..3 {
+        var r = results[i]
+        var icon = "\x1b[31m● DOWN\x1b[0m"
+        if r.up { icon = "\x1b[32m● UP  \x1b[0m" }
+        println("  ${icon}  ${r.name}${r.desc}")
+    }
+
+    // Dev services
+    println("")
+    println("  \x1b[1;33m═══ Development Services ═══\x1b[0m")
+    println("")
+    for i in 3..11 {
+        var r = results[i]
+        var icon = "\x1b[31m● DOWN\x1b[0m"
+        if r.up { icon = "\x1b[32m● UP  \x1b[0m" }
+        println("  ${icon}  ${r.name}${r.desc}")
+    }
+
+    // Docker
+    println("")
+    println("  \x1b[1;33m═══ Container Runtime ═══\x1b[0m")
+    println("")
+    var docker = results[11]
+    var dicon = "\x1b[31m● DOWN\x1b[0m"
+    if docker.up { dicon = "\x1b[32m● UP  \x1b[0m" }
+    println("  ${dicon}  ${docker.name}${docker.desc}")
+
+    if docker.up {
+        var containers = System.exec("docker ps --format '{{.Names}}\t{{.Status}}' 2>/dev/null | head -5")
+        if containers.len() > 0 {
+            println("")
+            var line_start = 0
+            var clen = containers.len()
+            for idx in 0..clen {
+                if containers[idx] == "\n" {
+                    var line = containers.substring(line_start, idx).trim()
+                    line_start = idx + 1
+                    if line.len() > 0 { println("    ${line}") }
+                }
+            }
+        }
+    }
+
+    // Summary
+    var up_count = 0
+    for i in 0..count {
+        if results[i].up { up_count = up_count + 1 }
+    }
+    var down_count = count - up_count
+    println("")
+    println("  \x1b[32m● Up: ${up_count}\x1b[0m  \x1b[31m● Down: ${down_count}\x1b[0m")
+    println("")
+    return 0
+}

@@ -1,0 +1,50 @@
+// Config Reader -- Parse key=value configuration files
+// Demonstrates: File.read, HashMap, string interpolation, .split()
+
+fn main() -> int {
+    println("=== Config Reader ===")
+    println("")
+
+    var path = "../sample-apps/cli-tools/config-reader/src/app.conf"
+    if File.exists(path) == 0 {
+        println("Error: Config file not found")
+        return 1
+    }
+
+    var content = File.read(path)
+    var config = HashMap.new()
+    var lines = content.split("\n")
+    var key_count = 0
+
+    for line in lines {
+        var trimmed = line.trim()
+        if trimmed.len() == 0 { continue }
+        if trimmed.starts_with("#") { continue }
+
+        var eq_pos = trimmed.index_of("=")
+        if eq_pos > 0 {
+            var key = trimmed.substring(0, eq_pos)
+            var value = trimmed.substring(eq_pos + 1, trimmed.len())
+            config.insert_string(key, value)
+            key_count += 1
+        }
+    }
+
+    println("Loaded ${key_count} config entries:")
+    println("")
+
+    var keys = ["app_name", "version", "port", "debug", "max_connections", "database_host", "database_port", "log_level"]
+    for key in keys {
+        var val = config.get(key)
+        if val.len() > 0 {
+            println("  ${key} = ${val}")
+        }
+    }
+
+    println("")
+    var port = config.get("port").to_int()
+    if port > 0 {
+        println("  ✓ Port ${port} is valid")
+    }
+    return 0
+}

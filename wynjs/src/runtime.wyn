@@ -1,0 +1,170 @@
+// WynJS Runtime — storage for environment, objects, arrays, functions
+
+// === Environment (scope stack) ===
+var ekeys = [""]
+var evals = [""]
+var ecnt = 0
+var smarks = [0]
+var sdepth = 0
+
+export fn epush() -> int { smarks[sdepth] = ecnt; sdepth = sdepth + 1; return 0 }
+export fn epop() -> int { sdepth = sdepth - 1; ecnt = smarks[sdepth]; return 0 }
+export fn edef(name: string, val: string) -> int { ekeys[ecnt] = name; evals[ecnt] = val; ecnt = ecnt + 1; return 0 }
+
+export fn eset(name: string, val: string) -> int {
+    var i = ecnt - 1
+    while i >= 0 {
+        if ekeys[i] == name { evals[i] = val; return 1 }
+        i = i - 1
+    }
+    edef(name, val)
+    return 0
+}
+
+export fn eget(name: string) -> string {
+    var i = ecnt - 1
+    while i >= 0 {
+        if ekeys[i] == name { return evals[i] }
+        i = i - 1
+    }
+    return "u:"
+}
+
+// === Object storage (HashMap-based) ===
+var omaps = [HashMap.new()]
+var oprotos = [-1]
+var ocnt = 0
+
+export fn onew() -> int {
+    var id = ocnt
+    omaps.push(HashMap.new())
+    oprotos.push(-1)
+    ocnt = ocnt + 1
+    return id
+}
+
+export fn oset(id: int, k: string, v: string) -> int { var m = omaps[id]; m.set(k, v); return 0 }
+
+export fn oget(id: int, k: string) -> string {
+    var cur = id
+    while cur >= 0 {
+        var m = omaps[cur]
+        if m.has(k) { return m.get(k) }
+        cur = oprotos[cur]
+    }
+    return "u:"
+}
+
+export fn ohas(id: int, k: string) -> int { var m = omaps[id]; if m.has(k) { return 1 }; return 0 }
+export fn okeys_list(id: int) -> [string] { var m = omaps[id]; return m.keys() }
+export fn oset_proto(id: int, pid: int) -> int { oprotos[id] = pid; return 0 }
+
+// === Array storage ===
+var astore = [""]
+var alens = [0]
+var abases = [0]
+var acnt = 0
+var anext = 0
+
+export fn anew() -> int { var id = acnt; abases[id] = anext; alens[id] = 0; acnt = acnt + 1; return id }
+export fn apush(id: int, v: string) -> int { var s = abases[id] + alens[id]; astore[s] = v; alens[id] = alens[id] + 1; anext = s + 1; return 0 }
+export fn aget(id: int, i: int) -> string { if i < 0 { return "u:" }; if i >= alens[id] { return "u:" }; return astore[abases[id] + i] }
+export fn aset(id: int, i: int, v: string) -> int { if i >= 0 && i < alens[id] { astore[abases[id] + i] = v }; return 0 }
+export fn alen(id: int) -> int { return alens[id] }
+export fn astore_get(base: int, i: int) -> string { return astore[base + i] }
+export fn astore_set(base: int, i: int, v: string) -> int { astore[base + i] = v; return 0 }
+export fn abase(id: int) -> int { return abases[id] }
+
+// === Function storage ===
+var fbodies = [""]
+var fparams = [""]
+var fcap_keys = [""]
+var fcap_vals = [""]
+var fcnt = 0
+
+export fn fn_count() -> int { return fcnt }
+export fn fn_inc() -> int { fcnt = fcnt + 1; return fcnt - 1 }
+export fn fn_get_body(id: int) -> string { return fbodies[id] }
+export fn fn_get_params(id: int) -> string { return fparams[id] }
+export fn fn_set(id: int, params: string, body: string) -> int { fparams[id] = params; fbodies[id] = body; return 0 }
+export fn fn_get_cap_keys(id: int) -> string { return fcap_keys[id] }
+export fn fn_get_cap_vals(id: int) -> string { return fcap_vals[id] }
+export fn fn_set_caps(id: int, keys: string, vals: string) -> int { fcap_keys[id] = keys; fcap_vals[id] = vals; return 0 }
+
+// === This stack ===
+var this_stack = [""]
+var this_depth = 0
+
+export fn this_push(v: string) -> int { this_stack.push(v); this_depth = this_depth + 1; return 0 }
+export fn this_pop() -> int { if this_depth > 0 { this_depth = this_depth - 1 }; return 0 }
+export fn this_get_depth() -> int { return this_depth }
+export fn this_get(i: int) -> string { return this_stack[i] }
+
+// === Builtin registry ===
+var bnames = [""]
+var bcnt = 0
+
+export fn register_builtin(name: string) -> string {
+    var i = 0
+    while i < bcnt { if bnames[i] == name { return "f:" + (9000 + i).to_string() }; i = i + 1 }
+    bnames.push(name)
+    var fid = 9000 + bcnt
+    bcnt = bcnt + 1
+    return "f:" + fid.to_string()
+}
+
+export fn builtin_name(idx: int) -> string { return bnames[idx] }
+export fn builtin_count() -> int { return bcnt }
+
+// === Init ===
+export fn init_runtime() -> int {
+    astore = []
+    var i = 0
+    while i < 8192 { astore.push(""); i = i + 1 }
+    alens = []
+    i = 0
+    while i < 1024 { alens.push(0); i = i + 1 }
+    abases = []
+    i = 0
+    while i < 1024 { abases.push(0); i = i + 1 }
+    omaps = [HashMap.new()]
+    oprotos = []
+    i = 0
+    while i < 1024 { oprotos.push(-1); i = i + 1 }
+    ekeys = []
+    i = 0
+    while i < 8192 { ekeys.push(""); i = i + 1 }
+    evals = []
+    i = 0
+    while i < 8192 { evals.push(""); i = i + 1 }
+    smarks = []
+    i = 0
+    while i < 256 { smarks.push(0); i = i + 1 }
+    this_stack = []
+    i = 0
+    while i < 128 { this_stack.push(""); i = i + 1 }
+    bnames = []
+    i = 0
+    while i < 256 { bnames.push(""); i = i + 1 }
+    fbodies = []
+    i = 0
+    while i < 1024 { fbodies.push(""); i = i + 1 }
+    fparams = []
+    i = 0
+    while i < 1024 { fparams.push(""); i = i + 1 }
+    fcap_keys = []
+    i = 0
+    while i < 1024 { fcap_keys.push(""); i = i + 1 }
+    fcap_vals = []
+    i = 0
+    while i < 1024 { fcap_vals.push(""); i = i + 1 }
+    ecnt = 0
+    sdepth = 0
+    acnt = 0
+    anext = 0
+    ocnt = 0
+    fcnt = 0
+    this_depth = 0
+    bcnt = 0
+    return 0
+}

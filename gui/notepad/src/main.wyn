@@ -1,0 +1,73 @@
+// Notepad -- Desktop text editor using App (webview) module
+// System fonts, CSS styling, HTML layout -- no bitmap fonts
+// Demonstrates: App.create, App.html, App.eval, App.run
+
+fn main() -> int {
+    var ok = App.create("Wyn Notepad", 900, 650)
+    if ok < 0 {
+        println("Failed to create window")
+        return 1
+    }
+
+    App.html("<!DOCTYPE html><html><head><meta charset='utf-8'><style>" +
+        "* { margin: 0; padding: 0; box-sizing: border-box; }" +
+        "body { font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', Menlo, monospace; background: #1e1e2e; color: #cdd6f4; display: flex; flex-direction: column; height: 100vh; }" +
+        ".toolbar { background: #181825; padding: 6px 12px; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid #313244; font-size: 13px; }" +
+        ".toolbar button { background: #313244; color: #cdd6f4; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; } " +
+        ".toolbar button:hover { background: #45475a; }" +
+        ".toolbar .title { flex: 1; color: #6c7086; }" +
+        ".editor-wrap { flex: 1; display: flex; overflow: hidden; }" +
+        ".line-numbers { background: #181825; color: #585b70; padding: 12px 8px; text-align: right; font-size: 14px; line-height: 1.6; min-width: 50px; user-select: none; border-right: 1px solid #313244; overflow: hidden; }" +
+        "textarea { flex: 1; background: #1e1e2e; color: #cdd6f4; border: none; outline: none; padding: 12px; font-family: inherit; font-size: 14px; line-height: 1.6; resize: none; tab-size: 4; }" +
+        ".status { background: #313244; padding: 4px 12px; font-size: 12px; color: #a6adc8; display: flex; justify-content: space-between; }" +
+        ".status .right { color: #585b70; }" +
+    "</style></head><body>" +
+        "<div class='toolbar'>" +
+            "<button onclick='newFile()'>New</button>" +
+            "<button onclick='openFile()'>Open</button>" +
+            "<button onclick='saveFile()'>Save</button>" +
+            "<span class='title' id='title'>Untitled</span>" +
+            "<span style='color:#585b70'>Wyn Notepad</span>" +
+        "</div>" +
+        "<div class='editor-wrap'>" +
+            "<div class='line-numbers' id='lines'>1</div>" +
+            "<textarea id='editor' spellcheck='false' placeholder='Start typing...'></textarea>" +
+        "</div>" +
+        "<div class='status'>" +
+            "<span id='status'>Ready</span>" +
+            "<span class='right' id='pos'>Ln 1, Col 1</span>" +
+        "</div>" +
+    "<script>" +
+        "const editor = document.getElementById('editor');" +
+        "const lines = document.getElementById('lines');" +
+        "const pos = document.getElementById('pos');" +
+        "const status = document.getElementById('status');" +
+        "let dirty = false;" +
+        "function updateLines() {" +
+            "const n = editor.value.split('\\n').length;" +
+            "lines.innerHTML = Array.from({length: n}, (_, i) => i + 1).join('<br>');" +
+            "lines.scrollTop = editor.scrollTop;" +
+        "}" +
+        "function updatePos() {" +
+            "const val = editor.value.substring(0, editor.selectionStart);" +
+            "const ln = val.split('\\n').length;" +
+            "const col = val.length - val.lastIndexOf('\\n');" +
+            "pos.textContent = 'Ln ' + ln + ', Col ' + col;" +
+        "}" +
+        "editor.addEventListener('input', () => { updateLines(); dirty = true; document.getElementById('title').textContent = '● Untitled'; });" +
+        "editor.addEventListener('scroll', () => { lines.scrollTop = editor.scrollTop; });" +
+        "editor.addEventListener('click', updatePos);" +
+        "editor.addEventListener('keyup', updatePos);" +
+        "editor.addEventListener('keydown', (e) => {" +
+            "if (e.key === 'Tab') { e.preventDefault(); const s = editor.selectionStart; editor.value = editor.value.substring(0, s) + '    ' + editor.value.substring(editor.selectionEnd); editor.selectionStart = editor.selectionEnd = s + 4; updateLines(); }" +
+        "});" +
+        "function newFile() { editor.value = ''; updateLines(); dirty = false; document.getElementById('title').textContent = 'Untitled'; status.textContent = 'New file'; }" +
+        "function saveFile() { status.textContent = 'Saved (in-memory)'; dirty = false; document.getElementById('title').textContent = 'Untitled'; }" +
+        "function openFile() { editor.value = 'fn main() -> int {\\n    println(\"Hello, World!\")\\n    return 0\\n}\\n'; updateLines(); status.textContent = 'Opened sample.wyn'; }" +
+        "editor.focus();" +
+    "</script></body></html>")
+
+    App.run()
+    App.destroy()
+    return 0
+}

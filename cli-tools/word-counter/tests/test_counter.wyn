@@ -1,0 +1,18 @@
+test "string split" {
+    var words = "hello world foo".split(" ")
+    assert_eq(words.len(), 3)
+}
+
+test "hashmap counting" {
+    var counts = HashMap.new()
+    counts.set("hello", "1")
+    counts.set("world", "1")
+    assert_eq(counts.len(), 2)
+    assert(counts.has("hello"))
+}
+
+test "string methods" {
+    assert_eq("  hello  ".trim(), "hello")
+    assert_eq("Hello".lower(), "hello")
+    assert_eq("hello".upper(), "HELLO")
+}

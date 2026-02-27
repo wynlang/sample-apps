@@ -1,0 +1,10 @@
+import math
+import strings
+
+fn main() -> int {
+    println("${math.add(2, 3)}")
+    println("${math.factorial(10)}")
+    println(strings.shout("hello"))
+    println(strings.greet("Wyn"))
+    return 0
+}

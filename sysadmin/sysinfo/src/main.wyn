@@ -1,0 +1,90 @@
+// sysinfo -- Concurrent system information dashboard
+// Demonstrates: spawn for parallel data gathering, structs, string interpolation
+// Non-interactive: prints and exits
+
+struct SysData { label: string, value: string }
+
+fn gather(cmd: string, results: [SysData], idx: int, label: string) {
+    var val = System.exec(cmd).trim()
+    results[idx] = SysData { label: label, value: val }
+}
+
+fn main() -> int {
+    println("")
+    println("  \x1b[1;36m┌─────────────────────────────────────────────────────┐\x1b[0m")
+    println("  \x1b[1;36m│\x1b[0m              \x1b[1msysinfo\x1b[0m -- System Dashboard             \x1b[1;36m│\x1b[0m")
+    println("  \x1b[1;36m└─────────────────────────────────────────────────────┘\x1b[0m")
+    println("")
+
+    // Gather all system info concurrently
+    var data = []
+    var cmds = [
+        "uname -s", "uname -r", "uname -m", "hostname",
+        "uptime",
+        "sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo ?",
+        "sysctl -n machdep.cpu.brand_string 2>/dev/null || cat /proc/cpuinfo 2>/dev/null | grep 'model name' | head -1 | cut -d: -f2 || echo unknown",
+        "sysctl -n hw.memsize 2>/dev/null || grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2*1024}' || echo 0",
+        "df -Ph / | tail -1",
+        "ifconfig 2>/dev/null | grep 'inet ' | grep -v 127.0.0.1 | head -1 | awk '{print $2}'",
+        "curl -s --connect-timeout 2 ifconfig.me 2>/dev/null || echo N/A",
+        "whoami"
+    ]
+    var labels = [
+        "OS", "Kernel", "Arch", "Hostname",
+        "Uptime", "Cores", "CPU Model", "Memory",
+        "Disk", "Local IP", "Public IP", "User"
+    ]
+    var count = cmds.len()
+
+    for i in 0..count {
+        data.push(SysData { label: "", value: "" })
+    }
+
+    // Spawn all info gathering concurrently -- ~2s instead of ~5s
+    for i in 0..count {
+        spawn gather(cmds[i], data, i, labels[i])
+    }
+
+    Time.sleep(3000)
+
+    // Display
+    println("  \x1b[1;33m● System\x1b[0m")
+    println("    Hostname:  ${data[3].value}")
+    println("    OS:        ${data[0].value} ${data[1].value}")
+    println("    Arch:      ${data[2].value}")
+    println("    Uptime:    ${data[4].value}")
+    println("")
+
+    println("  \x1b[1;33m● CPU\x1b[0m")
+    println("    Model:     ${data[6].value}")
+    println("    Cores:     ${data[5].value}")
+    println("")
+
+    var mem_bytes = data[7].value.to_int()
+    var mem_gb = mem_bytes / 1073741824
+    println("  \x1b[1;33m● Memory\x1b[0m")
+    println("    Total:     ${mem_gb} GB")
+    println("")
+
+    var df = data[8].value
+    var size = df.split_at(" ", 1)
+    var used = df.split_at(" ", 2)
+    var cap = df.split_at(" ", 4)
+    println("  \x1b[1;33m● Disk\x1b[0m")
+    println("    Root (/):  ${used} used / ${size} total (${cap})")
+    println("")
+
+    println("  \x1b[1;33m● Network\x1b[0m")
+    println("    Local IP:  ${data[9].value}")
+    println("    Public IP: ${data[10].value}")
+    println("")
+
+    var shell = System.env("SHELL")
+    var home = System.env("HOME")
+    println("  \x1b[1;33m● Environment\x1b[0m")
+    println("    User:      ${data[11].value}")
+    println("    Shell:     ${shell}")
+    println("    Home:      ${home}")
+    println("")
+    return 0
+}
