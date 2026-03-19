@@ -45,7 +45,7 @@ fn draw_files(entries: [string], count: int, selected: int, rows: int, offset: i
 
 fn draw_status(cols: int, rows: int, count: int, selected: int, msg: string) {
     Terminal.move(rows, 1)
-    var info = " " + (selected + 1).to_string() + "/"${count} + " "
+    var info = " " + (selected + 1).to_string() + "/" + count.to_string() + " "
     Terminal.write("\x1b[32;40m" + info)
     if msg.len() > 0 {
         var gap = cols - info.len() - msg.len() - 1
@@ -59,7 +59,7 @@ fn draw_status(cols: int, rows: int, count: int, selected: int, msg: string) {
     Terminal.write("\x1b[0m")
 }
 
-fn main() -> int {
+fn main() {
     var cols = Terminal.cols()
     var rows = Terminal.rows()
     var cwd = System.exec("pwd").trim()
@@ -176,5 +176,4 @@ fn main() -> int {
     Terminal.restore()
     Terminal.clear()
     println("filebrowser exited.")
-    return 0
 }

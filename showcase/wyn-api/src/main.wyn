@@ -61,7 +61,7 @@ fn handle(method: string, path: string, body: string, fd: int) {
     Http.respond(fd, 404, "application/json", "{\"error\":\"not found\"}")
 }
 
-fn main() -> int {
+fn main() {
     var port = 8080
     var server = Http.serve(port)
     if server < 0 { println("Failed to start server"); return 1 }
@@ -89,5 +89,4 @@ fn main() -> int {
         spawn handle(method, path, body, fd)
     }
 
-    return 0
 }

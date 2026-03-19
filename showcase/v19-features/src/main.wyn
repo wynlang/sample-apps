@@ -1,0 +1,164 @@
+// Wyn v1.9 Feature Showcase
+// The complete tour of what makes Wyn special
+
+// === Generic Structs ===
+struct Pair<T> {
+    first: T
+    second: T
+}
+
+// === Traits ===
+trait Describable {
+    fn describe(self) -> string
+}
+
+// === Builder Pattern with Method Chaining ===
+struct Query {
+    table: string
+    cond: string
+    lim: int
+}
+
+impl Query {
+    fn where_clause(self, c: string) -> Query {
+        return Query { table: self.table, cond: c, lim: self.lim }
+    }
+    fn limit(self, n: int) -> Query {
+        return Query { table: self.table, cond: self.cond, lim: n }
+    }
+    fn to_sql(self) -> string {
+        var sql = "SELECT * FROM " + self.table
+        if self.cond.len() > 0 { sql += " WHERE " + self.cond }
+        if self.lim > 0 { sql += " LIMIT " + self.lim.to_string() }
+        return sql
+    }
+}
+
+struct Point {
+    x: int
+    y: int
+}
+
+impl Describable for Point {
+    fn describe(self) -> string {
+        return "(${self.x}, ${self.y})"
+    }
+}
+
+// === Named Arguments ===
+fn greet(name: string, style: string = "formal") -> string {
+    if style == "casual" { return "Hey ${name}!" }
+    return "Hello, ${name}."
+}
+
+// === Tuple Return ===
+fn divmod(a: int, b: int) -> (int, int) {
+    return (a / b, a % b)
+}
+
+fn fib(n: int) -> int {
+    if n <= 1 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn fetch_data(id: int) -> string {
+    Time.sleep(10)
+    return "result_${id}"
+}
+
+fn main() {
+    println("=== Wyn v1.9 Feature Showcase ===\n")
+
+    // 1. Method chaining — everything is an object
+    println("--- Method Chaining ---")
+    var nums = [5, 3, 8, 1, 9, 2, 7, 4, 6]
+    println("Original: " + nums.join(", "))
+    println("Sorted:   " + nums.sort().join(", "))
+    println("Top 3:    " + nums.sort().reverse().slice(0, 3).join(", "))
+    println("Stats:    sum=" + nums.sum().to_string() + " min=" + nums.min().to_string() + " max=" + nums.max().to_string())
+
+    // 2. String chaining
+    println("\n--- String Methods ---")
+    println("  hello world  ".trim().upper().replace("WORLD", "WYN"))
+    println("banana,apple,cherry".split(",").sort().join(" < "))
+    println("7".pad_left(5, "0"))
+
+    // 3. Named arguments
+    println("\n--- Named Arguments ---")
+    println(greet(name: "World", style: "casual"))
+    println(greet(name: "Wyn"))
+
+    // 4. Tuples + destructuring
+    println("\n--- Tuples & Destructuring ---")
+    var (q, r) = divmod(17, 5)
+    println("17 divmod 5 = (" + q.to_string() + ", " + r.to_string() + ")")
+
+    var [first, ...rest] = [10, 20, 30, 40, 50]
+    println("first=" + first.to_string() + " rest=" + rest.join(","))
+
+    // 5. Lambdas — void, multiline, closures
+    println("\n--- Lambdas ---")
+    var total = 0
+    nums.each(fn(x: int) { total += x })
+    println("Sum via each: " + total.to_string())
+
+    var squares = nums.map(fn(x: int) -> int {
+        return x * x
+    })
+    println("Squares: " + squares.join(", "))
+
+    var evens = nums.filter(fn(x: int) -> int { return x % 2 == 0 })
+    println("Evens:   " + evens.join(", "))
+
+    // 6. Generic structs
+    println("\n--- Generics ---")
+    var p = Pair { first: 10, second: 20 }
+    println("Pair<int>: (" + p.first.to_string() + ", " + p.second.to_string() + ")")
+
+    // 7. Traits
+    println("\n--- Traits ---")
+    var pt = Point { x: 3, y: 4 }
+    println("Point: " + pt.describe())
+
+    // 8. Builder pattern
+    println("\n--- Builder Pattern ---")
+    var q = Query { table: "users", cond: "", lim: 0 }
+    var query = q.where_clause("active = 1").limit(10)
+    println(query.to_sql())
+
+    // 9. Spawn + await_all — true concurrency
+    println("\n--- Concurrency ---")
+    var futures = []
+    for i in 0..8 {
+        futures.push(spawn fib(20 + i))
+    }
+    var results = await_all(futures)
+    var result_str = ""
+    for i in 0..8 {
+        if i > 0 { result_str += ", " }
+        result_str += results[i].to_string()
+    }
+    println("fib(20..27): " + result_str)
+
+    // 10. Spawn with string returns
+    var str_futures = []
+    for i in 0..4 {
+        str_futures.push(spawn fetch_data(i))
+    }
+    var str_results = await_all(str_futures)
+    var fetched_str = ""
+    for i in 0..4 {
+        if i > 0 { fetched_str += ", " }
+        fetched_str += str_results[i]
+    }
+    println("Fetched:     " + fetched_str)
+
+    // 11. Stdlib richness
+    println("\n--- Stdlib ---")
+    println("clamp:    42.clamp(0, 10) = " + 42.clamp(0, 10).to_string())
+    println("abs:      (-5).abs() = " + (-5).abs().to_string())
+    println("contains: " + [1,2,3].contains(2).to_string())
+    println("reverse:  " + [1,2,3].reverse().join(", "))
+
+    println("\n✅ All v1.9 features working!")
+}

@@ -18,7 +18,8 @@ fn process_request(method: string, path: string, body: string, fd: int) {
     if method == "POST" {
         if path == "/api/items" {
             var db = Db.open("/tmp/wyn_api.db")
-            Db.exec(db, "INSERT INTO items (name, done) VALUES ('${body}', 0)")
+            var safe_body = Db.escape(body)
+            Db.exec(db, "INSERT INTO items (name, done) VALUES ('${safe_body}', 0)")
             var id = Db.last_insert_id(db)
             Db.close(db)
             Http.respond(fd, 201, "application/json", "{\"id\":${id}}")
@@ -28,7 +29,7 @@ fn process_request(method: string, path: string, body: string, fd: int) {
     Http.respond(fd, 404, "application/json", "{\"error\":\"not found\"}")
 }
 
-fn main() -> int {
+fn main() {
     var db = Db.open("/tmp/wyn_api.db")
     Db.exec(db, "CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT, done INTEGER)")
     Db.exec(db, "INSERT INTO items (name, done) VALUES ('Buy milk', 0)")

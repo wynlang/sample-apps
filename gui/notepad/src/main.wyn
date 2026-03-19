@@ -2,7 +2,7 @@
 // System fonts, CSS styling, HTML layout -- no bitmap fonts
 // Demonstrates: App.create, App.html, App.eval, App.run
 
-fn main() -> int {
+fn main() {
     var ok = App.create("Wyn Notepad", 900, 650)
     if ok < 0 {
         println("Failed to create window")
@@ -69,5 +69,4 @@ fn main() -> int {
 
     App.run()
     App.destroy()
-    return 0
 }

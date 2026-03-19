@@ -16,7 +16,7 @@ fn progress_bar(pct: int, width: int) -> string {
     return "${bar}\x1b[0m"
 }
 
-fn main() -> int {
+fn main() {
     println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
     println("\x1b[1;36m║\x1b[0m              \x1b[1mdiskmon\x1b[0m -- Disk Usage Monitor                  \x1b[1;36m║\x1b[0m")
     println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
@@ -67,5 +67,4 @@ fn main() -> int {
     println("")
     println("  \x1b[90m${total_disks} filesystems  |  \x1b[32m█ <60%\x1b[0m  \x1b[33m█ 60-80%\x1b[0m  \x1b[31m█ >80%\x1b[0m")
     println("")
-    return 0
 }

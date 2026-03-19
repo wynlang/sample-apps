@@ -17,10 +17,11 @@ fn get_stats_json() -> string {
     var hostname = System.exec("hostname").trim()
     var procs = System.exec("ps -e | wc -l").trim()
 
-    return "{\"cpu\":"${cpu} + ",\"mem_total\":"${mem_total} + ",\"disk_pct\":"${disk_pct} + ",\"disk_used\":\"" + disk_used + "\",\"disk_total\":\"" + disk_total + "\",\"hostname\":\"" + hostname + "\",\"procs\":" + procs + "}"
+    var q = "\""
+    return "{" + q + "cpu" + q + ":" + cpu.to_string() + "," + q + "mem_total" + q + ":" + mem_total.to_string() + "," + q + "disk_pct" + q + ":" + disk_pct.to_string() + "," + q + "disk_used" + q + ":" + q + disk_used + q + "," + q + "disk_total" + q + ":" + q + disk_total + q + "," + q + "hostname" + q + ":" + q + hostname + q + "," + q + "procs" + q + ":" + procs + "}"
 }
 
-fn main() -> int {
+fn main() {
     var ok = App.create("Wyn Dashboard", 950, 600)
     if ok < 0 { return 1 }
 
@@ -74,5 +75,4 @@ fn main() -> int {
 
     App.run()
     App.destroy()
-    return 0
 }

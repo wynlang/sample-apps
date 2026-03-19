@@ -18,7 +18,6 @@ export fn eset(name: string, val: string) -> int {
         i = i - 1
     }
     edef(name, val)
-    return 0
 }
 
 export fn eget(name: string) -> string {
@@ -166,5 +165,4 @@ export fn init_runtime() -> int {
     fcnt = 0
     this_depth = 0
     bcnt = 0
-    return 0
 }

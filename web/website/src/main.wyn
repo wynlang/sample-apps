@@ -31,7 +31,7 @@ fn handle_request(method: string, path: string, fd: int) {
     }
 }
 
-fn main() -> int {
+fn main() {
     var port = 8080
     var server = Http.serve(port)
     var p = "${port}"
@@ -47,5 +47,4 @@ fn main() -> int {
             spawn handle_request(method, path, fd)
         }
     }
-    return 0
 }

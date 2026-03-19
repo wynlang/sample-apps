@@ -166,7 +166,7 @@ fn draw_help_overlay(cols: int, rows: int) {
     Terminal.write("\x1b[1;37;44m└" + repeat_str("─", w - 2) + "┘\x1b[0m")
 }
 
-fn main() -> int {
+fn main() {
     var cols = Terminal.cols()
     var rows = Terminal.rows()
 
@@ -234,7 +234,7 @@ fn main() -> int {
                     if pc == 3 { contents[3] = System.exec("env | sort | head -20 2>&1 | head -40") }
                     pc += 1
                     act = pc - 1
-                    msg = "Created pane "${pc}
+                    msg = "Created pane ${pc}"
                     Terminal.clear()
                     draw_frame(cols, rows)
                     if pc >= 1 { draw_one_pane(0, act, pc, titles[0], contents[0], cols, rows) }
@@ -456,5 +456,4 @@ fn main() -> int {
     Terminal.restore()
     Terminal.clear()
     println("twux exited cleanly.")
-    return 0
 }

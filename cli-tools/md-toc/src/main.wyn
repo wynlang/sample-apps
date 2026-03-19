@@ -1,7 +1,7 @@
 // Markdown TOC Generator -- Extract headings from markdown files
 // Demonstrates: File.read, .split(), string interpolation, pattern detection
 
-fn main() -> int {
+fn main() {
     println("=== Markdown Table of Contents ===")
     println("")
 
@@ -30,5 +30,4 @@ fn main() -> int {
 
     println("")
     println("Found ${heading_count} headings")
-    return 0
 }

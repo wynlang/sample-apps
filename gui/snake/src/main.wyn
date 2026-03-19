@@ -2,7 +2,7 @@
 // Demonstrates: Terminal TUI, game loop, Random, structs, spawn
 // Keys: wasd or arrows to move, q to quit
 
-fn main() -> int {
+fn main() {
     Random.seed_auto()
     var cols = Terminal.cols()
     var rows = Terminal.rows()
@@ -61,7 +61,7 @@ fn main() -> int {
 
         // Score
         Terminal.move(rows + 1, 1)
-        Terminal.write("Score: "${score} + "  wasd/arrows=move q=quit")
+        Terminal.write("Score: ${score}  wasd/arrows=move q=quit")
 
         // Input (non-blocking with short timeout)
         var key = Terminal.read_key()
@@ -114,12 +114,10 @@ fn main() -> int {
         Terminal.write(" ")
 
         // Game speed
-        DateTime.sleep(0)
-        System.exec("sleep 0.1")
+        Time.sleep(100)
     }
 
     Terminal.restore()
     Terminal.clear()
-    println("Game Over! Score: "${score})
-    return 0
+    println("Game Over! Score: ${score}")
 }

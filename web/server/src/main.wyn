@@ -92,7 +92,7 @@ fn handle_request(method: string, path: string, body: string, fd: int, db: int, 
     }
 }
 
-fn main() -> int {
+fn main() {
     var port = 8080
     var start_time = DateTime.now()
 
@@ -123,5 +123,4 @@ fn main() -> int {
             spawn handle_request(method, path, body, fd, db, start_time)
         }
     }
-    return 0
 }

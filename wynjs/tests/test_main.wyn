@@ -1,5 +1,5 @@
 // WynJS Test Runner
-fn main() -> int {
+fn main() {
     println("=== WynJS Test Suite ===")
 
     // Copy test file for wynjs to read

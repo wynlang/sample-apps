@@ -112,7 +112,6 @@ fn vtonum(v: string) -> int {
         if d.len() == 0 { return 0 }
         return d.to_int()
     }
-    return 0
 }
 
 fn vtofloat(v: string) -> float {
@@ -299,7 +298,6 @@ fn oget(id: int, k: string) -> string {
 fn ohas(id: int, k: string) -> int {
     var m = omaps[id]
     if m.has(k) { return 1 }
-    return 0
 }
 
 fn okeys_arr(id: int) -> int {
@@ -720,7 +718,6 @@ fn static_get(cn: string, prop: string) -> string {
 fn static_set(cn: string, prop: string, val: string) -> int {
     var si = 0
     while si < ccnt { if cnames[si] == cn { oset(cprotos[si], "__static_" + prop, val); return 0 }; si = si + 1 }
-    return 0
 }
 
 fn static_access(cn: string, prop: string) -> string {
@@ -1243,8 +1240,8 @@ fn jparse_arr() -> string {
 fn call_builtin(name: string, args: [string]) -> string {
     // Math
     if name == "_Math_floor" { return vnum(Math.floor(vtofloat(args[0])).to_int()) }
-    if name == "_Math_ceil" { return vnum(Math.ceil(vtofloat(args[0])).to_int()) }
-    if name == "_Math_round" { return vnum(Math.round(vtofloat(args[0])).to_int()) }
+    if name == "_Math_ceil" { return vnum(Math.floor(vtofloat(args[0])).to_int()) }
+    if name == "_Math_round" { return vnum(Math.floor(vtofloat(args[0])).to_int()) }
     if name == "_Math_abs" { var v = vtofloat(args[0]); if v < 0.0 { return vfloat(0.0 - v) } return vfloat(v) }
     if name == "_Math_sqrt" { return vfloat(Math.sqrt(vtofloat(args[0]))) }
     if name == "_Math_pow" { return vfloat(Math.pow(vtofloat(args[0]), vtofloat(args[1]))) }
@@ -1267,7 +1264,7 @@ fn call_builtin(name: string, args: [string]) -> string {
     if name == "_Math_sin" { return vfloat(Math.sin(vtofloat(args[0]))) }
     if name == "_Math_cos" { return vfloat(Math.cos(vtofloat(args[0]))) }
     if name == "_Math_tan" { return vfloat(Math.tan(vtofloat(args[0]))) }
-    if name == "_Math_trunc" { return vnum(vtofloat(args[0]).to_int()) }
+    if name == "_Math_trunc" { return vnum(Math.floor(vtofloat(args[0])).to_int()) }
     // JSON
     if name == "_JSON_stringify" {
         return vstr(json_ser(args[0]))
@@ -2496,7 +2493,6 @@ fn peek_is_function() -> int {
         if c == "f" { return 1 }
     }
     pos = sp
-    return 0
 }
 
 fn p_block_or_stmt() {
@@ -2666,7 +2662,7 @@ fn setup_globals() {
     edef("Promise", vstr("_Promise"))
 }
 
-fn main() -> int {
+fn main() {
     init_env()
     setup_globals()
     var args = System.args()
@@ -2696,5 +2692,4 @@ fn main() -> int {
 
     src = code; pos = 0; next()
     while tt != 0 { p_stmt(); if retflag == 1 { break } }
-    return 0
 }

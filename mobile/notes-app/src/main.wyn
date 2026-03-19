@@ -1,0 +1,53 @@
+// Notes App — Wyn Mobile Demo
+// Demonstrates UI + storage + clipboard
+
+// Mobile SDK stubs
+fn wyn_ui_text(ctx: int, text: string, size: int) {}
+fn wyn_ui_spacer(ctx: int, size: int) {}
+fn wyn_ui_button(ctx: int, label: string, id: int) {}
+fn wyn_ios_main(a: int, b: int) {}
+fn wyn_storage_get(key: string) -> int { return 0 }
+fn wyn_storage_set(key: string, val: string) {}
+fn wyn_clipboard_set(text: string) {}
+
+var note_count = 0
+
+fn wyn_app_title() -> string {
+    return "Wyn Notes"
+}
+
+fn wyn_app_build(ctx: int) {
+    wyn_ui_text(ctx, "Quick Notes", 28)
+    wyn_ui_spacer(ctx, 16)
+
+    var saved = wyn_storage_get("note_count")
+    if saved != 0 {
+        wyn_ui_text(ctx, "Saved notes: ${saved}", 15)
+    } else {
+        wyn_ui_text(ctx, "No saved notes", 15)
+    }
+
+    wyn_ui_spacer(ctx, 24)
+    wyn_ui_button(ctx, "Add Note", 1)
+    wyn_ui_button(ctx, "Copy Count", 2)
+    wyn_ui_button(ctx, "Clear All", 3)
+}
+
+fn wyn_on_button(id: int) {
+    if id == 1 {
+        note_count = note_count + 1
+        wyn_storage_set("note_count", "${note_count}")
+        println("Added note #${note_count}")
+    } else if id == 2 {
+        wyn_clipboard_set("${note_count}")
+        println("Copied count to clipboard")
+    } else if id == 3 {
+        note_count = 0
+        wyn_storage_set("note_count", "0")
+        println("Cleared all notes")
+    }
+}
+
+fn main() {
+    return wyn_ios_main(0, 0)
+}

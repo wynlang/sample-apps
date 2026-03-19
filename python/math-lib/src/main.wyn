@@ -24,9 +24,9 @@ fn modulo(a: int, b: int) -> int {
     return a % b
 }
 
-fn power(base: int, exp: int) -> int {
+fn power(base: int, exponent: int) -> int {
     var result = 1
-    for i in 0..exp {
+    for i in 0..exponent {
         result *= base
     }
     return result
@@ -90,12 +90,24 @@ fn greet(name: string) -> string {
 }
 
 fn repeat_str(s: string, n: int) -> string {
-    var sb = StringBuilder.new()
+    var result = ""
     for i in 0..n {
-        sb.append(s)
+        result = result + s
     }
-    return sb.to_string()
+    return result
 }
 
-fn main() -> int {
+fn main() {
+    println("=== Python-style Math Library ===")
+    println("")
+    println("  abs(-5) = ${calc_abs(-5)}")
+    println("  clamp(15, 0, 10) = ${calc_clamp(15, 0, 10)}")
+    println("  factorial(6) = ${factorial(6)}")
+    println("  gcd(48, 18) = ${calc_gcd(48, 18)}")
+    println("  fibonacci(10) = ${fibonacci(10)}")
+    println("  power(2, 10) = ${power(2, 10)}")
+    println("  repeat_str(ab, 3) = ${repeat_str("ab", 3)}")
+    println("  greet(Wyn) = ${greet("Wyn")}")
+    println("")
+    println("All functions working!")
 }

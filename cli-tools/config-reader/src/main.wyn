@@ -1,7 +1,7 @@
 // Config Reader -- Parse key=value configuration files
 // Demonstrates: File.read, HashMap, string interpolation, .split()
 
-fn main() -> int {
+fn main() {
     println("=== Config Reader ===")
     println("")
 
@@ -46,5 +46,4 @@ fn main() -> int {
     if port > 0 {
         println("  ✓ Port ${port} is valid")
     }
-    return 0
 }

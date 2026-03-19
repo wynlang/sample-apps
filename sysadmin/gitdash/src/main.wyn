@@ -44,7 +44,7 @@ fn print_section(title: string) {
     println("")
 }
 
-fn main() -> int {
+fn main() {
     println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
     println("\x1b[1;36m║\x1b[0m             \x1b[1mgitdash\x1b[0m -- Git Repository Dashboard              \x1b[1;36m║\x1b[0m")
     println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
@@ -66,8 +66,8 @@ fn main() -> int {
     if staged > 0 { branch_icon = "\x1b[36m●\x1b[0m" }
     println("  " + branch_icon + " \x1b[1m" + branch + "\x1b[0m")
     
-    if ahead > 0 { println("    \x1b[32m↑ "${ahead} + " ahead\x1b[0m") }
-    if behind > 0 { println("    \x1b[31m↓ "${behind} + " behind\x1b[0m") }
+    if ahead > 0 { println("    \x1b[32m↑ " + ahead.to_string() + " ahead\x1b[0m") }
+    if behind > 0 { println("    \x1b[31m↓ " + behind.to_string() + " behind\x1b[0m") }
     if ahead == 0 {
         if behind == 0 {
             println("    \x1b[90mUp to date with remote\x1b[0m")
@@ -79,20 +79,21 @@ fn main() -> int {
     var total_changes = staged + modified + untracked
     if total_changes == 0 {
         println("  \x1b[32m✓ Clean working tree\x1b[0m")
-    } else if staged > 0 { println("  \x1b[32m● Staged:    "${staged} + "\x1b[0m") }
-        if modified > 0 { println("  \x1b[33m● Modified:  "${modified} + "\x1b[0m") }
-        if untracked > 0 { println("  \x1b[31m● Untracked: "${untracked} + "\x1b[0m") }
+    } else {
+        if staged > 0 { println("  \x1b[32m● Staged:    " + staged.to_string() + "\x1b[0m") }
+        if modified > 0 { println("  \x1b[33m● Modified:  " + modified.to_string() + "\x1b[0m") }
+        if untracked > 0 { println("  \x1b[31m● Untracked: " + untracked.to_string() + "\x1b[0m") }
     }
 
     // Recent commits
     print_section("Recent Commits")
-    var log = System.exec("git log --oneline --decorate -10 2>/dev/null")
+    var git_log = System.exec("git log --oneline --decorate -10 2>/dev/null")
     var line_start = 0
-    var llen = log.len()
+    var llen = git_log.len()
     var line_num = 0
     for idx in 0..llen {
-        if log[idx] == "\n" {
-            var line = log.substring(line_start, idx).trim()
+        if git_log[idx] == "\n" {
+            var line = git_log.substring(line_start, idx).trim()
             line_start = idx + 1
             line_num += 1
             if line.len() == 0 { continue }
@@ -127,5 +128,4 @@ fn main() -> int {
     }
 
     println("")
-    return 0
 }

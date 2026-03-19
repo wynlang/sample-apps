@@ -9,7 +9,7 @@ fn gather(cmd: string, results: [SysData], idx: int, label: string) {
     results[idx] = SysData { label: label, value: val }
 }
 
-fn main() -> int {
+fn main() {
     println("")
     println("  \x1b[1;36m┌─────────────────────────────────────────────────────┐\x1b[0m")
     println("  \x1b[1;36m│\x1b[0m              \x1b[1msysinfo\x1b[0m -- System Dashboard             \x1b[1;36m│\x1b[0m")
@@ -86,5 +86,4 @@ fn main() -> int {
     println("    Shell:     ${shell}")
     println("    Home:      ${home}")
     println("")
-    return 0
 }

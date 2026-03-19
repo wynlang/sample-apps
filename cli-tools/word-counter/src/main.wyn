@@ -1,11 +1,14 @@
 // Word Counter -- Count word frequency in source files
 // Demonstrates: HashMap, string interpolation, File.read
 
-fn main() -> int {
+fn main() {
     println("=== Word Frequency Counter ===")
     println("")
 
-    var content = File.read("../sample-apps/cli-tools/word-counter/main.wyn")
+    var args = System.args()
+    var filepath = "src/main.wyn"
+    if args.len() > 1 { filepath = args[1] }
+    var content = File.read(filepath)
     if content.len() == 0 {
         println("Error: could not read input file")
         return 1
@@ -42,5 +45,4 @@ fn main() -> int {
             println("  ${kw}: ${c}")
         }
     }
-    return 0
 }

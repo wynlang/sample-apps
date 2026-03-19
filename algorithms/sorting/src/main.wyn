@@ -1,23 +1,9 @@
 // Sorting Algorithms in Wyn
-// Demonstrates: arrays, for..in, string interpolation
+// Demonstrates: arrays, recursion, spawn, await_all, method chaining, string interpolation
 
-fn main() -> int {
-    println("=== Sorting Algorithms ===")
-
-    var data = [64, 34, 25, 12, 22, 11, 90, 1, 45, 78]
-    var n = data.len()
-
-    println("")
-    var s = "["
+fn bubble_sort(data: [int], n: int) {
     for i in 0..n {
-        if i > 0 { s = s + ", " }
-        s += data[i].to_string()
-    }
-    println("Input: ${s}]")
-
-    // Bubble sort
-    for i in 0..n {
-        for j in 0..(n - 1) {
+        for j in 0..(n - 1 - i) {
             if data[j] > data[j + 1] {
                 var temp = data[j]
                 data[j] = data[j + 1]
@@ -25,23 +11,86 @@ fn main() -> int {
             }
         }
     }
+}
 
-    var s2 = "["
-    for i in 0..n {
-        if i > 0 { s2 = s2 + ", " }
-        s2 += data[i].to_string()
+fn partition(data: [int], lo: int, hi: int) -> int {
+    var pivot = data[hi]
+    var i = lo - 1
+    for j in lo..hi {
+        if data[j] <= pivot {
+            i += 1
+            var temp = data[i]
+            data[i] = data[j]
+            data[j] = temp
+        }
     }
-    println("Sorted: ${s2}]")
+    i += 1
+    var temp = data[i]
+    data[i] = data[hi]
+    data[hi] = temp
+    return i
+}
 
-    var sorted = true
+fn quicksort(data: [int], lo: int, hi: int) {
+    if lo >= hi { return }
+    var p = partition(data, lo, hi)
+    quicksort(data, lo, p - 1)
+    quicksort(data, p + 1, hi)
+}
+
+fn is_sorted(arr: [int]) -> int {
+    var n = arr.len()
     for i in 0..(n - 1) {
-        if data[i] > data[i + 1] { sorted = false }
+        if arr[i] > arr[i + 1] { return 0 }
     }
+    return 1
+}
 
-    if sorted {
-        println("  ✓ Correctly sorted!")
-    } else {
-        println("  ✗ Sort failed!")
-    }
-    return 0
+fn run_bubble(n: int) -> int {
+    var data = []
+    for i in 0..n { data.push(n - i) }
+    bubble_sort(data, n)
+    return is_sorted(data)
+}
+
+fn run_quick(n: int) -> int {
+    var data = []
+    for i in 0..n { data.push(n - i) }
+    quicksort(data, 0, n - 1)
+    return is_sorted(data)
+}
+
+fn main() {
+    println("=== Sorting Algorithms ===\n")
+
+    var data1 = [64, 34, 25, 12, 22, 11, 90, 1, 45, 78]
+    var data2 = [64, 34, 25, 12, 22, 11, 90, 1, 45, 78]
+    var n = data1.len()
+    println("Input:     " + data1.join(", "))
+
+    // Bubble sort (in-place)
+    bubble_sort(data1, n)
+    var check1 = ""
+    if is_sorted(data1) == 1 { check1 = " ✓" } else { check1 = " ✗" }
+    println("Bubble:    " + data1.join(", ") + check1)
+
+    // Quicksort (in-place)
+    quicksort(data2, 0, n - 1)
+    var check2 = ""
+    if is_sorted(data2) == 1 { check2 = " ✓" } else { check2 = " ✗" }
+    println("Quicksort: " + data2.join(", ") + check2)
+
+    // Built-in sort
+    var data3 = [64, 34, 25, 12, 22, 11, 90, 1, 45, 78]
+    println("Built-in:  " + data3.sort().join(", ") + " ✓")
+
+    // Race: sort 5000 elements concurrently
+    println("\n--- Concurrent Sort Race (n=5000) ---")
+    var futures = []
+    futures.push(spawn run_bubble(5000))
+    futures.push(spawn run_quick(5000))
+    var results = await_all(futures)
+    println("Bubble sorted correctly: " + results[0].to_string())
+    println("Quick sorted correctly:  " + results[1].to_string())
+    println("  ✓ Concurrent sort race finished!")
 }

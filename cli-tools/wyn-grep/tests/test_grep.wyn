@@ -1,12 +1,10 @@
 fn is_ignored(name: string) -> int {
     if name == ".git" || name == "node_modules" || name == "target" { return 1 }
-    return 0
 }
 
 fn is_binary(name: string) -> int {
     if name.ends_with(".o") || name.ends_with(".a") || name.ends_with(".so") { return 1 }
     if name.ends_with(".png") || name.ends_with(".jpg") { return 1 }
-    return 0
 }
 
 test "ignored directories" {

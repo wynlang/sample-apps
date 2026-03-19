@@ -30,7 +30,7 @@ fn on_request(method: string, path: string, body: string, fd: int) {
     }
 }
 
-fn main() -> int {
+fn main() {
     var port = 8080
     var server = Http.serve(port)
     println("Template demo on http://localhost:${port}")

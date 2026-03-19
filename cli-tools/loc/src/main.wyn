@@ -1,9 +1,10 @@
 // loc -- Concurrent Lines of Code Counter
-// Demonstrates: spawn for parallel file processing, structs, string interpolation
+// Demonstrates: spawn, await_all, structs, string interpolation
 
 struct FileStats { name: string, code: int, blank: int, comment: int }
 
-fn count_lines(filename: string, content: string, results: [FileStats], idx: int) {
+fn count_file(filename: string) -> int {
+    var content = File.read(filename)
     var code = 0
     var blank = 0
     var comment = 0
@@ -14,10 +15,11 @@ fn count_lines(filename: string, content: string, results: [FileStats], idx: int
         else if trimmed.starts_with("//") { comment = comment + 1 }
         else { code = code + 1 }
     }
-    results[idx] = FileStats { name: filename, code: code, blank: blank, comment: comment }
+    // Encode as code * 1000000 + blank * 1000 + comment
+    return code * 1000000 + blank * 1000 + comment
 }
 
-fn main() -> int {
+fn main() {
     println("=== Lines of Code Counter ===")
 
     var files = [
@@ -28,35 +30,34 @@ fn main() -> int {
         "../sample-apps/cli-tools/md-toc/src/main.wyn"
     ]
     var count = files.len()
-    var results: [FileStats] = []
 
-    for i in 0..count {
-        results.push(FileStats { name: "", code: 0, blank: 0, comment: 0 })
-    }
-
-    // Count lines concurrently
+    // Count lines concurrently using spawn + await_all
+    var futures = []
     for i in 0..count {
         if File.exists(files[i]) {
-            var content = File.read(files[i])
-            spawn count_lines(files[i], content, results, i)
+            futures.push(spawn count_file(files[i]))
+        } else {
+            futures.push(spawn count_file(""))
         }
     }
-
-    Time.sleep(200)
+    var results = await_all(futures)
 
     var total_code = 0
     var total_blank = 0
     var total_comment = 0
 
     for i in 0..count {
-        var s = results[i]
-        if s.name.len() > 0 {
-            var total = s.code + s.blank + s.comment
-            println("  ${s.name}")
-            println("    Code: ${s.code}  Blank: ${s.blank}  Comment: ${s.comment}  Total: ${total}")
-            total_code += s.code
-            total_blank += s.blank
-            total_comment += s.comment
+        var packed = results[i]
+        var code = packed / 1000000
+        var blank = (packed / 1000) % 1000
+        var comment = packed % 1000
+        if code > 0 || blank > 0 {
+            var total = code + blank + comment
+            println("  ${files[i]}")
+            println("    Code: ${code}  Blank: ${blank}  Comment: ${comment}  Total: ${total}")
+            total_code += code
+            total_blank += blank
+            total_comment += comment
         }
     }
 
@@ -68,5 +69,4 @@ fn main() -> int {
     println("  Blank:   ${total_blank}")
     println("  Comment: ${total_comment}")
     println("  Total:   ${grand_total}")
-    return 0
 }

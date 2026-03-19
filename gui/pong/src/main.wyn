@@ -25,7 +25,7 @@ fn reset_ball() {
     bdy = 3
 }
 
-fn main() -> int {
+fn main() {
     var ok = Gui.create("Wyn Pong", 800, 600)
     if ok < 0 {
         println("Install SDL2: brew install sdl2")
@@ -145,6 +145,5 @@ fn main() -> int {
     }
 
     Gui.destroy()
-    println("Final Score: "${sl} + " - "${sr})
-    return 0
+    println("Final Score: ${sl} - ${sr}")
 }
