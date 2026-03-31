@@ -34,11 +34,11 @@ fn main() {
         var val = System.env(key)
         if val.len() > 0 {
             // Truncate long values
-            var display = val
-            if display.len() > 50 {
-                display = display.substring(0, 47) + "..."
+            var shown = val
+            if val.len() > 50 {
+                shown = val.substring(0, 47) + "..."
             }
-            println("  \x1b[32m●\x1b[0m " + key.pad_right(22, " ") + display)
+            println("  \x1b[32m●\x1b[0m " + key.pad_right(22, " ") + shown)
             set_count += 1
         } else {
             println("  \x1b[90m○ " + key.pad_right(22, " ") + "(not set)\x1b[0m")

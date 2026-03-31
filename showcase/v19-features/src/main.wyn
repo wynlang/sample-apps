@@ -73,14 +73,14 @@ fn main() {
     println("--- Method Chaining ---")
     var nums = [5, 3, 8, 1, 9, 2, 7, 4, 6]
     println("Original: " + nums.join(", "))
-    println("Sorted:   " + nums.sort().join(", "))
-    println("Top 3:    " + nums.sort().reverse().slice(0, 3).join(", "))
+    nums.sort()
+    println("Sorted:   " + nums.join(", "))
     println("Stats:    sum=" + nums.sum().to_string() + " min=" + nums.min().to_string() + " max=" + nums.max().to_string())
 
     // 2. String chaining
     println("\n--- String Methods ---")
     println("  hello world  ".trim().upper().replace("WORLD", "WYN"))
-    println("banana,apple,cherry".split(",").sort().join(" < "))
+    println("banana,apple,cherry".split(",").join(" < "))
     println("7".pad_left(5, "0"))
 
     // 3. Named arguments

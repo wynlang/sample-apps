@@ -4,6 +4,7 @@
 fn is_ignored(name: string) -> int {
     if name == ".git" || name == "node_modules" || name == "target" { return 1 }
     if name == ".cache" || name == ".DS_Store" || name == "vendor" { return 1 }
+    return 0
 }
 
 fn is_binary(name: string) -> int {
@@ -11,6 +12,7 @@ fn is_binary(name: string) -> int {
     if name.ends_with(".png") || name.ends_with(".jpg") || name.ends_with(".pdf") { return 1 }
     if name.ends_with(".zip") || name.ends_with(".gz") || name.ends_with(".exe") { return 1 }
     if name.ends_with(".dylib") || name.ends_with(".wasm") || name.ends_with(".pch") { return 1 }
+    return 0
 }
 
 fn search_file(path: string, pattern: string, show_ln: int) -> int {

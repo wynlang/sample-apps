@@ -82,7 +82,8 @@ fn main() {
 
     // Built-in sort
     var data3 = [64, 34, 25, 12, 22, 11, 90, 1, 45, 78]
-    println("Built-in:  " + data3.sort().join(", ") + " ✓")
+    data3.sort()
+    println("Built-in:  " + data3.join(", ") + " ✓")
 
     // Race: sort 5000 elements concurrently
     println("\n--- Concurrent Sort Race (n=5000) ---")
