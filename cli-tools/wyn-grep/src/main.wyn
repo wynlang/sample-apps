@@ -2,16 +2,16 @@
 // Usage: wyn-grep <pattern> [path] [-n]
 
 fn is_ignored(name: string) -> int {
-    if name == ".git" || name == "node_modules" || name == "target" { return 1 }
-    if name == ".cache" || name == ".DS_Store" || name == "vendor" { return 1 }
+    if name == ".git" or name == "node_modules" or name == "target" { return 1 }
+    if name == ".cache" or name == ".DS_Store" or name == "vendor" { return 1 }
     return 0
 }
 
 fn is_binary(name: string) -> int {
-    if name.ends_with(".o") || name.ends_with(".a") || name.ends_with(".so") { return 1 }
-    if name.ends_with(".png") || name.ends_with(".jpg") || name.ends_with(".pdf") { return 1 }
-    if name.ends_with(".zip") || name.ends_with(".gz") || name.ends_with(".exe") { return 1 }
-    if name.ends_with(".dylib") || name.ends_with(".wasm") || name.ends_with(".pch") { return 1 }
+    if name.ends_with(".o") or name.ends_with(".a") or name.ends_with(".so") { return 1 }
+    if name.ends_with(".png") or name.ends_with(".jpg") or name.ends_with(".pdf") { return 1 }
+    if name.ends_with(".zip") or name.ends_with(".gz") or name.ends_with(".exe") { return 1 }
+    if name.ends_with(".dylib") or name.ends_with(".wasm") or name.ends_with(".pch") { return 1 }
     return 0
 }
 

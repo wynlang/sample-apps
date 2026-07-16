@@ -10,8 +10,8 @@ fn fib(n: int) -> int {
     return fib(n - 1) + fib(n - 2)
 }
 
-test "pipe operator" {
-    var result = 5 |> double |> add10
+test "function composition" {
+    var result = add10(double(5))
     assert_eq(result, 20)
 }
 

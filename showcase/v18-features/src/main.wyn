@@ -76,9 +76,9 @@ fn main() {
     var r2 = compute_ratio(100, 0)
     println("Result:    100/3 ok=${ResultInt_is_ok(r1)}, 100/0 err=${ResultInt_is_err(r2)}")
 
-    // Pipe operator
-    var piped = 5 |> dbl |> add10
-    println("Pipe:      5 |> dbl |> add10 = ${piped}")
+    // Function composition (nested calls)
+    var piped = add10(dbl(5))
+    println("Compose:   add10(dbl(5)) = ${piped}")
 
     // HashMap
     var scores = HashMap.new()
