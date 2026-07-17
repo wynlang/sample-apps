@@ -3,8 +3,8 @@
 // Non-interactive: prints and exits
 
 fn status_icon(code: int) -> string {
-    if code >= 200 && code < 300 { return "\x1b[32m✓\x1b[0m" }
-    if code >= 300 && code < 400 { return "\x1b[33m→\x1b[0m" }
+    if code >= 200 and code < 300 { return "\x1b[32m✓\x1b[0m" }
+    if code >= 300 and code < 400 { return "\x1b[33m→\x1b[0m" }
     return "\x1b[31m✗\x1b[0m"
 }
 
@@ -32,16 +32,16 @@ fn main() {
     var down = 0
 
     var c1 = check("https://example.com", "example.com")
-    if c1 >= 200 && c1 < 400 { up += 1 } else { down += 1 }
+    if c1 >= 200 and c1 < 400 { up += 1 } else { down += 1 }
 
     var c2 = check("https://httpbin.org/status/200", "httpbin 200")
-    if c2 >= 200 && c2 < 400 { up += 1 } else { down += 1 }
+    if c2 >= 200 and c2 < 400 { up += 1 } else { down += 1 }
 
     var c3 = check("https://httpbin.org/status/404", "httpbin 404")
-    if c3 >= 200 && c3 < 400 { up += 1 } else { down += 1 }
+    if c3 >= 200 and c3 < 400 { up += 1 } else { down += 1 }
 
     var c4 = check("http://localhost:8080", "localhost:8080")
-    if c4 >= 200 && c4 < 400 { up += 1 } else { down += 1 }
+    if c4 >= 200 and c4 < 400 { up += 1 } else { down += 1 }
 
     println("")
     println("  \x1b[32m● Up: ${up}\x1b[0m  \x1b[31m● Down: ${down}\x1b[0m")

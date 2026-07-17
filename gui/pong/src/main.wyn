@@ -43,8 +43,8 @@ fn main() {
         }
 
         // Input -- arrows and WASD
-        if Gui.key_pressed(1073741906) > 0 || Gui.key_pressed(119) > 0 { py = py - 7 }
-        if Gui.key_pressed(1073741905) > 0 || Gui.key_pressed(115) > 0 { py = py + 7 }
+        if Gui.key_pressed(1073741906) > 0 or Gui.key_pressed(119) > 0 { py = py - 7 }
+        if Gui.key_pressed(1073741905) > 0 or Gui.key_pressed(115) > 0 { py = py + 7 }
         if py < 10 { py = 10 }
         if py > 510 { py = 510 }
 
@@ -58,7 +58,7 @@ fn main() {
             if by > 590 - ball_sz { by = 590 - ball_sz  bdy = 0 - bdy }
 
             // Player paddle collision (left)
-            if bx < 35 + paddle_w && bx > 25 && by > py - 5 && by < py + paddle_h + 5 {
+            if bx < 35 + paddle_w and bx > 25 and by > py - 5 and by < py + paddle_h + 5 {
                 bdx = 0 - bdx
                 // Add spin based on where ball hits paddle
                 var hit_pos = by - py - paddle_h / 2
@@ -67,7 +67,7 @@ fn main() {
             }
 
             // AI paddle collision (right)
-            if bx > 765 - paddle_w && bx < 775 && by > ay - 5 && by < ay + paddle_h + 5 {
+            if bx > 765 - paddle_w and bx < 775 and by > ay - 5 and by < ay + paddle_h + 5 {
                 bdx = 0 - bdx
                 var hit_pos = by - ay - paddle_h / 2
                 bdy += hit_pos / 15
@@ -86,8 +86,8 @@ fn main() {
             if bx > 800 { sl = sl + 1  reset_ball() }
 
             // Speed up slightly over time
-            if bdx > 0 && bdx < 10 { bdx = bdx }
-            if bdx < 0 && bdx > -10 { bdx = bdx }
+            if bdx > 0 and bdx < 10 { bdx = bdx }
+            if bdx < 0 and bdx > -10 { bdx = bdx }
         }
 
         // === Drawing ===

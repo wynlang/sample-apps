@@ -39,7 +39,7 @@ fn main() {
         }
 
         // Click detection on button area
-        if md == 1 && mx > 50 && mx < 250 && my > 500 && my < 545 {
+        if md == 1 and mx > 50 and mx < 250 and my > 500 and my < 545 {
             click_count += 1
         }
 

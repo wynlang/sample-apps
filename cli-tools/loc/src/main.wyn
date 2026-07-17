@@ -51,7 +51,7 @@ fn main() {
         var code = packed / 1000000
         var blank = (packed / 1000) % 1000
         var comment = packed % 1000
-        if code > 0 || blank > 0 {
+        if code > 0 or blank > 0 {
             var total = code + blank + comment
             println("  ${files[i]}")
             println("    Code: ${code}  Blank: ${blank}  Comment: ${comment}  Total: ${total}")

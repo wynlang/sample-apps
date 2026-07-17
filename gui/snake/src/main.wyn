@@ -66,10 +66,10 @@ fn main() {
         // Input (non-blocking with short timeout)
         var key = Terminal.read_key()
         if key == 113 { running = 0 }
-        if key == 119 || key == 1000 { if dir != 1 { dir = 3 } }
-        if key == 115 || key == 1001 { if dir != 3 { dir = 1 } }
-        if key == 97 || key == 1003 { if dir != 0 { dir = 2 } }
-        if key == 100 || key == 1002 { if dir != 2 { dir = 0 } }
+        if key == 119 or key == 1000 { if dir != 1 { dir = 3 } }
+        if key == 115 or key == 1001 { if dir != 3 { dir = 1 } }
+        if key == 97 or key == 1003 { if dir != 0 { dir = 2 } }
+        if key == 100 or key == 1002 { if dir != 2 { dir = 0 } }
 
         // Move: shift body
         var i = slen - 1
@@ -86,19 +86,19 @@ fn main() {
         if dir == 3 { sy[0] = sy[0] - 1 }
 
         // Wall collision
-        if sx[0] < 2 || sx[0] > cols - 1 || sy[0] < 2 || sy[0] > rows - 1 {
+        if sx[0] < 2 or sx[0] > cols - 1 or sy[0] < 2 or sy[0] > rows - 1 {
             running = 0
         }
 
         // Self collision
         for j in 1..slen {
-            if sx[0] == sx[j] && sy[0] == sy[j] {
+            if sx[0] == sx[j] and sy[0] == sy[j] {
                 running = 0
             }
         }
 
         // Eat food
-        if sx[0] == fx && sy[0] == fy {
+        if sx[0] == fx and sy[0] == fy {
             score += 10
             // Grow snake
             sx.push(sx[slen - 1])

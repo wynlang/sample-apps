@@ -21,7 +21,7 @@ fn main() {
 
     for idx in 0..total_len {
         var ch = content[idx]
-        if ch == " " || ch == "\n" || ch == "\t" || ch == "(" || ch == ")" || ch == "{" || ch == "}" || ch == "," || ch == ":" {
+        if ch == " " or ch == "\n" or ch == "\t" or ch == "(" or ch == ")" or ch == "{" or ch == "}" or ch == "," or ch == ":" {
             if idx > line_start {
                 var word = content.substring(line_start, idx).trim()
                 if word.len() > 0 {

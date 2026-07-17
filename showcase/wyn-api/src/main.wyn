@@ -6,7 +6,7 @@ var next_id = 1
 
 fn handle(method: string, path: string, body: string, fd: int) {
     // GET /api/items -- list all
-    if method == "GET" && path == "/api/items" {
+    if method == "GET" and path == "/api/items" {
         var keys = items.keys()
         var parts = [""]
         parts = []
@@ -16,7 +16,7 @@ fn handle(method: string, path: string, body: string, fd: int) {
     }
 
     // GET /api/items/:id -- get one
-    if method == "GET" && path.starts_with("/api/items/") {
+    if method == "GET" and path.starts_with("/api/items/") {
         var id = path.substring(11, path.len())
         if items.has(id) {
             Http.respond(fd, 200, "application/json", items.get(id))
@@ -27,7 +27,7 @@ fn handle(method: string, path: string, body: string, fd: int) {
     }
 
     // POST /api/items -- create
-    if method == "POST" && path == "/api/items" {
+    if method == "POST" and path == "/api/items" {
         var name = body.trim()
         if name.len() == 0 { name = "untitled" }
         var id = next_id
@@ -40,7 +40,7 @@ fn handle(method: string, path: string, body: string, fd: int) {
     }
 
     // DELETE /api/items/:id -- delete
-    if method == "DELETE" && path.starts_with("/api/items/") {
+    if method == "DELETE" and path.starts_with("/api/items/") {
         var id = path.substring(11, path.len())
         if items.has(id) {
             items.remove(id)
@@ -53,7 +53,7 @@ fn handle(method: string, path: string, body: string, fd: int) {
     }
 
     // GET /api/health
-    if method == "GET" && path == "/api/health" {
+    if method == "GET" and path == "/api/health" {
         Http.respond(fd, 200, "application/json", "{\"status\":\"ok\",\"items\":${items.len()}}")
         return
     }
