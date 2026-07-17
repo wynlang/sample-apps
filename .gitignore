@@ -3,3 +3,9 @@
 *.out
 *.dSYM/
 .DS_Store
+# compiled example binaries (extensionless, next to their .wyn source)
+multifile/src/math
+multifile/src/strings
+wynjs/src/runtime
+wynjs/src/values
+gui/*/src/main
