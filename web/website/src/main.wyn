@@ -12,7 +12,7 @@ fn page_home() -> string {
 fn page_about() -> string {
     var platform = Os.platform()
     var arch = Os.arch()
-    return template("About", "<h1>About</h1><p>Wyn v1.8.0 on ${platform} ${arch}.</p><p>31 official packages. Native binaries.</p><p><a href=https://wynlang.com>wynlang.com</a></p>")
+    return template("About", "<h1>About</h1><p>Wyn v1.18 on ${platform} ${arch}.</p><p>31 official packages. Native binaries.</p><p><a href=https://wynlang.com>wynlang.com</a></p>")
 }
 
 fn handle_request(method: string, path: string, fd: int) {

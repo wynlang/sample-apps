@@ -9,3 +9,5 @@ multifile/src/strings
 wynjs/src/runtime
 wynjs/src/values
 gui/*/src/main
+server.db
+wyn_cc_err.txt

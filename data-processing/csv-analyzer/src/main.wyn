@@ -5,7 +5,14 @@ fn main() {
     println("=== Student Grade Analyzer ===")
     println("")
 
-    var content = File.read("../sample-apps/data-processing/csv-analyzer/data.csv")
+    // Data file lives next to this source; also try cwd for `wyn run` from src/.
+    var path = "src/data.csv"
+    if File.exists(path) == 0 { path = "data.csv" }
+    if File.exists(path) == 0 {
+        println("data.csv not found — run from the app root (src/data.csv)")
+        return
+    }
+    var content = File.read(path)
     var line_start = 0
     var total_len = content.len()
     var count = 0

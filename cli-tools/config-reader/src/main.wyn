@@ -5,9 +5,11 @@ fn main() {
     println("=== Config Reader ===")
     println("")
 
-    var path = "../sample-apps/cli-tools/config-reader/src/app.conf"
+    // Config lives next to this source; also try cwd for `wyn run` from src/.
+    var path = "src/app.conf"
+    if File.exists(path) == 0 { path = "app.conf" }
     if File.exists(path) == 0 {
-        println("Error: Config file not found")
+        println("Error: app.conf not found — run from the app root (src/app.conf)")
         return 1
     }
 
