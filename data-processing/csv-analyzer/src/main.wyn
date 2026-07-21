@@ -9,7 +9,7 @@ fn main() {
     var path = "src/data.csv"
     if File.exists(path) == 0 { path = "data.csv" }
     if File.exists(path) == 0 {
-        println("data.csv not found — run from the app root (src/data.csv)")
+        println("data.csv not found - run from the app root (src/data.csv)")
         return
     }
     var content = File.read(path)

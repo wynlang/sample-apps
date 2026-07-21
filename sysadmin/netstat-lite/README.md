@@ -1,6 +1,6 @@
 # netstat-lite
 
-netstat-lite — Network connections and interface monitor
+netstat-lite - Network connections and interface monitor
 
 ## Run
 

@@ -41,13 +41,13 @@ cd wyn && wyn run ../sample-apps/wynjs/src/main.wyn -- ../sample-apps/wynjs/test
 Single-pass tree-walk interpreter: lexer → recursive descent parser → immediate evaluation.
 
 Values are tagged strings (`n:42`, `s:hello`, `b:true`, `o:0`, `a:0`).
-Objects use `[HashMap]` arrays — each JS object is a Wyn HashMap.
+Objects use `[HashMap]` arrays - each JS object is a Wyn HashMap.
 Scopes use flat arrays with stack marks for push/pop.
 Function bodies stored as source strings, re-parsed on call.
 Closures capture and restore environment snapshots.
 Prototype chains for class inheritance.
 
-## Features — 115/115 tests pass
+## Features - 115/115 tests pass
 
 ### Language
 let/const/var, if/else, while, for, do-while, switch/case, for-in, for-of,
@@ -75,14 +75,14 @@ indexOf, includes, join, concat, slice, splice, push, pop, shift, unshift
 
 Building WynJS exposed and fixed 11 Wyn compiler bugs:
 
-1. Array literal codegen — `array_push_str` for string arrays
-2. `wyn run` CLI args — args after `--` now passed to program
-3. `wyn build` TCC path — MAP_ANONYMOUS + missing source files
-4. `test` keyword — now context-sensitive
-5. HashMap.keys()/values() — now return `[string]`
-6. Global forward references — script mode globals at file scope
-7. Global variable type inference — method call results get correct types
-8. Unified build source file list — single source of truth
-9. HashMaps in arrays — `array.push()` updates element type
-10. Module variable exports — `export var` now works
-11. Module function codegen — imported functions use `#define` aliases
+1. Array literal codegen - `array_push_str` for string arrays
+2. `wyn run` CLI args - args after `--` now passed to program
+3. `wyn build` TCC path - MAP_ANONYMOUS + missing source files
+4. `test` keyword - now context-sensitive
+5. HashMap.keys()/values() - now return `[string]`
+6. Global forward references - script mode globals at file scope
+7. Global variable type inference - method call results get correct types
+8. Unified build source file list - single source of truth
+9. HashMaps in arrays - `array.push()` updates element type
+10. Module variable exports - `export var` now works
+11. Module function codegen - imported functions use `#define` aliases

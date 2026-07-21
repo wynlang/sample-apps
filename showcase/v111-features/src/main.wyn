@@ -1,4 +1,4 @@
-// v1.11 Feature Showcase — "The Developer Experience Release"
+// v1.11 Feature Showcase - "The Developer Experience Release"
 
 enum Status { Active, Inactive, Pending }
 
@@ -26,14 +26,14 @@ fn main() -> int {
     println("Status.Active = " + Status.Active.to_string())
     println("Status.Pending = " + Status.Pending.to_string())
 
-    // 2. for i, v in arr — indexed iteration
+    // 2. for i, v in arr - indexed iteration
     println("\n--- Indexed Iteration ---")
     var langs = ["Wyn", "Go", "Rust", "Python"]
     for i, lang in langs {
         println(i.to_string() + ". " + lang)
     }
 
-    // 3. "str" * n — string repeat
+    // 3. "str" * n - string repeat
     println("\n--- String Repeat ---")
     println("ha" * 5)
     println("-" * 30)

@@ -1,6 +1,6 @@
 # template-demo
 
-Template Demo — Web app with HTML templates and dynamic content
+Template Demo - Web app with HTML templates and dynamic content
 
 ## Run
 

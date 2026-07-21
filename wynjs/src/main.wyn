@@ -1,4 +1,4 @@
-// WynJS — A JavaScript runtime written in Wyn
+// WynJS - A JavaScript runtime written in Wyn
 // Lexer + recursive descent parser + tree-walk interpreter
 // Supports: ES6 classes, arrow functions, closures, destructuring,
 // async/await, promises, modules, Map/Set, RegExp, and more.
@@ -458,7 +458,7 @@ fn next() {
 
 fn eat(t: int) { next() }
 
-// === Parser/Interpreter — expressions ===
+// === Parser/Interpreter - expressions ===
 fn p_expr() -> string { return p_ternary() }
 
 fn p_ternary() -> string {
@@ -1437,7 +1437,7 @@ fn callfn(callee: string, args: [string]) -> string {
             }
         }
     }
-    // Bind arguments object (only if needed — avoid array allocation overhead)
+    // Bind arguments object (only if needed - avoid array allocation overhead)
     edef("arguments", vundef())
     // Restore closure captures BEFORE param binding so params take precedence
     restore_captures(fid)
@@ -1604,12 +1604,12 @@ fn p_primary() -> string {
     // Template literal
     if tt == 61 {
         var result = tv
-        // pos is right after ${ — we need to parse the expression
+        // pos is right after ${ - we need to parse the expression
         next()
         while true {
             var inner = p_expr()
             result = result + vtostr(inner)
-            // tt should be 33 (}) — don't call next(), just advance pos manually
+            // tt should be 33 (}) - don't call next(), just advance pos manually
             if tt == 33 {
                 // Read raw text after } until ` or ${
                 var more = ""
@@ -1817,7 +1817,7 @@ fn p_func_expr() -> string {
                 params = params + "=" + tv
                 next()
             } else {
-                // Complex default — capture source
+                // Complex default - capture source
                 var ds = pos - tv.len()
                 p_expr()
                 params = params + "=" + src.substring(ds, pos).trim()
@@ -2167,7 +2167,7 @@ fn p_stmt() {
         if tt == 37 { next() }
         return
     }
-    // yield (stub — skip expression)
+    // yield (stub - skip expression)
     if tt == 91 { next(); if tt != 37 and tt != 33 { p_expr() }; if tt == 37 { next() }; return }
     // throw
     if tt == 82 {
@@ -2432,7 +2432,7 @@ fn p_stmt() {
                 src = s1; pos = p1; tt = t1; tv = v1
                 return
             }
-            // C-style for — backtrack
+            // C-style for - backtrack
             pos = sp - vname.len()
             if decl_type > 0 { pos = pos - 4 }
             next()

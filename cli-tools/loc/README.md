@@ -1,4 +1,4 @@
-# loc — Lines of Code Counter
+# loc - Lines of Code Counter
 
 A command-line tool that counts lines of code in source files.
 

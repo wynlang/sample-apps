@@ -1,6 +1,6 @@
 # config-reader
 
-Config Reader — Parse key=value configuration files
+Config Reader - Parse key=value configuration files
 
 ## Run
 

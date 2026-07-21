@@ -1,6 +1,6 @@
 # portscanner
 
-portscanner — Concurrent port scanner using spawn
+portscanner - Concurrent port scanner using spawn
 
 ## Run
 

@@ -9,7 +9,7 @@ fn main() {
     var path = "src/app.conf"
     if File.exists(path) == 0 { path = "app.conf" }
     if File.exists(path) == 0 {
-        println("Error: app.conf not found — run from the app root (src/app.conf)")
+        println("Error: app.conf not found - run from the app root (src/app.conf)")
         return 1
     }
 

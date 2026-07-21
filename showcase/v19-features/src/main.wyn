@@ -69,7 +69,7 @@ fn fetch_data(id: int) -> string {
 fn main() {
     println("=== Wyn v1.9 Feature Showcase ===\n")
 
-    // 1. Method chaining — everything is an object
+    // 1. Method chaining - everything is an object
     println("--- Method Chaining ---")
     var nums = [5, 3, 8, 1, 9, 2, 7, 4, 6]
     println("Original: " + nums.join(", "))
@@ -96,7 +96,7 @@ fn main() {
     var [first, ...rest] = [10, 20, 30, 40, 50]
     println("first=" + first.to_string() + " rest=" + rest.join(","))
 
-    // 5. Lambdas — void, multiline, closures
+    // 5. Lambdas - void, multiline, closures
     println("\n--- Lambdas ---")
     var total = 0
     nums.each(fn(x: int) { total += x })
@@ -126,7 +126,7 @@ fn main() {
     var query = q.where_clause("active = 1").limit(10)
     println(query.to_sql())
 
-    // 9. Spawn + await_all — true concurrency
+    // 9. Spawn + await_all - true concurrency
     println("\n--- Concurrency ---")
     var futures = []
     for i in 0..8 {

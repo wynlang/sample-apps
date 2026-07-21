@@ -1,4 +1,4 @@
-"""Auto-generated Python wrapper for main.wyn — created by Wyn"""
+"""Auto-generated Python wrapper for main.wyn - created by Wyn"""
 import ctypes, os, sys
 
 _dir = os.path.dirname(os.path.abspath(__file__))

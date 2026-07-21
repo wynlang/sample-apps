@@ -1,6 +1,6 @@
 # todo-finder
 
-todo-finder — Scan source files for action item comments
+todo-finder - Scan source files for action item comments
 
 ## Run
 

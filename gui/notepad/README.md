@@ -1,6 +1,6 @@
 # notepad
 
-Notepad — Desktop text editor using App (webview) module
+Notepad - Desktop text editor using App (webview) module
 
 ## Run
 

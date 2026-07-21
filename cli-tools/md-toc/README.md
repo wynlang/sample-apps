@@ -1,6 +1,6 @@
 # md-toc
 
-Markdown TOC Generator — Extract headings from markdown files
+Markdown TOC Generator - Extract headings from markdown files
 
 ## Run
 

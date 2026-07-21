@@ -1,6 +1,6 @@
 # twux
 
-twux — Terminal multiplexer written in Wyn
+twux - Terminal multiplexer written in Wyn
 
 ## Run
 

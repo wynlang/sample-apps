@@ -1,6 +1,6 @@
 # httpcheck
 
-httpcheck — Concurrent HTTP endpoint health checker
+httpcheck - Concurrent HTTP endpoint health checker
 
 ## Run
 

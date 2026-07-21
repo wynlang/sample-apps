@@ -1,6 +1,6 @@
 # dockermon
 
-dockermon — Docker container monitor dashboard
+dockermon - Docker container monitor dashboard
 
 ## Run
 

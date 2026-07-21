@@ -1,6 +1,6 @@
 # snake
 
-Snake — Terminal game written in Wyn
+Snake - Terminal game written in Wyn
 
 ## Run
 

@@ -1,6 +1,6 @@
 # envdiff
 
-envdiff — Compare environment variables between shells/configs
+envdiff - Compare environment variables between shells/configs
 
 ## Run
 

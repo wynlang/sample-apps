@@ -17,7 +17,7 @@ Real-world programs written in Wyn. Every app compiles and runs.
 ### 🖥 sysadmin/ (13 apps)
 | App | Description |
 |-----|-------------|
-| **sysmon** | System monitor — htop-lite *(interactive)* |
+| **sysmon** | System monitor - htop-lite *(interactive)* |
 | **sysinfo** | System dashboard (CPU, memory, disk, network) |
 | **procwatch** | Process monitor with CPU/memory sorting |
 | **diskmon** | Disk usage with color-coded progress bars |
@@ -81,4 +81,4 @@ cd wyn
 ```
 
 ### python/
-- **math-lib/** — Math library compiled to shared library with auto-generated Python wrapper (31 tests)
+- **math-lib/** - Math library compiled to shared library with auto-generated Python wrapper (31 tests)

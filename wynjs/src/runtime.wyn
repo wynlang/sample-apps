@@ -1,4 +1,4 @@
-// WynJS Runtime — storage for environment, objects, arrays, functions
+// WynJS Runtime - storage for environment, objects, arrays, functions
 
 // === Environment (scope stack) ===
 var ekeys = [""]

@@ -1,6 +1,6 @@
 # procwatch
 
-procwatch — Process monitor with filtering and sorting
+procwatch - Process monitor with filtering and sorting
 
 ## Run
 

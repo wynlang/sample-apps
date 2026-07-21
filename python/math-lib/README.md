@@ -11,7 +11,7 @@ wyn build main.wyn --python
 
 This generates:
 - `libmain.dylib` (macOS) / `libmain.so` (Linux) / `libmain.dll` (Windows)
-- `main.py` — Python wrapper with typed bindings
+- `main.py` - Python wrapper with typed bindings
 
 ## Test
 

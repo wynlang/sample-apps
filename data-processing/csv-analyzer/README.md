@@ -1,6 +1,6 @@
 # csv-analyzer
 
-CSV Analyzer — Read student grades, compute statistics
+CSV Analyzer - Read student grades, compute statistics
 
 ## Run
 

@@ -1,6 +1,6 @@
 # log-parser
 
-Log Parser — Parse structured logs, extract errors, generate report
+Log Parser - Parse structured logs, extract errors, generate report
 
 ## Run
 

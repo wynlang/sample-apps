@@ -1,6 +1,6 @@
 # wyn-web-demo
 
-wyn-web-demo — Web app using the wyn-web framework
+wyn-web-demo - Web app using the wyn-web framework
 
 ## Run
 

@@ -1,4 +1,4 @@
-// Wyn Feature Showcase — every major language feature in one file
+// Wyn Feature Showcase - every major language feature in one file
 // Updated: demonstrates await_all, await_any, Shared atomics
 
 // --- Structs ---

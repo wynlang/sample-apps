@@ -16,11 +16,11 @@ wyn build    # → 71KB binary
 ## Endpoints
 
 ```
-GET    /api/health        — health check
-GET    /api/items         — list all items
-GET    /api/items/:id     — get one item
-POST   /api/items         — create item (body = name)
-DELETE /api/items/:id     — delete item
+GET    /api/health        - health check
+GET    /api/items         - list all items
+GET    /api/items/:id     - get one item
+POST   /api/items         - create item (body = name)
+DELETE /api/items/:id     - delete item
 ```
 
 ## Try it
@@ -50,5 +50,5 @@ curl -X DELETE localhost:8080/api/items/1
 
 - **HTTP server**: `Http.serve(port)` + `Http.accept(server)` for request handling
 - **Concurrency**: Each request handled in a separate green thread via `spawn handle(...)`
-- **Storage**: In-memory `HashMap` — no external dependencies
-- **JSON**: Built with string interpolation — `"{"id":${id},"name":"${name}"}"`
+- **Storage**: In-memory `HashMap` - no external dependencies
+- **JSON**: Built with string interpolation - `"{"id":${id},"name":"${name}"}"`

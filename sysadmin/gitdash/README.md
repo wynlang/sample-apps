@@ -1,6 +1,6 @@
 # gitdash
 
-gitdash — Git repository dashboard
+gitdash - Git repository dashboard
 
 ## Run
 

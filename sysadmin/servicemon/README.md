@@ -1,6 +1,6 @@
 # servicemon
 
-servicemon — Concurrent service health monitor
+servicemon - Concurrent service health monitor
 
 ## Run
 

@@ -1,6 +1,6 @@
 # sysinfo
 
-sysinfo — Concurrent system information dashboard
+sysinfo - Concurrent system information dashboard
 
 ## Run
 

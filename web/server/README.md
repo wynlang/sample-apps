@@ -1,6 +1,6 @@
 # server
 
-Wyn Web Server — concurrent HTTP server with spawn-per-request
+Wyn Web Server - concurrent HTTP server with spawn-per-request
 
 ## Run
 

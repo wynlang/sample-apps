@@ -1,6 +1,6 @@
 # sysmon
 
-sysmon — System monitor (htop-lite) written in Wyn
+sysmon - System monitor (htop-lite) written in Wyn
 
 ## Run
 

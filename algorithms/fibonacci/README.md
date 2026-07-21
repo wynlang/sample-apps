@@ -1,6 +1,6 @@
 # fibonacci
 
-Fibonacci — Recursive, iterative, and spawn-based parallel computation
+Fibonacci - Recursive, iterative, and spawn-based parallel computation
 
 ## Run
 

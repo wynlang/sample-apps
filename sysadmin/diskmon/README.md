@@ -1,6 +1,6 @@
 # diskmon
 
-diskmon — Disk usage monitor with visual bars
+diskmon - Disk usage monitor with visual bars
 
 ## Run
 

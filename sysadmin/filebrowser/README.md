@@ -1,6 +1,6 @@
 # filebrowser
 
-filebrowser — Interactive file browser TUI
+filebrowser - Interactive file browser TUI
 
 ## Run
 

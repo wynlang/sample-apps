@@ -1,6 +1,6 @@
 # dashboard
 
-Dashboard — System monitor using App (webview) module
+Dashboard - System monitor using App (webview) module
 
 ## Run
 

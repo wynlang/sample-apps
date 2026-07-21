@@ -1,6 +1,6 @@
 # word-counter
 
-Word Counter — Count word frequency in source files
+Word Counter - Count word frequency in source files
 
 ## Run
 

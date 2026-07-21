@@ -1,6 +1,6 @@
 # api-client
 
-API Client — exercises Http, Json, Encoding, Crypto, DateTime, StringBuilder
+API Client - exercises Http, Json, Encoding, Crypto, DateTime, StringBuilder
 
 ## Run
 

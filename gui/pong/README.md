@@ -1,6 +1,6 @@
 # pong
 
-Pong — Classic arcade game in Wyn
+Pong - Classic arcade game in Wyn
 
 ## Run
 
