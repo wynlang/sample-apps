@@ -17,10 +17,10 @@ fn progress_bar(pct: int, width: int) -> string {
 }
 
 fn main() {
-    println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
-    println("\x1b[1;36m║\x1b[0m              \x1b[1mdiskmon\x1b[0m -- Disk Usage Monitor                  \x1b[1;36m║\x1b[0m")
-    println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
-    println("")
+    print("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
+    print("\x1b[1;36m║\x1b[0m              \x1b[1mdiskmon\x1b[0m -- Disk Usage Monitor                  \x1b[1;36m║\x1b[0m")
+    print("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
+    print("")
 
     var df = System.exec("df -Ph 2>/dev/null | grep -v devfs | grep -v 'map '")
     var line_start = 0
@@ -28,8 +28,8 @@ fn main() {
     var line_num = 0
     var total_disks = 0
 
-    println("  ${"Mount".pad_right(30, " ")} ${"Bar".pad_right(27, " ")} Use%  Used/Size")
-    println("  ${"─────────────────────────────"} ${"───────────────────────────"} ──── ─────────")
+    print("  ${"Mount".pad_right(30, " ")} ${"Bar".pad_right(27, " ")} Use%  Used/Size")
+    print("  ${"─────────────────────────────"} ${"───────────────────────────"} ──── ─────────")
 
     for idx in 0..dlen {
         if df[idx] == "\n" {
@@ -59,12 +59,12 @@ fn main() {
             var label = mount
             if label.len() > 28 { label = label.substring(0, 28) }
 
-            println("  ${label.pad_right(30, " ")} ${progress_bar(pct, 25)} ${pct.to_string().pad_left(3, " ")}%  ${used}/${size}")
+            print("  ${label.pad_right(30, " ")} ${progress_bar(pct, 25)} ${pct.to_string().pad_left(3, " ")}%  ${used}/${size}")
             total_disks += 1
         }
     }
 
-    println("")
-    println("  \x1b[90m${total_disks} filesystems  |  \x1b[32m█ <60%\x1b[0m  \x1b[33m█ 60-80%\x1b[0m  \x1b[31m█ >80%\x1b[0m")
-    println("")
+    print("")
+    print("  \x1b[90m${total_disks} filesystems  |  \x1b[32m█ <60%\x1b[0m  \x1b[33m█ 60-80%\x1b[0m  \x1b[31m█ >80%\x1b[0m")
+    print("")
 }

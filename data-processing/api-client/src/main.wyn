@@ -2,52 +2,52 @@
 // Fetches data from httpbin.org and processes it
 
 fn main() {
-    println("=== Wyn API Client ===")
-    println("")
+    print("=== Wyn API Client ===")
+    print("")
     
     // 1. HTTP GET with JSON parsing
-    println("[1] GET request with JSON parsing...")
+    print("[1] GET request with JSON parsing...")
     var body = Http.get("https://httpbin.org/get")
     var doc = Json.parse(body)
     var origin = Json.get(doc, "origin")
-    println("  Origin IP: ${origin}")
+    print("  Origin IP: ${origin}")
     Test.assert(origin.len() > 0, "Got origin IP")
     
     // 2. Base64 auth header
-    println("[2] Base64 encoding for auth...")
+    print("[2] Base64 encoding for auth...")
     var creds = Encoding.base64_encode("user:pass123")
-    println("  Auth: Basic ${creds}")
+    print("  Auth: Basic ${creds}")
     Test.assert_eq_str(Encoding.base64_decode(creds), "user:pass123", "Base64 roundtrip")
     
     // 3. SHA256 request signing
-    println("[3] Request signing with HMAC...")
+    print("[3] Request signing with HMAC...")
     var timestamp = "${DateTime.now()}"
     var payload = "GET /api/data ${timestamp}"
     var sig = Crypto.hmac_sha256("secret-key", payload)
-    println("  Signature: ${sig}")
+    print("  Signature: ${sig}")
     Test.assert_eq_int(sig.len(), 64, "HMAC-SHA256 length")
     
     // 4. Build JSON request body
-    println("[4] Building JSON request...")
+    print("[4] Building JSON request...")
     var req = Json.new()
     Json.set(req, "name", "Wyn Language")
     Json.set_int(req, "version", 2)
     Json.set_bool(req, "stable", 1)
     var pretty: string = Json.to_pretty_string(req)
-    println(pretty)
+    print(pretty)
     Test.assert(pretty.contains("Wyn Language"), "Pretty JSON")
     
     // 5. CSV parsing
-    println("[5] CSV parsing...")
+    print("[5] CSV parsing...")
     var csv_data = "lang,year,type\nWyn,2024,compiled\nGo,2009,compiled\nPython,1991,interpreted"
     var csv = Csv.parse(csv_data)
     var row_count = Csv.row_count(csv)
     var rc_str = "${row_count}"
-    println("  Rows: ${rc_str} (including header)")
+    print("  Rows: ${rc_str} (including header)")
     var h0 = Csv.header(csv, 0)
     var h1 = Csv.header(csv, 1)
     var h2 = Csv.header(csv, 2)
-    println("  Headers: ${h0}, ${h1}, ${h2}")
+    print("  Headers: ${h0}, ${h1}, ${h2}")
     
     var sb = StringBuilder.new()
     for i in 1..row_count {
@@ -59,7 +59,7 @@ fn main() {
         StringBuilder.append(sb, year)
         StringBuilder.append_line(sb, ")")
     }
-    println(StringBuilder.to_string(sb))
+    print(StringBuilder.to_string(sb))
     StringBuilder.free(sb)
     
     Test.assert_eq_str(Csv.get_field(csv, 1, "lang"), "Wyn", "CSV field lookup")
@@ -70,17 +70,17 @@ fn main() {
     var hash = Crypto.sha256("benchmark data")
     var elapsed = DateTime.millis() - start
     var dur = DateTime.format_duration(elapsed)
-    println("[6] SHA256 in ${dur}")
+    print("[6] SHA256 in ${dur}")
     
     // 7. System info
     var plat = Os.platform()
     var arch = Os.arch()
     var host = Os.hostname()
     var pid = "${Os.pid()}"
-    println("[7] System: ${plat} ${arch}")
-    println("    Host: ${host}")
-    println("    PID: ${pid}")
+    print("[7] System: ${plat} ${arch}")
+    print("    Host: ${host}")
+    print("    PID: ${pid}")
     
-    println("")
-    println("=== All checks passed ===")
+    print("")
+    print("=== All checks passed ===")
 }

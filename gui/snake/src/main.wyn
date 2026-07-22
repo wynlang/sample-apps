@@ -119,5 +119,5 @@ fn main() {
 
     Terminal.restore()
     Terminal.clear()
-    println("Game Over! Score: ${score}")
+    print("Game Over! Score: ${score}")
 }

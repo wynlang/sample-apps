@@ -2,14 +2,14 @@
 // Demonstrates: File.read, string interpolation, structs, computed grades
 
 fn main() {
-    println("=== Student Grade Analyzer ===")
-    println("")
+    print("=== Student Grade Analyzer ===")
+    print("")
 
     // Data file lives next to this source; also try cwd for `wyn run` from src/.
     var path = "src/data.csv"
     if File.exists(path) == 0 { path = "data.csv" }
     if File.exists(path) == 0 {
-        println("data.csv not found - run from the app root (src/data.csv)")
+        print("data.csv not found - run from the app root (src/data.csv)")
         return
     }
     var content = File.read(path)
@@ -22,8 +22,8 @@ fn main() {
     var best_avg = 0
     var best_name = ""
 
-    println("Name       Math  Sci   Eng   Avg  Grade")
-    println("─────────────────────────────────────────")
+    print("Name       Math  Sci   Eng   Avg  Grade")
+    print("─────────────────────────────────────────")
 
     for idx in 0..total_len {
         if content[idx] == "\n" {
@@ -45,7 +45,7 @@ fn main() {
             else if avg >= 70 { grade = "C" }
             else if avg >= 60 { grade = "D" }
 
-            println("${name}     ${math_score}    ${sci_score}    ${eng_score}    ${avg}   ${grade}")
+            print("${name}     ${math_score}    ${sci_score}    ${eng_score}    ${avg}   ${grade}")
 
             sum_math += math_score
             sum_sci += sci_score
@@ -59,11 +59,11 @@ fn main() {
         }
     }
 
-    println("─────────────────────────────────────────")
-    println("")
-    println("Students:     ${count}")
-    println("Avg Math:     ${sum_math / count}")
-    println("Avg Science:  ${sum_sci / count}")
-    println("Avg English:  ${sum_eng / count}")
-    println("Top Student:  ${best_name} (avg: ${best_avg})")
+    print("─────────────────────────────────────────")
+    print("")
+    print("Students:     ${count}")
+    print("Avg Math:     ${sum_math / count}")
+    print("Avg Science:  ${sum_sci / count}")
+    print("Avg English:  ${sum_eng / count}")
+    print("Top Student:  ${best_name} (avg: ${best_avg})")
 }

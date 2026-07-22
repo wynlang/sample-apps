@@ -2,14 +2,14 @@
 // Demonstrates: File.read, HashMap, string interpolation, .split()
 
 fn main() {
-    println("=== Config Reader ===")
-    println("")
+    print("=== Config Reader ===")
+    print("")
 
     // Config lives next to this source; also try cwd for `wyn run` from src/.
     var path = "src/app.conf"
     if File.exists(path) == 0 { path = "app.conf" }
     if File.exists(path) == 0 {
-        println("Error: app.conf not found - run from the app root (src/app.conf)")
+        print("Error: app.conf not found - run from the app root (src/app.conf)")
         return 1
     }
 
@@ -32,20 +32,20 @@ fn main() {
         }
     }
 
-    println("Loaded ${key_count} config entries:")
-    println("")
+    print("Loaded ${key_count} config entries:")
+    print("")
 
     var keys = ["app_name", "version", "port", "debug", "max_connections", "database_host", "database_port", "log_level"]
     for key in keys {
         var val = config.get(key)
         if val.len() > 0 {
-            println("  ${key} = ${val}")
+            print("  ${key} = ${val}")
         }
     }
 
-    println("")
+    print("")
     var port = config.get("port").to_int()
     if port > 0 {
-        println("  ✓ Port ${port} is valid")
+        print("  ✓ Port ${port} is valid")
     }
 }

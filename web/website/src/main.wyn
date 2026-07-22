@@ -35,8 +35,8 @@ fn main() {
     var port = 8080
     var server = Http.serve(port)
     var p = "${port}"
-    println("Wyn Web running on http://localhost:${p}")
-    println("Press Ctrl+C to stop")
+    print("Wyn Web running on http://localhost:${p}")
+    print("Press Ctrl+C to stop")
 
     while 1 == 1 {
         var req = Http.accept(server)

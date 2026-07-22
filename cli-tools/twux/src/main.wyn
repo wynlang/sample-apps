@@ -455,5 +455,5 @@ fn main() {
 
     Terminal.restore()
     Terminal.clear()
-    println("twux exited cleanly.")
+    print("twux exited cleanly.")
 }

@@ -31,16 +31,16 @@ fn scan_port(port: int) -> int {
 }
 
 fn main() {
-    println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
-    println("\x1b[1;36m║\x1b[0m           \x1b[1mportscanner\x1b[0m -- Concurrent Port Scanner             \x1b[1;36m║\x1b[0m")
-    println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
-    println("")
+    print("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
+    print("\x1b[1;36m║\x1b[0m           \x1b[1mportscanner\x1b[0m -- Concurrent Port Scanner             \x1b[1;36m║\x1b[0m")
+    print("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
+    print("")
 
     var ports = [22, 80, 443, 3000, 3306, 5432, 6379, 8080, 8443, 9090, 27017]
     var count = ports.len()
 
-    println("  Scanning \x1b[1mlocalhost\x1b[0m (${count} ports concurrently)...")
-    println("")
+    print("  Scanning \x1b[1mlocalhost\x1b[0m (${count} ports concurrently)...")
+    print("")
 
     // Spawn all port scans concurrently and await results
     var futures = []
@@ -49,8 +49,8 @@ fn main() {
     }
     var results = await_all(futures)
 
-    println("  ${"PORT".pad_right(8, " ")}${"SERVICE".pad_right(15, " ")}STATUS")
-    println("  ${"────".pad_right(8, " ")}${"───────".pad_right(15, " ")}──────")
+    print("  ${"PORT".pad_right(8, " ")}${"SERVICE".pad_right(15, " ")}STATUS")
+    print("  ${"────".pad_right(8, " ")}${"───────".pad_right(15, " ")}──────")
 
     var open_count = 0
     for i in 0..count {
@@ -63,10 +63,10 @@ fn main() {
             status = "\x1b[32m● OPEN\x1b[0m"
             open_count += 1
         }
-        println("  ${port.to_string().pad_right(8, " ")}${name.pad_right(15, " ")}${status}")
+        print("  ${port.to_string().pad_right(8, " ")}${name.pad_right(15, " ")}${status}")
     }
 
-    println("")
-    println("  \x1b[90mFound ${open_count} open port(s) on localhost\x1b[0m")
-    println("")
+    print("")
+    print("  \x1b[90mFound ${open_count} open port(s) on localhost\x1b[0m")
+    print("")
 }

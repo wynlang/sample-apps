@@ -37,14 +37,14 @@ fn wyn_on_button(id: int) {
     if id == 1 {
         note_count = note_count + 1
         wyn_storage_set("note_count", "${note_count}")
-        println("Added note #${note_count}")
+        print("Added note #${note_count}")
     } else if id == 2 {
         wyn_clipboard_set("${note_count}")
-        println("Copied count to clipboard")
+        print("Copied count to clipboard")
     } else if id == 3 {
         note_count = 0
         wyn_storage_set("note_count", "0")
-        println("Cleared all notes")
+        print("Cleared all notes")
     }
 }
 

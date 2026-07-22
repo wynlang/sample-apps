@@ -35,7 +35,7 @@ fn handle(method: string, path: string, body: string, fd: int) {
         var json = "{\"id\":${id},\"name\":\"${name}\",\"done\":false}"
         items.set("${id}", json)
         Http.respond(fd, 201, "application/json", json)
-        println("  + Created item ${id}: ${name}")
+        print("  + Created item ${id}: ${name}")
         return
     }
 
@@ -45,7 +45,7 @@ fn handle(method: string, path: string, body: string, fd: int) {
         if items.has(id) {
             items.remove(id)
             Http.respond(fd, 200, "application/json", "{\"deleted\":${id}}")
-            println("  - Deleted item ${id}")
+            print("  - Deleted item ${id}")
         } else {
             Http.respond(fd, 404, "application/json", "{\"error\":\"not found\"}")
         }
@@ -64,20 +64,20 @@ fn handle(method: string, path: string, body: string, fd: int) {
 fn main() {
     var port = 8080
     var server = Http.serve(port)
-    if server < 0 { println("Failed to start server"); return 1 }
+    if server < 0 { print("Failed to start server"); return 1 }
 
-    println(" wyn-api running on http://localhost:${port}")
-    println("")
-    println("  GET    /api/health        -- health check")
-    println("  GET    /api/items         -- list items")
-    println("  GET    /api/items/:id     -- get item")
-    println("  POST   /api/items         -- create item (body = name)")
-    println("  DELETE /api/items/:id     -- delete item")
-    println("")
-    println("Try:")
-    println("  curl localhost:${port}/api/health")
-    println("  curl -X POST -d 'Buy milk' localhost:${port}/api/items")
-    println("  curl localhost:${port}/api/items")
+    print(" wyn-api running on http://localhost:${port}")
+    print("")
+    print("  GET    /api/health        -- health check")
+    print("  GET    /api/items         -- list items")
+    print("  GET    /api/items/:id     -- get item")
+    print("  POST   /api/items         -- create item (body = name)")
+    print("  DELETE /api/items/:id     -- delete item")
+    print("")
+    print("Try:")
+    print("  curl localhost:${port}/api/health")
+    print("  curl -X POST -d 'Buy milk' localhost:${port}/api/items")
+    print("  curl localhost:${port}/api/items")
 
     while 1 == 1 {
         var req = Http.accept(server)

@@ -19,8 +19,8 @@ fn fib_iterative(n: int) -> int {
 }
 
 fn main() {
-    println("=== Fibonacci Comparison ===")
-    println("")
+    print("=== Fibonacci Comparison ===")
+    print("")
 
     var test_values = [0, 1, 5, 10, 15, 20]
     var count = test_values.len()
@@ -37,15 +37,15 @@ fn main() {
         var n = test_values[i]
         var recursive = results[i]
         var iterative = fib_iterative(n)
-        println("  fib(${n}) = ${recursive} [recursive] / ${iterative} [iterative]")
+        print("  fib(${n}) = ${recursive} [recursive] / ${iterative} [iterative]")
         if recursive != iterative {
-            println("  ✗ MISMATCH!")
+            print("  ✗ MISMATCH!")
             all_match = false
         }
     }
 
-    println("")
+    print("")
     if all_match {
-        println("  ✓ All results match!")
+        print("  ✓ All results match!")
     }
 }

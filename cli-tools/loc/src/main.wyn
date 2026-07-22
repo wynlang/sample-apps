@@ -20,7 +20,7 @@ fn count_file(filename: string) -> int {
 }
 
 fn main() {
-    println("=== Lines of Code Counter ===")
+    print("=== Lines of Code Counter ===")
 
     var files = [
         "../sample-apps/cli-tools/loc/src/main.wyn",
@@ -53,8 +53,8 @@ fn main() {
         var comment = packed % 1000
         if code > 0 or blank > 0 {
             var total = code + blank + comment
-            println("  ${files[i]}")
-            println("    Code: ${code}  Blank: ${blank}  Comment: ${comment}  Total: ${total}")
+            print("  ${files[i]}")
+            print("    Code: ${code}  Blank: ${blank}  Comment: ${comment}  Total: ${total}")
             total_code += code
             total_blank += blank
             total_comment += comment
@@ -62,11 +62,11 @@ fn main() {
     }
 
     var grand_total = total_code + total_blank + total_comment
-    println("")
-    println("=== Summary ===")
-    println("  Files:   ${count}")
-    println("  Code:    ${total_code}")
-    println("  Blank:   ${total_blank}")
-    println("  Comment: ${total_comment}")
-    println("  Total:   ${grand_total}")
+    print("")
+    print("=== Summary ===")
+    print("  Files:   ${count}")
+    print("  Code:    ${total_code}")
+    print("  Blank:   ${total_blank}")
+    print("  Comment: ${total_comment}")
+    print("  Total:   ${grand_total}")
 }

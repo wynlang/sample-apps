@@ -98,16 +98,16 @@ fn repeat_str(s: string, n: int) -> string {
 }
 
 fn main() {
-    println("=== Python-style Math Library ===")
-    println("")
-    println("  abs(-5) = ${calc_abs(-5)}")
-    println("  clamp(15, 0, 10) = ${calc_clamp(15, 0, 10)}")
-    println("  factorial(6) = ${factorial(6)}")
-    println("  gcd(48, 18) = ${calc_gcd(48, 18)}")
-    println("  fibonacci(10) = ${fibonacci(10)}")
-    println("  power(2, 10) = ${power(2, 10)}")
-    println("  repeat_str(ab, 3) = ${repeat_str("ab", 3)}")
-    println("  greet(Wyn) = ${greet("Wyn")}")
-    println("")
-    println("All functions working!")
+    print("=== Python-style Math Library ===")
+    print("")
+    print("  abs(-5) = ${calc_abs(-5)}")
+    print("  clamp(15, 0, 10) = ${calc_clamp(15, 0, 10)}")
+    print("  factorial(6) = ${factorial(6)}")
+    print("  gcd(48, 18) = ${calc_gcd(48, 18)}")
+    print("  fibonacci(10) = ${fibonacci(10)}")
+    print("  power(2, 10) = ${power(2, 10)}")
+    print("  repeat_str(ab, 3) = ${repeat_str("ab", 3)}")
+    print("  greet(Wyn) = ${greet("Wyn")}")
+    print("")
+    print("All functions working!")
 }

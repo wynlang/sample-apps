@@ -33,8 +33,8 @@ fn on_request(method: string, path: string, body: string, fd: int) {
 fn main() {
     var port = 8080
     var server = Http.serve(port)
-    println("Template demo on http://localhost:${port}")
-    println("Press Ctrl+C to stop")
+    print("Template demo on http://localhost:${port}")
+    print("Press Ctrl+C to stop")
 
     while 1 == 1 {
         var req = Http.accept(server)

@@ -27,13 +27,13 @@ fn search_file(path: string, pattern: string, show_ln: int) -> int {
         var line = lines[i]
         if line.contains(pattern) {
             if file_printed == 0 {
-                println("\x1b[35m${path}\x1b[0m")
+                print("\x1b[35m${path}\x1b[0m")
                 file_printed = 1
             }
             if show_ln == 1 {
-                println("\x1b[32m${i + 1}\x1b[0m:${line}")
+                print("\x1b[32m${i + 1}\x1b[0m:${line}")
             } else {
-                println("  ${line.trim()}")
+                print("  ${line.trim()}")
             }
             matches += 1
         }
@@ -64,14 +64,14 @@ fn walk_and_search(dir: string, pattern: string, show_ln: int) -> int {
 fn main() {
     var args = System.args()
     if args.len() < 2 {
-        println("wyn-grep -- search files for patterns")
-        println("")
-        println("Usage: wyn-grep <pattern> [path] [-n]")
-        println("  -n    Show line numbers")
-        println("")
-        println("Examples:")
-        println("  wyn-grep TODO .")
-        println("  wyn-grep 'fn main' src -n")
+        print("wyn-grep -- search files for patterns")
+        print("")
+        print("Usage: wyn-grep <pattern> [path] [-n]")
+        print("  -n    Show line numbers")
+        print("")
+        print("Examples:")
+        print("  wyn-grep TODO .")
+        print("  wyn-grep 'fn main' src -n")
         return 1
     }
 
@@ -92,7 +92,7 @@ fn main() {
     }
 
     if total == 0 {
-        println("No matches found.")
+        print("No matches found.")
     }
 
 }

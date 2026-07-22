@@ -175,5 +175,5 @@ fn main() {
 
     Terminal.restore()
     Terminal.clear()
-    println("filebrowser exited.")
+    print("filebrowser exited.")
 }

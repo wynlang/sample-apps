@@ -2,8 +2,8 @@ import math
 import strings
 
 fn main() {
-    println("${math.add(2, 3)}")
-    println("${math.factorial(10)}")
-    println(strings.shout("hello"))
-    println(strings.greet("Wyn"))
+    print("${math.add(2, 3)}")
+    print("${math.factorial(10)}")
+    print(strings.shout("hello"))
+    print(strings.greet("Wyn"))
 }

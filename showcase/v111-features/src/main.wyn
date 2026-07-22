@@ -17,42 +17,42 @@ impl Task {
 }
 
 fn main() -> int {
-    println("=" * 40)
-    println("  Wyn v1.11 Feature Showcase")
-    println("=" * 40)
+    print("=" * 40)
+    print("  Wyn v1.11 Feature Showcase")
+    print("=" * 40)
 
     // 1. enum.to_string() returns variant name
-    println("\n--- enum.to_string() ---")
-    println("Status.Active = " + Status.Active.to_string())
-    println("Status.Pending = " + Status.Pending.to_string())
+    print("\n--- enum.to_string() ---")
+    print("Status.Active = " + Status.Active.to_string())
+    print("Status.Pending = " + Status.Pending.to_string())
 
     // 2. for i, v in arr - indexed iteration
-    println("\n--- Indexed Iteration ---")
+    print("\n--- Indexed Iteration ---")
     var langs = ["Wyn", "Go", "Rust", "Python"]
     for i, lang in langs {
-        println(i.to_string() + ". " + lang)
+        print(i.to_string() + ". " + lang)
     }
 
     // 3. "str" * n - string repeat
-    println("\n--- String Repeat ---")
-    println("ha" * 5)
-    println("-" * 30)
+    print("\n--- String Repeat ---")
+    print("ha" * 5)
+    print("-" * 30)
 
     // 4. int? optional syntax
-    println("\n--- Optional Types ---")
+    print("\n--- Optional Types ---")
     var found: int? = OptionInt_Some(42)
     var missing: int? = OptionInt_None()
-    println("found: " + OptionInt_unwrap(found).to_string())
-    println("missing has value: " + OptionInt_is_some(missing).to_string())
-    println("missing or default: " + OptionInt_unwrap_or(missing, -1).to_string())
+    print("found: " + OptionInt_unwrap(found).to_string())
+    print("missing has value: " + OptionInt_is_some(missing).to_string())
+    print("missing or default: " + OptionInt_unwrap_or(missing, -1).to_string())
 
     // 5. Static constructors work
-    println("\n--- Static Constructors ---")
+    print("\n--- Static Constructors ---")
     var t = Task.new("Ship v1.11", Status.Active)
-    println(t.to_string())
+    print(t.to_string())
 
-    println("\n" + "=" * 40)
-    println("  All features working!")
-    println("=" * 40)
+    print("\n" + "=" * 40)
+    print("  All features working!")
+    print("=" * 40)
     return 0
 }

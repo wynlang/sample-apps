@@ -5,7 +5,7 @@
 fn main() {
     var ok = App.create("Wyn Notepad", 900, 650)
     if ok < 0 {
-        println("Failed to create window")
+        print("Failed to create window")
         return 1
     }
 
@@ -63,7 +63,7 @@ fn main() {
         "});" +
         "function newFile() { editor.value = ''; updateLines(); dirty = false; document.getElementById('title').textContent = 'Untitled'; status.textContent = 'New file'; }" +
         "function saveFile() { status.textContent = 'Saved (in-memory)'; dirty = false; document.getElementById('title').textContent = 'Untitled'; }" +
-        "function openFile() { editor.value = 'fn main() -> int {\\n    println(\"Hello, World!\")\\n    return 0\\n}\\n'; updateLines(); status.textContent = 'Opened sample.wyn'; }" +
+        "function openFile() { editor.value = 'fn main() -> int {\\n    print(\"Hello, World!\")\\n    return 0\\n}\\n'; updateLines(); status.textContent = 'Opened sample.wyn'; }" +
         "editor.focus();" +
     "</script></body></html>")
 

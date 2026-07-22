@@ -67,67 +67,67 @@ fn fetch_data(id: int) -> string {
 }
 
 fn main() {
-    println("=== Wyn v1.9 Feature Showcase ===\n")
+    print("=== Wyn v1.9 Feature Showcase ===\n")
 
     // 1. Method chaining - everything is an object
-    println("--- Method Chaining ---")
+    print("--- Method Chaining ---")
     var nums = [5, 3, 8, 1, 9, 2, 7, 4, 6]
-    println("Original: " + nums.join(", "))
+    print("Original: " + nums.join(", "))
     nums.sort()
-    println("Sorted:   " + nums.join(", "))
-    println("Stats:    sum=" + nums.sum().to_string() + " min=" + nums.min().to_string() + " max=" + nums.max().to_string())
+    print("Sorted:   " + nums.join(", "))
+    print("Stats:    sum=" + nums.sum().to_string() + " min=" + nums.min().to_string() + " max=" + nums.max().to_string())
 
     // 2. String chaining
-    println("\n--- String Methods ---")
-    println("  hello world  ".trim().upper().replace("WORLD", "WYN"))
-    println("banana,apple,cherry".split(",").join(" < "))
-    println("7".pad_left(5, "0"))
+    print("\n--- String Methods ---")
+    print("  hello world  ".trim().upper().replace("WORLD", "WYN"))
+    print("banana,apple,cherry".split(",").join(" < "))
+    print("7".pad_left(5, "0"))
 
     // 3. Named arguments
-    println("\n--- Named Arguments ---")
-    println(greet(name: "World", style: "casual"))
-    println(greet(name: "Wyn"))
+    print("\n--- Named Arguments ---")
+    print(greet(name: "World", style: "casual"))
+    print(greet(name: "Wyn"))
 
     // 4. Tuples + destructuring
-    println("\n--- Tuples & Destructuring ---")
+    print("\n--- Tuples & Destructuring ---")
     var (q, r) = divmod(17, 5)
-    println("17 divmod 5 = (" + q.to_string() + ", " + r.to_string() + ")")
+    print("17 divmod 5 = (" + q.to_string() + ", " + r.to_string() + ")")
 
     var [first, ...rest] = [10, 20, 30, 40, 50]
-    println("first=" + first.to_string() + " rest=" + rest.join(","))
+    print("first=" + first.to_string() + " rest=" + rest.join(","))
 
     // 5. Lambdas - void, multiline, closures
-    println("\n--- Lambdas ---")
+    print("\n--- Lambdas ---")
     var total = 0
     nums.each(fn(x: int) { total += x })
-    println("Sum via each: " + total.to_string())
+    print("Sum via each: " + total.to_string())
 
     var squares = nums.map(fn(x: int) -> int {
         return x * x
     })
-    println("Squares: " + squares.join(", "))
+    print("Squares: " + squares.join(", "))
 
     var evens = nums.filter(fn(x: int) -> int { return x % 2 == 0 })
-    println("Evens:   " + evens.join(", "))
+    print("Evens:   " + evens.join(", "))
 
     // 6. Generic structs
-    println("\n--- Generics ---")
+    print("\n--- Generics ---")
     var p = Pair { first: 10, second: 20 }
-    println("Pair<int>: (" + p.first.to_string() + ", " + p.second.to_string() + ")")
+    print("Pair<int>: (" + p.first.to_string() + ", " + p.second.to_string() + ")")
 
     // 7. Traits
-    println("\n--- Traits ---")
+    print("\n--- Traits ---")
     var pt = Point { x: 3, y: 4 }
-    println("Point: " + pt.describe())
+    print("Point: " + pt.describe())
 
     // 8. Builder pattern
-    println("\n--- Builder Pattern ---")
+    print("\n--- Builder Pattern ---")
     var q = Query { table: "users", cond: "", lim: 0 }
     var query = q.where_clause("active = 1").limit(10)
-    println(query.to_sql())
+    print(query.to_sql())
 
     // 9. Spawn + await_all - true concurrency
-    println("\n--- Concurrency ---")
+    print("\n--- Concurrency ---")
     var futures = []
     for i in 0..8 {
         futures.push(spawn fib(20 + i))
@@ -138,7 +138,7 @@ fn main() {
         if i > 0 { result_str += ", " }
         result_str += results[i].to_string()
     }
-    println("fib(20..27): " + result_str)
+    print("fib(20..27): " + result_str)
 
     // 10. Spawn with string returns
     var str_futures = []
@@ -151,14 +151,14 @@ fn main() {
         if i > 0 { fetched_str += ", " }
         fetched_str += str_results[i]
     }
-    println("Fetched:     " + fetched_str)
+    print("Fetched:     " + fetched_str)
 
     // 11. Stdlib richness
-    println("\n--- Stdlib ---")
-    println("clamp:    42.clamp(0, 10) = " + 42.clamp(0, 10).to_string())
-    println("abs:      (-5).abs() = " + (-5).abs().to_string())
-    println("contains: " + [1,2,3].contains(2).to_string())
-    println("reverse:  " + [1,2,3].reverse().join(", "))
+    print("\n--- Stdlib ---")
+    print("clamp:    42.clamp(0, 10) = " + 42.clamp(0, 10).to_string())
+    print("abs:      (-5).abs() = " + (-5).abs().to_string())
+    print("contains: " + [1,2,3].contains(2).to_string())
+    print("reverse:  " + [1,2,3].reverse().join(", "))
 
-    println("\n✅ All v1.9 features working!")
+    print("\n✅ All v1.9 features working!")
 }

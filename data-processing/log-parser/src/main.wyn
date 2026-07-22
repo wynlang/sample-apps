@@ -2,8 +2,8 @@
 // Demonstrates: File.read, string interpolation, structs, pattern matching
 
 fn main() {
-    println("=== Log Parser ===")
-    println("")
+    print("=== Log Parser ===")
+    print("")
 
     var content = File.read("../sample-apps/data-processing/log-parser/sample.log")
     var line_start = 0
@@ -17,7 +17,7 @@ fn main() {
     var errors = ["", "", "", "", "", "", "", "", "", ""]
     var error_idx = 0
 
-    println("Errors found:")
+    print("Errors found:")
 
     for idx in 0..total_len {
         if content[idx] == "\n" {
@@ -33,7 +33,7 @@ fn main() {
                 var ts = trimmed.substring(0, 19)
                 var msg_start = trimmed.index_of("ERROR") + 6
                 var msg = trimmed.substring(msg_start, trimmed.len())
-                println("  [${ts}] ${msg}")
+                print("  [${ts}] ${msg}")
                 if error_idx < 10 {
                     errors[error_idx] = msg
                     error_idx += 1
@@ -46,15 +46,15 @@ fn main() {
         }
     }
 
-    println("")
-    println("=== Summary ===")
-    println("  Total lines: ${total_lines}")
-    println("  INFO:        ${info_count}")
-    println("  WARN:        ${warn_count}")
-    println("  ERROR:       ${error_count}")
+    print("")
+    print("=== Summary ===")
+    print("  Total lines: ${total_lines}")
+    print("  INFO:        ${info_count}")
+    print("  WARN:        ${warn_count}")
+    print("  ERROR:       ${error_count}")
 
     if error_count > 0 {
-        println("")
-        println("  ⚠ ${error_count} errors require attention!")
+        print("")
+        print("  ⚠ ${error_count} errors require attention!")
     }
 }

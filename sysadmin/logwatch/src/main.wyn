@@ -21,10 +21,10 @@ fn detect_level(line: string) -> Level {
 }
 
 fn main() {
-    println("\x1b[1;36m======================================================\x1b[0m")
-    println("             \x1b[1mlogwatch\x1b[0m -- Log File Analyzer")
-    println("\x1b[1;36m======================================================\x1b[0m")
-    println("")
+    print("\x1b[1;36m======================================================\x1b[0m")
+    print("             \x1b[1mlogwatch\x1b[0m -- Log File Analyzer")
+    print("\x1b[1;36m======================================================\x1b[0m")
+    print("")
 
     var logdata = "[2026-02-11 08:00:01] INFO  Server started on port 8080\n"
     logdata += "[2026-02-11 08:00:02] INFO  Database connection established\n"
@@ -49,8 +49,8 @@ fn main() {
     var error_idx = 0
     var lines = logdata.split("\n")
 
-    println("  \x1b[1mLog Output:\x1b[0m")
-    println("")
+    print("  \x1b[1mLog Output:\x1b[0m")
+    print("")
 
     for line in lines {
         if line.len() == 0 { continue }
@@ -71,34 +71,34 @@ fn main() {
             LvInfo => info_count = info_count + 1
         }
 
-        println("  ${color}${line}\x1b[0m")
+        print("  ${color}${line}\x1b[0m")
     }
 
-    println("")
-    println("  \x1b[1m=== Summary ===\x1b[0m")
-    println("")
-    println("  Total lines:  ${total}")
-    println("  \x1b[31m* Errors:     ${error_count}\x1b[0m")
-    println("  \x1b[33m* Warnings:   ${warn_count}\x1b[0m")
-    println("  \x1b[32m* Info:       ${info_count}\x1b[0m")
-    println("  \x1b[90m* Debug:      ${debug_count}\x1b[0m")
+    print("")
+    print("  \x1b[1m=== Summary ===\x1b[0m")
+    print("")
+    print("  Total lines:  ${total}")
+    print("  \x1b[31m* Errors:     ${error_count}\x1b[0m")
+    print("  \x1b[33m* Warnings:   ${warn_count}\x1b[0m")
+    print("  \x1b[32m* Info:       ${info_count}\x1b[0m")
+    print("  \x1b[90m* Debug:      ${debug_count}\x1b[0m")
 
     if error_count > 0 {
-        println("")
-        println("  \x1b[1;31m=== Errors ===\x1b[0m")
+        print("")
+        print("  \x1b[1;31m=== Errors ===\x1b[0m")
         for i in 0..error_idx {
-            println("  \x1b[31m  -> ${errors[i]}\x1b[0m")
+            print("  \x1b[31m  -> ${errors[i]}\x1b[0m")
         }
     }
 
-    println("")
+    print("")
     if error_count == 0 {
-        println("  \x1b[32mSystem healthy -- no errors detected\x1b[0m")
+        print("  \x1b[32mSystem healthy -- no errors detected\x1b[0m")
     } else if error_count <= 2 {
-        println("  \x1b[33mSystem degraded -- ${error_count} error(s) found\x1b[0m")
+        print("  \x1b[33mSystem degraded -- ${error_count} error(s) found\x1b[0m")
     } else {
-        println("  \x1b[31mSystem critical -- ${error_count} errors require attention\x1b[0m")
+        print("  \x1b[31mSystem critical -- ${error_count} errors require attention\x1b[0m")
     }
-    println("")
+    print("")
 
 }

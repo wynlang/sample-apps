@@ -43,9 +43,9 @@ fn main() {
 
     var port = 8080
     var server = Http.serve(port)
-    println("wyn-web-demo running on http://localhost:${port}")
-    println("Routes: ${Web.route_count()} registered")
-    println("Press Ctrl+C to stop")
+    print("wyn-web-demo running on http://localhost:${port}")
+    print("Routes: ${Web.route_count()} registered")
+    print("Press Ctrl+C to stop")
 
     while 1 == 1 {
         var req = Http.accept(server)

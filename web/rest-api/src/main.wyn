@@ -39,12 +39,12 @@ fn main() {
     var port = 18090
     var server = Http.serve(port)
     if server < 0 {
-        println("Failed to start server")
+        print("Failed to start server")
         return 0
     }
-    println("REST API running on http://localhost:${port}")
-    println("Endpoints: GET /api/health, GET /api/items, POST /api/items")
-    println("Press Ctrl+C to stop")
+    print("REST API running on http://localhost:${port}")
+    print("Endpoints: GET /api/health, GET /api/items, POST /api/items")
+    print("Press Ctrl+C to stop")
 
     while 1 == 1 {
         var req = Http.accept(server)
@@ -54,7 +54,7 @@ fn main() {
         var body = req.split_at("|", 2)
         var fd = req.split_at("|", 3).to_int()
 
-        println("${method} ${path}")
+        print("${method} ${path}")
 
         // Handle each request concurrently -- non-blocking server
         spawn process_request(method, path, body, fd)

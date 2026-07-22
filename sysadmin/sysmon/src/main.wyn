@@ -237,5 +237,5 @@ fn main() {
 
     Terminal.restore()
     Terminal.clear()
-    println("sysmon exited.")
+    print("sysmon exited.")
 }

@@ -877,7 +877,7 @@ fn do_console_log() -> string {
         if tt == 36 { next() }
     }
     if tt == 31 { next() }
-    println("")
+    print("")
     return vundef()
 }
 
@@ -2688,10 +2688,10 @@ fn main() {
         var tmp = File.read("/tmp/_wynjs_input.js")
         if tmp.len() > 0 { js_file = "/tmp/_wynjs_input.js" }
     }
-    if js_file == "" { println("Usage: wynjs <file.js>"); return 1 }
+    if js_file == "" { print("Usage: wynjs <file.js>"); return 1 }
 
     var code = File.read(js_file)
-    if code.len() == 0 { println("Error: cannot read ${js_file}"); return 1 }
+    if code.len() == 0 { print("Error: cannot read ${js_file}"); return 1 }
 
     src = code; pos = 0; next()
     while tt != 0 { p_stmt(); if retflag == 1 { break } }

@@ -104,13 +104,13 @@ fn main() {
         Db.exec(db, "INSERT INTO users(name, email) VALUES('Alice', 'alice@example.com')")
         Db.exec(db, "INSERT INTO users(name, email) VALUES('Bob', 'bob@example.com')")
         Db.exec(db, "INSERT INTO users(name, email) VALUES('Charlie', 'charlie@example.com')")
-        println("Seeded 3 users")
+        print("Seeded 3 users")
     }
 
     var server = Http.serve(port)
-    println("Wyn Server running on http://localhost:${port}")
-    println("Routes: / /status /users /api/info POST /api/users")
-    println("Press Ctrl+C to stop")
+    print("Wyn Server running on http://localhost:${port}")
+    print("Routes: / /status /users /api/info POST /api/users")
+    print("Press Ctrl+C to stop")
 
     while 1 == 1 {
         var req = Http.accept(server)

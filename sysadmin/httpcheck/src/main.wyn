@@ -15,18 +15,18 @@ fn check(url: string, label: string) -> int {
     var icon = status_icon(code)
     var cs = code.to_string()
     if code == 0 { cs = "---" }
-    println("  ${label.pad_right(22, " ")}${icon}       ${cs.pad_right(6, " ")}${time_str}s")
+    print("  ${label.pad_right(22, " ")}${icon}       ${cs.pad_right(6, " ")}${time_str}s")
     return code
 }
 
 fn main() {
-    println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
-    println("\x1b[1;36m║\x1b[0m           \x1b[1mhttpcheck\x1b[0m -- HTTP Health Checker                  \x1b[1;36m║\x1b[0m")
-    println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
-    println("")
+    print("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
+    print("\x1b[1;36m║\x1b[0m           \x1b[1mhttpcheck\x1b[0m -- HTTP Health Checker                  \x1b[1;36m║\x1b[0m")
+    print("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
+    print("")
 
-    println("  ${"Endpoint".pad_right(22, " ")}Status  Code  Time")
-    println("  ${"────────────────────".pad_right(22, " ")}──────  ────  ────")
+    print("  ${"Endpoint".pad_right(22, " ")}Status  Code  Time")
+    print("  ${"────────────────────".pad_right(22, " ")}──────  ────  ────")
 
     var up = 0
     var down = 0
@@ -43,7 +43,7 @@ fn main() {
     var c4 = check("http://localhost:8080", "localhost:8080")
     if c4 >= 200 and c4 < 400 { up += 1 } else { down += 1 }
 
-    println("")
-    println("  \x1b[32m● Up: ${up}\x1b[0m  \x1b[31m● Down: ${down}\x1b[0m")
-    println("")
+    print("")
+    print("  \x1b[32m● Up: ${up}\x1b[0m  \x1b[31m● Down: ${down}\x1b[0m")
+    print("")
 }

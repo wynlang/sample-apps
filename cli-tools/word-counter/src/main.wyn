@@ -2,15 +2,15 @@
 // Demonstrates: HashMap, string interpolation, File.read
 
 fn main() {
-    println("=== Word Frequency Counter ===")
-    println("")
+    print("=== Word Frequency Counter ===")
+    print("")
 
     var args = System.args()
     var filepath = "src/main.wyn"
     if args.len() > 1 { filepath = args[1] }
     var content = File.read(filepath)
     if content.len() == 0 {
-        println("Error: could not read input file")
+        print("Error: could not read input file")
         return 1
     }
 
@@ -34,15 +34,15 @@ fn main() {
         }
     }
 
-    println("Total words: ${total_words}")
-    println("")
+    print("Total words: ${total_words}")
+    print("")
 
-    var keywords = ["fn", "var", "return", "if", "for", "println", "int", "string", "HashMap"]
+    var keywords = ["fn", "var", "return", "if", "for", "print", "int", "string", "HashMap"]
     for i in 0..9 {
         var kw = keywords[i]
         var c = counts.get_int(kw)
         if c > 0 {
-            println("  ${kw}: ${c}")
+            print("  ${kw}: ${c}")
         }
     }
 }

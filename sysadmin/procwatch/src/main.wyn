@@ -3,16 +3,16 @@
 // Non-interactive: prints and exits
 
 fn main() {
-    println("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
-    println("\x1b[1;36m║\x1b[0m           \x1b[1mprocwatch\x1b[0m -- Process Monitor                      \x1b[1;36m║\x1b[0m")
-    println("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
-    println("")
+    print("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
+    print("\x1b[1;36m║\x1b[0m           \x1b[1mprocwatch\x1b[0m -- Process Monitor                      \x1b[1;36m║\x1b[0m")
+    print("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
+    print("")
 
     // Top CPU consumers
-    println("  \x1b[1;33m═══ Top CPU Consumers ═══\x1b[0m")
-    println("")
-    println("  " + "PID".pad_right(8, " ") + "CPU%".pad_right(8, " ") + "MEM%".pad_right(8, " ") + "RSS(MB)".pad_right(10, " ") + "COMMAND")
-    println("  " + "───".pad_right(8, " ") + "────".pad_right(8, " ") + "────".pad_right(8, " ") + "───────".pad_right(10, " ") + "───────")
+    print("  \x1b[1;33m═══ Top CPU Consumers ═══\x1b[0m")
+    print("")
+    print("  " + "PID".pad_right(8, " ") + "CPU%".pad_right(8, " ") + "MEM%".pad_right(8, " ") + "RSS(MB)".pad_right(10, " ") + "COMMAND")
+    print("  " + "───".pad_right(8, " ") + "────".pad_right(8, " ") + "────".pad_right(8, " ") + "───────".pad_right(10, " ") + "───────")
 
     var ps_cpu = System.exec("ps -eo pid,pcpu,pmem,rss,comm -r | head -16")
     var line_start = 0
@@ -60,16 +60,16 @@ fn main() {
             if cpu_val > 50 { cpu_color = "\x1b[31m" }
             else { if cpu_val > 10 { cpu_color = "\x1b[33m" } }
 
-            println("  " + pid.pad_right(8, " ") + cpu_color + cpu.pad_right(8, " ") + "\x1b[0m" + mem.pad_right(8, " ") + rss_mb.to_string().pad_right(10, " ") + cmd)
+            print("  " + pid.pad_right(8, " ") + cpu_color + cpu.pad_right(8, " ") + "\x1b[0m" + mem.pad_right(8, " ") + rss_mb.to_string().pad_right(10, " ") + cmd)
         }
     }
 
     // Top memory consumers
-    println("")
-    println("  \x1b[1;33m═══ Top Memory Consumers ═══\x1b[0m")
-    println("")
-    println("  " + "PID".pad_right(8, " ") + "MEM%".pad_right(8, " ") + "RSS(MB)".pad_right(10, " ") + "COMMAND")
-    println("  " + "───".pad_right(8, " ") + "────".pad_right(8, " ") + "───────".pad_right(10, " ") + "───────")
+    print("")
+    print("  \x1b[1;33m═══ Top Memory Consumers ═══\x1b[0m")
+    print("")
+    print("  " + "PID".pad_right(8, " ") + "MEM%".pad_right(8, " ") + "RSS(MB)".pad_right(10, " ") + "COMMAND")
+    print("  " + "───".pad_right(8, " ") + "────".pad_right(8, " ") + "───────".pad_right(10, " ") + "───────")
 
     var ps_mem = System.exec("ps -eo pid,pmem,rss,comm -m | head -11")
     line_start = 0
@@ -105,20 +105,20 @@ fn main() {
             if slash >= 0 { cmd = cmd.substring(slash + 1, cmd.len()) }
             if cmd.len() > 35 { cmd = cmd.substring(0, 35) }
 
-            println("  " + pid.pad_right(8, " ") + mem.pad_right(8, " ") + rss_mb.to_string().pad_right(10, " ") + cmd)
+            print("  " + pid.pad_right(8, " ") + mem.pad_right(8, " ") + rss_mb.to_string().pad_right(10, " ") + cmd)
         }
     }
 
     // Process summary
-    println("")
-    println("  \x1b[1;33m═══ Summary ═══\x1b[0m")
-    println("")
+    print("")
+    print("  \x1b[1;33m═══ Summary ═══\x1b[0m")
+    print("")
     var total = System.exec("ps -e | wc -l").trim()
     var running = System.exec("ps -eo state | grep -c R 2>/dev/null || echo ?").trim()
     var sleeping = System.exec("ps -eo state | grep -c S 2>/dev/null || echo ?").trim()
-    println("  Total processes: " + total)
-    println("  Running:         " + running)
-    println("  Sleeping:        " + sleeping)
-    println("")
+    print("  Total processes: " + total)
+    print("  Running:         " + running)
+    print("  Sleeping:        " + sleeping)
+    print("")
 
 }

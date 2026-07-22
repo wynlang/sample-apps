@@ -31,7 +31,7 @@ fn wyn_on_button(id: int) {
     } else if id == 3 {
         count = 0
     }
-    println("count=${count}")
+    print("count=${count}")
 }
 
 fn main() {
