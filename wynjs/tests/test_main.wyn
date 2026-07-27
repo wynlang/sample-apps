@@ -6,7 +6,7 @@ fn main() {
     System_exec("cp tests/test.js /tmp/_wynjs_input.js")
 
     // Run wynjs
-    var output = System_exec("timeout 30 ../../wyn/wyn run src/main.wyn 2>/dev/null")
+    var output = System_exec("perl -e \"alarm 30; exec @ARGV\" ../../wyn/wyn run src/main.wyn 2>/dev/null")
 
     if output.contains("0 fail") {
         print("✓ " + output.trim())

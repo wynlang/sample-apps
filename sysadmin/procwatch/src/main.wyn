@@ -27,10 +27,12 @@ fn main() {
             if line.len() == 0 { continue }
 
             // Parse fields
-            var pid = line.split_at(" ", 0)
-            var cpu = line.split_at(" ", 1)
-            var mem = line.split_at(" ", 2)
-            var rss_kb = line.split_at(" ", 3)
+            var cols = line.words()
+            if cols.len() < 5 { continue }
+            var pid = cols[0]
+            var cpu = cols[1]
+            var mem = cols[2]
+            var rss_kb = cols[3]
             var rss_mb = rss_kb.to_int() / 1024
 
             // Command: everything after 4th field
@@ -55,7 +57,7 @@ fn main() {
             if cmd.len() > 30 { cmd = cmd.substring(0, 30) }
 
             // Color high CPU
-            var cpu_val = cpu.to_int()
+            var cpu_val = cpu.to_float().to_int()
             var cpu_color = "\x1b[0m"
             if cpu_val > 50 { cpu_color = "\x1b[31m" }
             else { if cpu_val > 10 { cpu_color = "\x1b[33m" } }
@@ -83,9 +85,11 @@ fn main() {
             if line_num == 1 { continue }
             if line.len() == 0 { continue }
 
-            var pid = line.split_at(" ", 0)
-            var mem = line.split_at(" ", 1)
-            var rss_kb = line.split_at(" ", 2)
+            var cols = line.words()
+            if cols.len() < 4 { continue }
+            var pid = cols[0]
+            var mem = cols[1]
+            var rss_kb = cols[2]
             var rss_mb = rss_kb.to_int() / 1024
 
             var cmd = ""

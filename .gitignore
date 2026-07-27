@@ -11,3 +11,8 @@ wynjs/src/values
 gui/*/src/main
 server.db
 wyn_cc_err.txt
+# compiled binaries from wyn run (extensionless, next to source)
+**/src/main
+**/tests/test_*
+!**/tests/test_*.wyn
+!**/tests/test_*.js

@@ -40,10 +40,12 @@ fn main() {
             if line_num == 1 { continue }
             if line.len() == 0 { continue }
 
-            var fs = line.split_at(" ", 0)
-            var size = line.split_at(" ", 1)
-            var used = line.split_at(" ", 2)
-            var cap = line.split_at(" ", 4)
+            var cols = line.words()
+            if cols.len() < 5 { continue }
+            var fs = cols[0]
+            var size = cols[1]
+            var used = cols[2]
+            var cap = cols[4]
 
             var mount = ""
             var cap_idx = line.index_of(cap)
