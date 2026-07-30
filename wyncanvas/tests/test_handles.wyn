@@ -15,7 +15,7 @@ import render
 // wynimg_new now returns a generation-tagged handle, so a stale handle resolves
 // to NULL in C and takes the same path as a null argument.
 //
-// Call convention (v1.20.0 codegen constraint, see WYN_FINDINGS.md):
+// Call convention (v1.20.0 codegen constraint, see the wyn compiler's issue tracker):
 //   extern fns   -> called BARE          (wynimg_new)
 //   pub fn Wyn   -> called QUALIFIED     (pixel.approx, render.compose)
 

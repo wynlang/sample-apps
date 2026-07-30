@@ -3,7 +3,7 @@ import pixel
 // Reference values are the standard separable blend formulas
 // (PDF 1.7 / W3C compositing spec), computed by hand.
 //
-// Call convention (v1.20.0 codegen constraint, see WYN_FINDINGS.md):
+// Call convention (v1.20.0 codegen constraint, see the wyn compiler's issue tracker):
 //   extern fns   -> called BARE          (wynimg_blend_px)
 //   pub fn Wyn   -> called QUALIFIED     (pixel.approx, pixel.blend_name)
 

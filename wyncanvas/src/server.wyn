@@ -20,9 +20,9 @@
 //     `File.read` opens with mode "r" and NUL-terminates (wyn_runtime.h:2735);
 //     `http_send_response` sets body_len = strlen(body) (wyn_runtime.h:3095).
 //     Probe: a 21-byte file with one interior NUL arrived as 12 bytes. PNG
-//     IHDR always contains NULs. See WYN_FINDINGS.md.
+//     IHDR always contains NULs. See the wyn compiler's issue tracker.
 //
-// CALL CONVENTION -- v1.20.0 codegen constraint, see WYN_FINDINGS.md:
+// CALL CONVENTION -- v1.20.0 codegen constraint, see the wyn compiler's issue tracker:
 //   extern fn (from pixel)  -> `wynimg::name(...)`, because a `pub fn` in a
 //                              module that calls an extern gets double-prefixed
 //                              to `server_server_wynimg_*`. The `::` form
@@ -30,7 +30,7 @@
 //   pub fn of another module -> QUALIFIED (layer.count, render.compose_to_png)
 //
 // This file is also symlinked at the project root as ./server.wyn, because
-// `import server` from tests/ does not search src/. See WYN_FINDINGS.md.
+// `import server` from tests/ does not search src/. See the wyn compiler's issue tracker.
 
 import web
 import pixel
@@ -239,7 +239,7 @@ pub fn listen(port: int) -> int {
 // (codegen_stmt.c:2312) while the module's function is emitted module-prefixed
 // (`server_serve_conn`), so the two names could not match even if it were.
 // Result: "use of undeclared identifier '__spawn_wrapper_serve_conn_1'".
-// Minimal repro and analysis in WYN_FINDINGS.md.
+// Minimal repro and analysis live with the upstream compiler issue.
 //
 // The workaround is in src/app.wyn: the accept loop lives in the ENTRY file,
 // where PASS 1 does see it, and spawns `server.serve_conn` per connection. That

@@ -1,7 +1,7 @@
 import pixel
 import layer
 
-// Call convention (v1.20.0 codegen constraint, see WYN_FINDINGS.md):
+// Call convention (v1.20.0 codegen constraint, see the wyn compiler's issue tracker):
 //   extern fns   -> called BARE          (wynimg_new)
 //   pub fn Wyn   -> called QUALIFIED     (pixel.approx, layer.count)
 
@@ -70,7 +70,7 @@ test "querying an out-of-range id is safe" {
 }
 
 // The store's handle columns are declared `int`, not `ptr`, because a `ptr` in
-// a module `pub fn` signature miscompiles to `layer_ptr` (WYN_FINDINGS.md,
+// a module `pub fn` signature miscompiles to `layer_ptr` (a known upstream defect,
 // Defect 3). Both are 64-bit, so this is a spelling change -- but that must be
 // PROVEN, not assumed: a truncated handle would corrupt every later task.
 test "a real buffer handle survives the store round-trip" {

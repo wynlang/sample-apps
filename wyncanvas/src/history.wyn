@@ -17,7 +17,7 @@
 // CALL CONVENTION: every function here is a `pub fn` or a module-private `fn`,
 // so importers call them QUALIFIED (`history.undo()`). See src/pixel.wyn.
 // This file is also symlinked at the project root as ./history.wyn, because
-// `import history` from tests/ does not search src/. See WYN_FINDINGS.md.
+// `import history` from tests/ does not search src/. See the wyn compiler's issue tracker.
 
 import layer
 

@@ -8,7 +8,7 @@ import render
 //
 // Tolerance is 1.5/255 to absorb 8-bit quantization on save/load.
 //
-// Call convention (v1.20.0, see WYN_FINDINGS.md):
+// Call convention (v1.20.0, see the wyn compiler's issue tracker):
 //   extern fns -> BARE (wynimg_new), pub fn -> QUALIFIED (pixel.approx).
 //
 // NOTE ON PREMULTIPLIED VALUES: every pixel written here has alpha 1.0, and

@@ -10,7 +10,7 @@
 //
 // HANDLE COLUMNS ARE SPELLED `int`, NOT `ptr` -- v1.20.0 codegen constraint.
 // `ptr` in a module `pub fn` signature emits the undefined C type `layer_ptr`
-// (WYN_FINDINGS.md, "Defect 3"), so `add`/`buffer`/`mask`/`set_mask` take and
+// (a known cross-module `ptr` codegen defect), so `add`/`buffer`/`mask`/`set_mask` take and
 // return `int`. Both are 64-bit and the value is passed straight through to an
 // `extern fn`, so nothing is lost -- and that is asserted, not assumed, by
 // "a real buffer handle survives the store round-trip" in tests/test_layer.wyn.
@@ -19,7 +19,7 @@
 // CALL CONVENTION: every function here is a `pub fn`, so importers call them
 // QUALIFIED (`layer.count()`). See the note in src/pixel.wyn.
 // This file is also symlinked at the project root as ./layer.wyn, because
-// `import layer` from tests/ does not search src/. See WYN_FINDINGS.md.
+// `import layer` from tests/ does not search src/. See the wyn compiler's issue tracker.
 
 var l_names = [""]
 var l_bufs = [0]

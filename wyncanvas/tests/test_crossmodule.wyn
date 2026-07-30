@@ -5,7 +5,7 @@ import pixel
 // primitive- or handle-based precisely to avoid that. This test documents the
 // actual behaviour on v1.20.0 so the constraint is evidence, not folklore.
 //
-// Call convention note (see src/pixel.wyn header and WYN_FINDINGS.md):
+// Call convention note (see the src/pixel.wyn header):
 // `extern fn`s reach here UNPREFIXED, so they are called bare; `pub fn`s are
 // module-prefixed, so they are called qualified.
 

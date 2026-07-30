@@ -12,7 +12,7 @@
 // the bare source token (codegen_stmt.c:2312) while a module function is emitted
 // module-prefixed, so the names could not match even if it were emitted. The
 // symptom is "use of undeclared identifier '__spawn_wrapper_serve_conn_1'".
-// Full analysis and minimal repro in WYN_FINDINGS.md.
+// Full analysis and a minimal repro live with the compiler issue.
 //
 // Putting the loop in this file - the entry file, which PASS 1 does scan - is
 // the workaround, and it costs nothing: `spawn server.serve_conn(conn)` from

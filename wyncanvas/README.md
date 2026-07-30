@@ -5,8 +5,7 @@ pixel work.
 
 **Cycle 1 scope:** float32 linear imaging core, non-destructive layer model,
 27 blend modes, masks, adjustment layers, PNG I/O, undo/redo, and a native
-window. Brushes, selections, text, vectors, PSD and filters are cycles 2-7 —
-see `docs/superpowers/specs/`.
+window. Brushes, selections, text, vectors, PSD and filters are not implemented.
 
 Tiling is **not** implemented. `WYNIMG_TILE = 256` is declared in
 `csrc/wynimg.h` so the value lives in one place, but cycle 1 allocates
@@ -102,7 +101,7 @@ preferences.
   transitively-imported module is resolved as that function
   ("Cannot compare function with int"). Rename the variable.
 
-Full symptom / minimal-repro / root-cause records are in `WYN_FINDINGS.md`.
+Symptom / minimal-repro / root-cause records live with the upstream compiler issues.
 
 ## Layout
 

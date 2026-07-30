@@ -6,7 +6,7 @@ import render
 // The cycle-1 deliverable, exercised end to end: real files in, layered
 // composite out, verified numerically.
 //
-// Call convention (v1.20.0, see WYN_FINDINGS.md):
+// Call convention (v1.20.0, see the wyn compiler's issue tracker):
 //   extern fns -> BARE (wynimg_new), pub fn -> QUALIFIED (pixel.approx).
 
 fn make_fixture(path: string, r: float, g: float, b: float) -> int {

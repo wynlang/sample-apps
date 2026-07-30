@@ -5,7 +5,7 @@
 // accumulator, and each adjustment layer transforms everything composited
 // beneath it so far - which is what makes adjustments non-destructive.
 //
-// CALL CONVENTION -- v1.20.0 codegen constraint, see WYN_FINDINGS.md.
+// CALL CONVENTION -- v1.20.0 codegen constraint, see the wyn compiler's issue tracker.
 // This module is the first `pub fn` in the project that must call an
 // `extern fn`, and the plan's literal spelling does not compile. Three
 // spellings were tried; only the third works:
@@ -25,7 +25,7 @@
 //
 // Handles are `int`, not `ptr` -- see the long note in src/pixel.wyn.
 // This file is also symlinked at the project root as ./render.wyn, because
-// `import render` from tests/ does not search src/. See WYN_FINDINGS.md.
+// `import render` from tests/ does not search src/. See the wyn compiler's issue tracker.
 
 import pixel
 import layer

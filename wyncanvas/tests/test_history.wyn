@@ -2,7 +2,7 @@ import pixel
 import layer
 import history
 
-// Call convention (v1.20.0 codegen constraint, see WYN_FINDINGS.md):
+// Call convention (v1.20.0 codegen constraint, see the wyn compiler's issue tracker):
 //   extern fns   -> called BARE          (wynimg_new)
 //   pub fn Wyn   -> called QUALIFIED     (layer.set_opacity, history.undo)
 

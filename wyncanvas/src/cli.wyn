@@ -22,7 +22,7 @@
 // yields different argv depending on whether the binary was up to date --
 // reproducible by running any program twice. Skipping a leading "--" here is
 // correct under both behaviours; the compiler fix is recorded in
-// WYN_FINDINGS.md but not applied, because that checkout is mid-change on
+// the upstream compiler issue but not applied, because that checkout is mid-change on
 // another branch.
 
 import pixel

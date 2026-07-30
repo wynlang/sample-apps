@@ -23,7 +23,11 @@ wyncanvas/libwynimg/
 wyncanvas/build/
 wyncanvas/packages/
 wyncanvas/wyn.lock
-# Dogfooding findings live in the private internal-docs repo, never here:
-# they cite absolute local paths and unshipped compiler internals.
-WYN_FINDINGS.md
-docs/superpowers/plans/
+# Design docs and dogfooding findings live in the private internal-docs repo,
+# never here: they cite absolute local paths, unshipped compiler internals, and
+# forward roadmap. `specs/` matters as much as `plans/` - the wyncanvas spec was
+# committed here once and had to be removed after the fact.
+# Leading **/ matters: a bare `docs/superpowers/` is anchored to the repo ROOT and
+# would not match `wyncanvas/docs/superpowers/`, which is where it actually was.
+**/WYN_FINDINGS.md
+**/docs/superpowers/

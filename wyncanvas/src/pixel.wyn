@@ -23,12 +23,12 @@
 // So the whole project uses ONE spelling. Handle fidelity is asserted, not
 // assumed: "a handle survives the int spelling" in tests/test_render.wyn reads
 // a real buffer's width and pixels back through an `int`-typed round trip, and
-// a deliberate 32-bit truncation of that path segfaults. See WYN_FINDINGS.md.
+// a deliberate 32-bit truncation of that path segfaults. See the wyn compiler's issue tracker.
 //
 // FFI type mapping is load-bearing: Wyn float <-> C double,
 // Wyn int <-> C long long.
 //
-// CALL CONVENTION -- v1.20.0 compiler constraint, see WYN_FINDINGS.md
+// CALL CONVENTION -- v1.20.0 compiler constraint, see the wyn compiler's issue tracker
 // ("extern fn in an imported module"). Two rules, both forced by codegen:
 //
 //   1. `extern fn` declarations are emitted UNPREFIXED into every importing
@@ -44,7 +44,7 @@
 //      `pixel_pixel_wynimg_*`. Every helper below is therefore pure Wyn.
 //
 // This file is also symlinked at the project root as ./pixel.wyn, because
-// `import pixel` from tests/ does not search src/. See WYN_FINDINGS.md.
+// `import pixel` from tests/ does not search src/. See the wyn compiler's issue tracker.
 
 // HANDLES, NOT POINTERS. wynimg_new returns a generation-tagged handle into a
 // slot table in C, not an address. Wyn cannot be stopped from holding a stale
