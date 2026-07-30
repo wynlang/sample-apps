@@ -26,19 +26,39 @@ fn main() {
     print("\x1b[1;36m======================================================\x1b[0m")
     print("")
 
-    var logdata = "[2026-02-11 08:00:01] INFO  Server started on port 8080\n"
-    logdata += "[2026-02-11 08:00:02] INFO  Database connection established\n"
-    logdata += "[2026-02-11 08:01:15] INFO  Request GET /api/users (200) 45ms\n"
-    logdata += "[2026-02-11 08:02:33] ERROR Connection timeout to redis:6379\n"
-    logdata += "[2026-02-11 08:02:34] WARN  Retrying redis connection (attempt 1/3)\n"
-    logdata += "[2026-02-11 08:02:35] WARN  Retrying redis connection (attempt 2/3)\n"
-    logdata += "[2026-02-11 08:02:36] INFO  Redis connection restored\n"
-    logdata += "[2026-02-11 08:03:01] WARN  Rate limit approaching for IP 10.0.0.5\n"
-    logdata += "[2026-02-11 08:04:22] ERROR Out of memory: heap allocation failed\n"
-    logdata += "[2026-02-11 08:04:23] ERROR Service crash: restarting worker pid 1234\n"
-    logdata += "[2026-02-11 08:04:25] INFO  Worker restarted successfully\n"
-    logdata += "[2026-02-11 08:05:00] DEBUG GC cycle completed: freed 45MB\n"
-    logdata += "[2026-02-11 08:05:30] INFO  Request GET /api/metrics (200) 5ms\n"
+    // Read the log from a FILE named on the command line, falling back to a
+    // built-in sample so `wyn run logwatch/src/main.wyn` still demonstrates
+    // something. The sample used to be the ONLY input: a "Log File Analyzer" that
+    // could not open a log file, because `wyn run app.wyn file.log` silently
+    // dropped the argument (fixed upstream).
+    args = System.args()
+    logdata = ""
+    source = "built-in sample"
+    if args.len() > 1 {
+        path = args[1]
+        logdata = File.read(path)
+        if logdata.len() == 0 {
+            print("error: cannot read ${path}")
+            return
+        }
+        source = path
+    } else {
+        logdata = "[2026-02-11 08:00:01] INFO  Server started on port 8080\n"
+        logdata += "[2026-02-11 08:00:02] INFO  Database connection established\n"
+        logdata += "[2026-02-11 08:01:15] INFO  Request GET /api/users (200) 45ms\n"
+        logdata += "[2026-02-11 08:02:33] ERROR Connection timeout to redis:6379\n"
+        logdata += "[2026-02-11 08:02:34] WARN  Retrying redis connection (attempt 1/3)\n"
+        logdata += "[2026-02-11 08:02:35] WARN  Retrying redis connection (attempt 2/3)\n"
+        logdata += "[2026-02-11 08:02:36] INFO  Redis connection restored\n"
+        logdata += "[2026-02-11 08:03:01] WARN  Rate limit approaching for IP 10.0.0.5\n"
+        logdata += "[2026-02-11 08:04:22] ERROR Out of memory: heap allocation failed\n"
+        logdata += "[2026-02-11 08:04:23] ERROR Service crash: restarting worker pid 1234\n"
+        logdata += "[2026-02-11 08:04:25] INFO  Worker restarted successfully\n"
+        logdata += "[2026-02-11 08:05:00] DEBUG GC cycle completed: freed 45MB\n"
+        logdata += "[2026-02-11 08:05:30] INFO  Request GET /api/metrics (200) 5ms\n"
+    }
+    print("  source: ${source}")
+    print("")
 
     var error_count = 0
     var warn_count = 0

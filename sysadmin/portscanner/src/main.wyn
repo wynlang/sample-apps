@@ -36,7 +36,23 @@ fn main() {
     print("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
     print("")
 
-    var ports = [22, 80, 443, 3000, 3306, 5432, 6379, 8080, 8443, 9090, 27017]
+    // Ports come from the command line when given, e.g.
+    //     wyn run portscanner/src/main.wyn 22 80 443
+    // and fall back to a common set so a bare run still demonstrates the scan.
+    // They used to be hardcoded only, because `wyn run app.wyn 22 80` dropped the
+    // arguments silently (fixed upstream).
+    args = System.args()
+    var ports = []
+    if args.len() > 1 {
+        for a in 1..args.len() {
+            p = args[a].to_int()
+            if p > 0 and p < 65536 { ports.push(p) }
+            else { print("  skipping '${args[a]}': not a port number") }
+        }
+    }
+    if ports.len() == 0 {
+        ports = [22, 80, 443, 3000, 3306, 5432, 6379, 8080, 8443, 9090, 27017]
+    }
     var count = ports.len()
 
     print("  Scanning \x1b[1mlocalhost\x1b[0m (${count} ports concurrently)...")
