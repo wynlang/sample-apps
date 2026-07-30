@@ -1,0 +1,869 @@
+import pixel
+
+// Adversarial hardening of the C imaging shim.
+//
+// The shim already had a safety design -- generation-tagged handles,
+// WYNIMG_MAX_PIXELS, volatile locals around libpng's longjmp -- and past
+// commits fixed exactly this class of bug. This file covers what that sweep
+// MISSED, and it asserts the REFUSAL (a 0 return, a 2.0 sentinel, an unchanged
+// pixel), never merely the absence of a crash: every defect found here was
+// already "not crashing", which is precisely why it survived.
+//
+// THE DOMINANT SHAPE IS NaN, and it is reachable from pure Wyn.
+//
+// `0.0 / 0.0` evaluates to NaN in Wyn (verified: `print` shows `nan` and
+// `nan == nan` is false), and `wynimg_set` stores whatever float it is handed.
+// So a NaN is not a hypothetical hostile input; it is one division away from
+// ordinary user code, e.g. normalising a colour by a zero total.
+//
+// NaN then defeats guards written the obvious way, because EVERY comparison
+// against NaN is false:
+//
+//     if (c <= 0.0) continue;              // false for NaN -> NaN proceeds
+//     if (v < 0.0) v = 0.0;                // false
+//     if (v > 1.0) v = 1.0;                // false -> NaN returned unclamped
+//     if (d > worst) worst = d;            // false -> difference NOT recorded
+//
+// A NaN that reaches a pixel is permanent: it is neither < 0 nor > 1, so no
+// later clamp removes it, and it spreads to every buffer it is composited into.
+// A NaN that reaches `(unsigned char)(v * 255.0 + 0.5)` in the PNG writer is
+// undefined behaviour, not a wrong byte.
+//
+// Call convention (v1.20.0 codegen constraint):
+//   extern fns  -> called BARE       (wynimg_new)
+//   pub fn Wyn  -> called QUALIFIED  (pixel.approx)
+
+// Byte-level fixture seams, declared here rather than imported.
+//
+// The corrupt-PNG cases below need a file with ONE byte changed and a file cut
+// off mid-pixel-data, and Wyn cannot produce either: File.write goes through a
+// NUL-terminated C string, so it can neither emit an arbitrary byte nor patch
+// one in place. These two live in csrc/wynimg_proj.c. They are declared locally
+// because this file must not depend on another module's binding list to
+// compile -- the fixtures are GENERATED from a PNG this test writes itself,
+// never committed, so nothing here rots when the format changes.
+extern fn wynproj_poke_byte(path: string, off: int, val: int) -> int;
+extern fn wynproj_truncate_copy(src: string, dst: string, len: int) -> int;
+
+// Wyn has no NaN literal. This is the construction, kept in one place so every
+// test below says what it means.
+fn nan_value() -> float {
+    var z = 0.0
+    return z / z
+}
+
+fn inf_value() -> float {
+    var z = 0.0
+    return 1.0 / z
+}
+
+fn is_nan(v: float) -> bool { return v != v }
+
+// Wyn has no INT64_MAX literal form that survives negation, so both extremes
+// are built explicitly.
+fn i64_max() -> int { return 9223372036854775807 }
+fn i64_min() -> int { return 0 - 9223372036854775807 - 1 }
+
+test "the NaN construction this file relies on really is a NaN" {
+    // If Wyn ever folded 0.0/0.0 to 0, every NaN test below would silently
+    // become a test of zero and pass for the wrong reason. Guard the premise.
+    var n = nan_value()
+    assert_true(is_nan(n))
+    assert_false(n == n)
+    assert_false(n < 0.0)
+    assert_false(n > 1.0)
+    assert_false(n <= 0.0)
+}
+
+// ---------------------------------------------------------------------------
+// Handles: 0, freed, a stale generation, and wild integers, through every
+// function that takes one.
+// ---------------------------------------------------------------------------
+
+test "every handle-taking function refuses the null handle" {
+    assert_eq(wynimg_alive(0), 0)
+    assert_eq(wynimg_width(0), 0)
+    assert_eq(wynimg_height(0), 0)
+    assert_true(pixel.approx(wynimg_get(0, 0), 0.0, 0.000001))
+    wynimg_set(0, 0, 1.0)                       // must not fault
+    wynimg_fill(0, 1.0, 1.0, 1.0, 1.0)          // must not fault
+    wynimg_free(0)                              // must not fault
+    assert_eq(wynimg_clone(0), 0)
+    assert_eq(wynimg_clear(0), 0)
+    assert_eq(wynimg_copy_into(0, 0), 0)
+    assert_eq(wynimg_composite(0, 0, 0, 0, 1.0), 0)
+    assert_eq(wynimg_brightness(0, 0.1), 0)
+    assert_eq(wynimg_stroke_seg(0, 1.0, 1.0, 2.0, 2.0, 4.0, 1.0), 0)
+    assert_eq(wynimg_stroke_apply(0, 0, 0, 1.0, 0.0, 0.0, 1.0, 0), 0)
+    assert_eq(wynimg_fill_region(0, 0, 0, 0, 0.1), -1)
+    assert_eq(wynimg_rect(0, 0, 0, 4, 4, 1.0, 0.0, 0.0, 1.0), 0)
+    assert_eq(wynimg_sv_square(0, 120.0), 0)
+    assert_eq(wynimg_hue_strip(0), 0)
+    assert_eq(wynimg_save_png(0, "/tmp/wyncanvas_h_null.png"), 0)
+    assert_true(pixel.approx(wynimg_pick(0, 0, 0, 0), 0.0, 0.000001))
+    // max_diff's refusal is the impossible 2.0, not 0 -- a difference it cannot
+    // measure must never read as "identical".
+    assert_true(pixel.approx(wynimg_max_diff(0, 0), 2.0, 0.000001))
+}
+
+test "every handle-taking function refuses a freed handle" {
+    var d = wynimg_new(4, 4)
+    wynimg_fill(d, 0.5, 0.5, 0.5, 1.0)
+    wynimg_free(d)
+    assert_eq(wynimg_alive(d), 0)
+
+    var live = wynimg_new(4, 4)
+    assert_eq(wynimg_width(d), 0)
+    assert_eq(wynimg_clone(d), 0)
+    assert_eq(wynimg_clear(d), 0)
+    assert_eq(wynimg_copy_into(live, d), 0)
+    assert_eq(wynimg_copy_into(d, live), 0)
+    assert_eq(wynimg_composite(live, d, 0, 0, 1.0), 0)
+    assert_eq(wynimg_composite(d, live, 0, 0, 1.0), 0)
+    assert_eq(wynimg_brightness(d, 0.2), 0)
+    assert_eq(wynimg_stroke_seg(d, 1.0, 1.0, 2.0, 2.0, 4.0, 1.0), 0)
+    assert_eq(wynimg_stroke_apply(d, live, live, 1.0, 0.0, 0.0, 1.0, 0), 0)
+    assert_eq(wynimg_fill_region(d, live, 0, 0, 0.1), -1)
+    assert_eq(wynimg_fill_region(live, d, 0, 0, 0.1), -1)
+    assert_eq(wynimg_rect(d, 0, 0, 4, 4, 1.0, 0.0, 0.0, 1.0), 0)
+    assert_eq(wynimg_sv_square(d, 120.0), 0)
+    assert_eq(wynimg_hue_strip(d), 0)
+    assert_eq(wynimg_save_png(d, "/tmp/wyncanvas_h_freed.png"), 0)
+    assert_true(pixel.approx(wynimg_pick(d, 0, 0, 0), 0.0, 0.000001))
+    assert_true(pixel.approx(wynimg_max_diff(live, d), 2.0, 0.000001))
+    wynimg_free(live)
+}
+
+test "a handle from an earlier generation of a REUSED slot is refused" {
+    // The sharpest handle case: free a buffer, then allocate again so the SAME
+    // slot index is recycled. Slot-index-only validation would resolve the old
+    // handle to the NEW buffer -- a silent cross-wire, not a crash. The
+    // generation counter is what makes it a refusal.
+    var first = wynimg_new(4, 4)
+    wynimg_fill(first, 1.0, 0.0, 0.0, 1.0)
+    wynimg_free(first)
+
+    var second = wynimg_new(4, 4)          // very likely the same slot
+    wynimg_fill(second, 0.0, 0.0, 1.0, 1.0)
+
+    assert_eq(wynimg_alive(first), 0)
+    assert_eq(wynimg_alive(second), 1)
+    assert_true(first != second)
+    // The stale handle must NOT read the new buffer's pixels.
+    assert_true(pixel.approx(wynimg_get(first, 2), 0.0, 0.000001))
+    // Nor write them.
+    wynimg_set(first, 2, 0.75)
+    assert_true(pixel.approx(wynimg_get(second, 2), 1.0, 0.000001))
+    wynimg_free(second)
+}
+
+test "wild integers are not handles" {
+    // Arbitrary bit patterns arrive whenever Wyn-side arithmetic goes wrong.
+    // None may resolve, and none may fault.
+    assert_eq(wynimg_alive(i64_max()), 0)
+    assert_eq(wynimg_alive(i64_min()), 0)
+    assert_eq(wynimg_alive(0 - 1), 0)
+    assert_eq(wynimg_alive(1), 0)
+    assert_eq(wynimg_alive(12345678), 0)
+    assert_eq(wynimg_width(i64_max()), 0)
+    assert_eq(wynimg_height(i64_min()), 0)
+    wynimg_free(i64_max())
+    wynimg_free(i64_min())
+    wynimg_free(0 - 1)
+    assert_eq(wynimg_clone(i64_max()), 0)
+    assert_eq(wynimg_composite(i64_max(), i64_min(), 7, 0, 1.0), 0)
+    assert_true(pixel.approx(wynimg_max_diff(i64_max(), i64_min()), 2.0, 0.000001))
+    // A slot index of 1 with generation 0 is the most plausible accidental
+    // handle there is, and it must still be dead.
+    var live = wynimg_new(2, 2)
+    assert_eq(wynimg_alive(1), 0)
+    assert_eq(wynimg_alive(2), 0)
+    wynimg_free(live)
+}
+
+// ---------------------------------------------------------------------------
+// Dimensions and indices.
+// ---------------------------------------------------------------------------
+
+test "dimensions that would overflow the pixel arithmetic are refused" {
+    assert_eq(wynimg_new(0, 4), 0)
+    assert_eq(wynimg_new(4, 0), 0)
+    assert_eq(wynimg_new(0, 0), 0)
+    assert_eq(wynimg_new(0 - 1, 4), 0)
+    assert_eq(wynimg_new(4, 0 - 1), 0)
+    assert_eq(wynimg_new(i64_max(), 2), 0)
+    assert_eq(wynimg_new(2, i64_max()), 0)
+    assert_eq(wynimg_new(i64_min(), i64_min()), 0)
+    // The classic wrap: w*h*4*sizeof(float) truncates to 256 bytes while w
+    // keeps its huge value, so the bounds checks pass and fill writes past the
+    // allocation.
+    assert_eq(wynimg_new(2305843009213693960, 2), 0)
+    // Above WYNIMG_MAX_PIXELS (536870912) -- refused, not lazily calloc'd.
+    assert_eq(wynimg_new(536870912, 2), 0)
+    assert_eq(wynimg_new(536870913, 1), 0)
+    // Exactly AT the cap is a legal 1-pixel-tall image and must still work,
+    // or the guard is off by one in the safe direction and nothing notices.
+    var edge = wynimg_new(536870912, 1)
+    assert_eq(wynimg_width(edge), 536870912)
+    wynimg_free(edge)
+}
+
+test "get and set bound-check the flat index at both extremes" {
+    var b = wynimg_new(2, 2)                   // 16 floats
+    wynimg_fill(b, 0.25, 0.25, 0.25, 1.0)
+
+    assert_true(pixel.approx(wynimg_get(b, 0 - 1), 0.0, 0.000001))
+    assert_true(pixel.approx(wynimg_get(b, 16), 0.0, 0.000001))
+    assert_true(pixel.approx(wynimg_get(b, i64_max()), 0.0, 0.000001))
+    assert_true(pixel.approx(wynimg_get(b, i64_min()), 0.0, 0.000001))
+    // Exactly at the last legal index still reads real data.
+    assert_true(pixel.approx(wynimg_get(b, 15), 1.0, 0.000001))
+
+    // Out-of-range writes are no-ops, and -- the part that matters -- they do
+    // not disturb the in-range data either.
+    wynimg_set(b, 0 - 1, 9.0)
+    wynimg_set(b, 16, 9.0)
+    wynimg_set(b, i64_max(), 9.0)
+    wynimg_set(b, i64_min(), 9.0)
+    assert_true(pixel.approx(wynimg_get(b, 0), 0.25, 0.000001))
+    assert_true(pixel.approx(wynimg_get(b, 15), 1.0, 0.000001))
+    wynimg_free(b)
+}
+
+test "pick validates x, y and channel before computing y * w + x" {
+    // The order is load-bearing: `y * w + x` computed before validation
+    // overflows for a large y, and the resulting index can land back inside
+    // the buffer. Every one of these must read 0.
+    var b = wynimg_new(4, 4)
+    wynimg_fill(b, 1.0, 0.0, 0.0, 1.0)
+
+    assert_true(pixel.approx(wynimg_pick(b, 0 - 1, 0, 0), 0.0, 0.000001))
+    assert_true(pixel.approx(wynimg_pick(b, 0, 0 - 1, 0), 0.0, 0.000001))
+    assert_true(pixel.approx(wynimg_pick(b, 4, 0, 0), 0.0, 0.000001))   // one past
+    assert_true(pixel.approx(wynimg_pick(b, 0, 4, 0), 0.0, 0.000001))   // one past
+    assert_true(pixel.approx(wynimg_pick(b, i64_max(), i64_max(), 0), 0.0, 0.000001))
+    assert_true(pixel.approx(wynimg_pick(b, i64_min(), i64_min(), 0), 0.0, 0.000001))
+    assert_true(pixel.approx(wynimg_pick(b, 1, 1, 0 - 1), 0.0, 0.000001))
+    assert_true(pixel.approx(wynimg_pick(b, 1, 1, 4), 0.0, 0.000001))
+    assert_true(pixel.approx(wynimg_pick(b, 1, 1, i64_max()), 0.0, 0.000001))
+    // Exactly at bounds reads real data, so the checks are not simply refusing
+    // everything.
+    assert_true(pixel.approx(wynimg_pick(b, 3, 3, 0), 1.0, 0.001))
+    assert_true(pixel.approx(wynimg_pick(b, 3, 3, 3), 1.0, 0.001))
+    wynimg_free(b)
+}
+
+// ---------------------------------------------------------------------------
+// Two-buffer functions: a mismatch must be a REFUSAL, never a partial read.
+// ---------------------------------------------------------------------------
+
+test "every two-buffer function refuses mismatched dimensions" {
+    var big = wynimg_new(8, 8)
+    var narrow = wynimg_new(4, 8)               // same height, wrong width
+    var short = wynimg_new(8, 4)                // same width, wrong height
+    wynimg_fill(big, 0.5, 0.5, 0.5, 1.0)
+    wynimg_fill(narrow, 1.0, 0.0, 0.0, 1.0)
+    wynimg_fill(short, 1.0, 0.0, 0.0, 1.0)
+
+    assert_eq(wynimg_copy_into(big, narrow), 0)
+    assert_eq(wynimg_copy_into(big, short), 0)
+    assert_eq(wynimg_copy_into(narrow, big), 0)
+    assert_eq(wynimg_composite(big, narrow, 0, 0, 1.0), 0)
+    assert_eq(wynimg_composite(big, short, 0, 0, 1.0), 0)
+    assert_eq(wynimg_stroke_apply(big, narrow, big, 1.0, 0.0, 0.0, 1.0, 0), 0)
+    assert_eq(wynimg_stroke_apply(big, big, narrow, 1.0, 0.0, 0.0, 1.0, 0), 0)
+    assert_eq(wynimg_fill_region(big, narrow, 0, 0, 0.1), -1)
+    assert_eq(wynimg_fill_region(narrow, big, 0, 0, 0.1), -1)
+    assert_true(pixel.approx(wynimg_max_diff(big, narrow), 2.0, 0.000001))
+    assert_true(pixel.approx(wynimg_max_diff(big, short), 2.0, 0.000001))
+
+    // A refusal must leave the destination BYTE-UNCHANGED. A partial copy of
+    // the overlapping rows would also "return 0" while corrupting the image.
+    assert_true(pixel.approx(wynimg_get(big, 0), 0.5, 0.000001))
+    assert_true(pixel.approx(wynimg_get(big, 4), 0.5, 0.000001))
+    wynimg_free(big)
+    wynimg_free(narrow)
+    wynimg_free(short)
+}
+
+test "a mismatched MASK is refused rather than read at the wrong stride" {
+    var dst = wynimg_new(8, 8)
+    var src = wynimg_new(8, 8)
+    var msk = wynimg_new(4, 4)                  // smaller: a per-pixel read of
+    wynimg_fill(dst, 0.5, 0.5, 0.5, 1.0)        // this would run off the end
+    wynimg_fill(src, 1.0, 0.0, 0.0, 1.0)
+    wynimg_fill(msk, 1.0, 1.0, 1.0, 1.0)
+
+    assert_eq(wynimg_composite(dst, src, msk, 0, 1.0), 0)
+    assert_true(pixel.approx(wynimg_get(dst, 0), 0.5, 0.000001))
+    wynimg_free(dst)
+    wynimg_free(src)
+    wynimg_free(msk)
+}
+
+// ---------------------------------------------------------------------------
+// NaN. The heart of this file.
+// ---------------------------------------------------------------------------
+
+// DEFECT (fixed in csrc/wynimg_blend.c): clamp01d was
+// `if (v < 0) return 0; if (v > 1) return 1; return v;`, which returns NaN
+// UNTOUCHED because both comparisons are false. 26 of the 27 blend modes
+// returned NaN for a NaN operand -- measured.
+test "no blend mode returns NaN for a NaN operand" {
+    var n = nan_value()
+    var m = 0
+    while m < 27 {
+        assert_false(is_nan(wynimg_blend_px(m, n, 0.5)))
+        assert_false(is_nan(wynimg_blend_px(m, 0.5, n)))
+        assert_false(is_nan(wynimg_blend_px(m, n, n)))
+        m = m + 1
+    }
+}
+
+test "every blend mode stays in [0,1] at the corners and for infinities" {
+    var inf = inf_value()
+    var m = 0
+    while m < 27 {
+        // 0/1 corners: these are where guard ORDER bugs show (the vivid_light
+        // inversion was a full-scale error at exactly byte 0 and byte 255).
+        assert_true(wynimg_blend_px(m, 0.0, 0.0) >= 0.0)
+        assert_true(wynimg_blend_px(m, 0.0, 0.0) <= 1.0)
+        assert_true(wynimg_blend_px(m, 0.0, 1.0) >= 0.0)
+        assert_true(wynimg_blend_px(m, 0.0, 1.0) <= 1.0)
+        assert_true(wynimg_blend_px(m, 1.0, 0.0) >= 0.0)
+        assert_true(wynimg_blend_px(m, 1.0, 0.0) <= 1.0)
+        assert_true(wynimg_blend_px(m, 1.0, 1.0) >= 0.0)
+        assert_true(wynimg_blend_px(m, 1.0, 1.0) <= 1.0)
+        // Infinities clamp to the ends; neither may produce NaN via inf-inf.
+        assert_false(is_nan(wynimg_blend_px(m, inf, 0.5)))
+        assert_false(is_nan(wynimg_blend_px(m, 0.5, inf)))
+        assert_false(is_nan(wynimg_blend_px(m, 0.0 - inf, inf)))
+        assert_true(wynimg_blend_px(m, inf, inf) <= 1.0)
+        m = m + 1
+    }
+}
+
+test "an out-of-range blend mode falls back to normal in both directions" {
+    // Below zero and above the table, including the integer extremes, so a
+    // negative index can never be used as an array subscript.
+    assert_true(pixel.approx(wynimg_blend_px(0 - 1, 0.3, 0.7), 0.7, 0.000001))
+    assert_true(pixel.approx(wynimg_blend_px(27, 0.3, 0.7), 0.7, 0.000001))
+    assert_true(pixel.approx(wynimg_blend_px(9999, 0.3, 0.7), 0.7, 0.000001))
+    assert_true(pixel.approx(wynimg_blend_px(i64_max(), 0.3, 0.7), 0.7, 0.000001))
+    assert_true(pixel.approx(wynimg_blend_px(i64_min(), 0.3, 0.7), 0.7, 0.000001))
+}
+
+// DEFECT (fixed in csrc/wynimg_blend.c): a NaN source alpha sailed past
+// `if (alpha <= 0.0) continue;` -- false for NaN -- and was written into all
+// four destination channels. Measured: dst pixel became nan,nan,nan,a=nan.
+test "a NaN in the SOURCE buffer cannot poison the destination" {
+    var dst = wynimg_new(2, 2)
+    var src = wynimg_new(2, 2)
+    wynimg_fill(dst, 0.25, 0.25, 0.25, 1.0)
+    wynimg_fill(src, 0.5, 0.0, 0.0, 1.0)
+    wynimg_set(src, 3, nan_value())             // pixel 0 alpha = NaN
+
+    assert_eq(wynimg_composite(dst, src, 0, 0, 1.0), 1)
+    assert_false(is_nan(wynimg_get(dst, 0)))
+    assert_false(is_nan(wynimg_get(dst, 1)))
+    assert_false(is_nan(wynimg_get(dst, 2)))
+    assert_false(is_nan(wynimg_get(dst, 3)))
+    // NaN alpha is treated as fully transparent, so the backdrop survives
+    // intact. That is the refusal: the bad source contributes nothing.
+    assert_true(pixel.approx(wynimg_get(dst, 3), 1.0, 0.000001))
+    assert_true(pixel.approx(wynimg_get(dst, 0), 0.25, 0.000001))
+    wynimg_free(dst)
+    wynimg_free(src)
+}
+
+test "a NaN COLOUR channel in the source cannot poison the destination" {
+    var dst = wynimg_new(2, 2)
+    var src = wynimg_new(2, 2)
+    wynimg_fill(dst, 0.25, 0.25, 0.25, 1.0)
+    wynimg_fill(src, 0.5, 0.5, 0.5, 1.0)
+    wynimg_set(src, 0, nan_value())             // pixel 0, R only
+
+    assert_eq(wynimg_composite(dst, src, 0, 0, 1.0), 1)
+    assert_false(is_nan(wynimg_get(dst, 0)))
+    // The two CLEAN channels of the same pixel must still composite correctly:
+    // one bad channel may not take the others with it.
+    assert_false(is_nan(wynimg_get(dst, 1)))
+    assert_false(is_nan(wynimg_get(dst, 2)))
+    assert_true(pixel.approx(wynimg_get(dst, 1), 0.5, 0.001))
+    wynimg_free(dst)
+    wynimg_free(src)
+}
+
+test "a NaN already in the DESTINATION is normalised, not preserved" {
+    var dst = wynimg_new(2, 2)
+    var src = wynimg_new(2, 2)
+    wynimg_fill(dst, 0.25, 0.25, 0.25, 1.0)
+    wynimg_set(dst, 3, nan_value())             // backdrop alpha = NaN
+    wynimg_fill(src, 1.0, 0.0, 0.0, 1.0)
+
+    assert_eq(wynimg_composite(dst, src, 0, 0, 1.0), 1)
+    // Without denan on `da`, `1.0 - da` is NaN and the perfectly valid opaque
+    // red source produces a NaN pixel.
+    assert_false(is_nan(wynimg_get(dst, 3)))
+    assert_true(pixel.approx(wynimg_get(dst, 3), 1.0, 0.000001))
+    assert_true(pixel.approx(wynimg_get(dst, 0), 1.0, 0.001))
+    wynimg_free(dst)
+    wynimg_free(src)
+}
+
+test "opacity outside [0,1], NaN and infinite, is clamped not propagated" {
+    var dst = wynimg_new(2, 2)
+    var src = wynimg_new(2, 2)
+    wynimg_fill(src, 1.0, 0.0, 0.0, 1.0)
+
+    // NaN opacity: `if (opacity < 0) ... if (opacity > 1)` left it NaN, which
+    // then NaN'd every alpha in the buffer. Measured: dst a = nan.
+    wynimg_fill(dst, 0.25, 0.25, 0.25, 1.0)
+    assert_eq(wynimg_composite(dst, src, 0, 0, nan_value()), 1)
+    assert_false(is_nan(wynimg_get(dst, 3)))
+    assert_true(pixel.approx(wynimg_get(dst, 3), 1.0, 0.000001))
+    // NaN opacity clamps to 0, i.e. the source is not drawn at all.
+    assert_true(pixel.approx(wynimg_get(dst, 0), 0.25, 0.000001))
+
+    // Above 1 clamps to 1 (fully drawn).
+    wynimg_fill(dst, 0.25, 0.25, 0.25, 1.0)
+    assert_eq(wynimg_composite(dst, src, 0, 0, 5.0), 1)
+    assert_true(pixel.approx(wynimg_get(dst, 0), 1.0, 0.001))
+
+    // Below 0 clamps to 0 (not drawn).
+    wynimg_fill(dst, 0.25, 0.25, 0.25, 1.0)
+    assert_eq(wynimg_composite(dst, src, 0, 0, 0.0 - 3.0), 1)
+    assert_true(pixel.approx(wynimg_get(dst, 0), 0.25, 0.000001))
+
+    // Infinities must clamp, not produce inf*0 = NaN.
+    wynimg_fill(dst, 0.25, 0.25, 0.25, 1.0)
+    assert_eq(wynimg_composite(dst, src, 0, 0, inf_value()), 1)
+    assert_false(is_nan(wynimg_get(dst, 3)))
+    assert_true(pixel.approx(wynimg_get(dst, 3), 1.0, 0.000001))
+    wynimg_free(dst)
+    wynimg_free(src)
+}
+
+test "mask coverage that is NaN or out of range is clamped" {
+    var dst = wynimg_new(2, 2)
+    var src = wynimg_new(2, 2)
+    var msk = wynimg_new(2, 2)
+    wynimg_fill(src, 1.0, 0.0, 0.0, 1.0)
+    wynimg_fill(msk, 1.0, 1.0, 1.0, 1.0)
+
+    // NaN coverage: `alpha *= clamp01d(cov)` with the old clamp made alpha NaN,
+    // and `if (alpha <= 0.0)` did not catch it.
+    wynimg_fill(dst, 0.25, 0.25, 0.25, 1.0)
+    wynimg_set(msk, 0, nan_value())
+    assert_eq(wynimg_composite(dst, src, msk, 0, 1.0), 1)
+    assert_false(is_nan(wynimg_get(dst, 3)))
+    assert_true(pixel.approx(wynimg_get(dst, 3), 1.0, 0.000001))
+
+    // Coverage above 1 must not push alpha above 1 -- an invalid premultiplied
+    // pixel, previously measured turning a grey into white on a save+reload.
+    wynimg_fill(dst, 0.25, 0.25, 0.25, 1.0)
+    wynimg_set(msk, 0, 4.0)
+    assert_eq(wynimg_composite(dst, src, msk, 0, 1.0), 1)
+    assert_true(wynimg_get(dst, 3) <= 1.0)
+
+    // Negative coverage means "not covered", not a negative alpha.
+    wynimg_fill(dst, 0.25, 0.25, 0.25, 1.0)
+    wynimg_set(msk, 0, 0.0 - 2.0)
+    assert_eq(wynimg_composite(dst, src, msk, 0, 1.0), 1)
+    assert_true(wynimg_get(dst, 3) >= 0.0)
+    assert_true(pixel.approx(wynimg_get(dst, 0), 0.25, 0.000001))
+    wynimg_free(dst)
+    wynimg_free(src)
+    wynimg_free(msk)
+}
+
+// DEFECT (fixed in csrc/wynimg_blend.c): a NaN amount passed both
+// `if (v < 0.0)` and `if (v > 1.0)`, NaN'd every colour channel in the buffer,
+// and STILL RETURNED 1. Measured: px0 = nan, rc = 1.
+test "brightness refuses a NaN amount instead of NaN-ing the buffer" {
+    var b = wynimg_new(4, 4)
+    wynimg_fill(b, 0.5, 0.5, 0.5, 1.0)
+    assert_eq(wynimg_brightness(b, nan_value()), 0)      // refused
+    assert_false(is_nan(wynimg_get(b, 0)))
+    assert_true(pixel.approx(wynimg_get(b, 0), 0.5, 0.000001))   // untouched
+
+    // A valid adjustment still works, so the guard is not simply refusing all.
+    assert_eq(wynimg_brightness(b, 0.25), 1)
+    assert_true(pixel.approx(wynimg_get(b, 0), 0.75, 0.001))
+
+    // Infinite amounts clamp to the ends rather than producing NaN.
+    assert_eq(wynimg_brightness(b, inf_value()), 1)
+    assert_false(is_nan(wynimg_get(b, 0)))
+    assert_true(pixel.approx(wynimg_get(b, 0), 1.0, 0.001))
+    assert_eq(wynimg_brightness(b, 0.0 - inf_value()), 1)
+    assert_true(pixel.approx(wynimg_get(b, 0), 0.0, 0.001))
+    wynimg_free(b)
+}
+
+// DEFECT (fixed in csrc/wynimg_buf.c): the single most dangerous one found.
+// `d = a - b` is NaN when either side is NaN, and BOTH `if (d < 0.0)` and
+// `if (d > worst)` are false for NaN, so the NaN channel was skipped entirely
+// and max_diff returned the difference over the REMAINING channels -- 0.0 for
+// two otherwise-identical buffers. Every golden test asserts
+// `max_diff < 0.006`, so a document with a NaN hole PASSED the comparison that
+// exists to catch exactly that.
+test "max_diff refuses NaN data instead of reporting no difference" {
+    var a = wynimg_new(4, 4)
+    var b = wynimg_new(4, 4)
+    wynimg_fill(a, 0.5, 0.5, 0.5, 1.0)
+    wynimg_fill(b, 0.5, 0.5, 0.5, 1.0)
+    assert_true(pixel.approx(wynimg_max_diff(a, b), 0.0, 0.000001))
+
+    // A NaN on the RIGHT.
+    wynimg_set(b, 0, nan_value())
+    assert_true(pixel.approx(wynimg_max_diff(a, b), 2.0, 0.000001))
+    // The golden tolerance must NOT pass. This is the assertion that matters:
+    // before the fix this comparison was true.
+    assert_false(wynimg_max_diff(a, b) < 0.006)
+
+    // A NaN on the LEFT, and in the last channel rather than the first.
+    wynimg_fill(b, 0.5, 0.5, 0.5, 1.0)
+    wynimg_set(a, 63, nan_value())
+    assert_true(pixel.approx(wynimg_max_diff(a, b), 2.0, 0.000001))
+    assert_false(wynimg_max_diff(a, b) < 0.006)
+    wynimg_free(a)
+    wynimg_free(b)
+}
+
+// ---------------------------------------------------------------------------
+// The PNG codec.
+// ---------------------------------------------------------------------------
+
+test "the loaders refuse every kind of non-PNG cleanly" {
+    // A nonexistent path.
+    assert_eq(wynimg_load_png("/tmp/wyncanvas_hd_absent_7c2.png"), 0)
+    assert_eq(wynimg_load_mask_png("/tmp/wyncanvas_hd_absent_7c2.png"), 0)
+    // A DIRECTORY: fopen succeeds on some platforms, so this must be refused by
+    // the signature check rather than by fopen.
+    assert_eq(wynimg_load_png("/tmp"), 0)
+    assert_eq(wynimg_load_mask_png("/tmp"), 0)
+    // An empty file -- fewer than the 8 signature bytes.
+    File.write("/tmp/wyncanvas_hd_empty.png", "")
+    assert_eq(wynimg_load_png("/tmp/wyncanvas_hd_empty.png"), 0)
+    assert_eq(wynimg_load_mask_png("/tmp/wyncanvas_hd_empty.png"), 0)
+    // Shorter than the signature but not empty.
+    File.write("/tmp/wyncanvas_hd_tiny.png", "PNG")
+    assert_eq(wynimg_load_png("/tmp/wyncanvas_hd_tiny.png"), 0)
+    // A text file with a .png name.
+    File.write("/tmp/wyncanvas_hd_text.png", "this is not a png, it is prose")
+    assert_eq(wynimg_load_png("/tmp/wyncanvas_hd_text.png"), 0)
+    assert_eq(wynimg_load_mask_png("/tmp/wyncanvas_hd_text.png"), 0)
+    // A file whose first 8 bytes ARE the PNG signature but whose body is not a
+    // PNG. This is the interesting one: it gets PAST png_sig_cmp, so it must be
+    // caught by libpng's longjmp instead -- the path where the volatile-locals
+    // bug lived. The signature bytes are poked in, because Wyn's File.write
+    // cannot emit 0x89 or 0x1A (the compiler rejects `\u{89}` outright:
+    // "universal character name refers to a control character").
+    File.write("/tmp/wyncanvas_hd_sigonly.png", "XPNG..X.GARBAGE-NOT-A-CHUNK")
+    assert_eq(wynproj_poke_byte("/tmp/wyncanvas_hd_sigonly.png", 0, 137), 1)  // 0x89
+    assert_eq(wynproj_poke_byte("/tmp/wyncanvas_hd_sigonly.png", 4, 13), 1)   // CR
+    assert_eq(wynproj_poke_byte("/tmp/wyncanvas_hd_sigonly.png", 5, 10), 1)   // LF
+    assert_eq(wynproj_poke_byte("/tmp/wyncanvas_hd_sigonly.png", 6, 26), 1)   // 0x1A
+    assert_eq(wynproj_poke_byte("/tmp/wyncanvas_hd_sigonly.png", 7, 10), 1)   // LF
+    assert_eq(wynimg_load_png("/tmp/wyncanvas_hd_sigonly.png"), 0)
+    assert_eq(wynimg_load_mask_png("/tmp/wyncanvas_hd_sigonly.png"), 0)
+
+    // Still functional afterwards -- a failed load must not leave the handle
+    // table or libpng in a broken state.
+    var ok = wynimg_new(8, 8)
+    assert_eq(wynimg_width(ok), 8)
+    wynimg_free(ok)
+}
+
+test "a truncated PNG is refused, and repeating it does not exhaust memory" {
+    // Truncating a real PNG mid-IDAT is the realistic corruption, and it takes
+    // the longjmp path AFTER the pixel buffer and row buffer are allocated --
+    // exactly the error path that must free both. 400 iterations of a 128x128
+    // load would leak ~105 MB if the handler freed nothing.
+    var src = wynimg_new(128, 128)
+    wynimg_fill(src, 0.4, 0.6, 0.8, 1.0)
+    assert_eq(wynimg_save_png(src, "/tmp/wyncanvas_hd_full.png"), 1)
+    wynimg_free(src)
+
+    var n = wynimg_file_size("/tmp/wyncanvas_hd_full.png")
+    assert_true(n > 100)
+    // Keep the header and the start of the pixel data; drop the rest.
+    assert_true(wynproj_truncate_copy("/tmp/wyncanvas_hd_full.png",
+                                      "/tmp/wyncanvas_hd_cut.png", 80) == 80)
+
+    var i = 0
+    while i < 400 {
+        assert_eq(wynimg_load_png("/tmp/wyncanvas_hd_cut.png"), 0)
+        assert_eq(wynimg_load_mask_png("/tmp/wyncanvas_hd_cut.png"), 0)
+        i = i + 1
+    }
+    // Still able to allocate a real buffer, which a leak of that size on a
+    // constrained machine would prevent.
+    var after = wynimg_new(128, 128)
+    assert_eq(wynimg_width(after), 128)
+    wynimg_free(after)
+}
+
+test "a PNG with a corrupted IHDR is refused rather than misparsed" {
+    var src = wynimg_new(16, 16)
+    wynimg_fill(src, 0.5, 0.25, 0.75, 1.0)
+    assert_eq(wynimg_save_png(src, "/tmp/wyncanvas_hd_hdr.png"), 1)
+    wynimg_free(src)
+
+    // Byte 24 of a PNG is the IHDR bit depth field; 99 is not a legal depth.
+    // The row loop indexes 4 bytes per pixel, so anything that is not 8-bit
+    // RGBA after the transform chain must bail out rather than read past `row`.
+    assert_eq(wynproj_poke_byte("/tmp/wyncanvas_hd_hdr.png", 24, 99), 1)
+    assert_eq(wynimg_load_png("/tmp/wyncanvas_hd_hdr.png"), 0)
+
+    // Byte 25 is the colour type; 77 is not one of the six legal values.
+    var s2 = wynimg_new(16, 16)
+    wynimg_fill(s2, 0.5, 0.25, 0.75, 1.0)
+    assert_eq(wynimg_save_png(s2, "/tmp/wyncanvas_hd_ct.png"), 1)
+    wynimg_free(s2)
+    assert_eq(wynproj_poke_byte("/tmp/wyncanvas_hd_ct.png", 25, 77), 1)
+    assert_eq(wynimg_load_png("/tmp/wyncanvas_hd_ct.png"), 0)
+}
+
+// DEFECT (fixed in csrc/wynimg_codec.c): l2s's `if (v <= 0.0) return 0.0`
+// leaves NaN alone, so a NaN pixel reached
+// `(unsigned char)(l2s(r) * 255.0 + 0.5)`. Converting NaN to an integer type is
+// UNDEFINED BEHAVIOUR in C, not merely a wrong byte -- and the save still
+// returned 1, so nothing downstream could tell.
+test "saving a buffer containing NaN writes defined bytes" {
+    var b = wynimg_new(4, 4)
+    wynimg_fill(b, 0.5, 0.5, 0.5, 1.0)
+    wynimg_set(b, 0, nan_value())          // R of pixel 0
+    wynimg_set(b, 7, nan_value())          // A of pixel 1
+    assert_eq(wynimg_save_png(b, "/tmp/wyncanvas_hd_nan.png"), 1)
+    wynimg_free(b)
+
+    // Every byte written must be a real byte in 0..255, and the reloaded pixels
+    // must not be NaN -- a NaN that survives the file is permanent.
+    var back = wynimg_load_png("/tmp/wyncanvas_hd_nan.png")
+    assert_eq(wynimg_width(back), 4)
+    var i = 0
+    while i < 64 {
+        assert_false(is_nan(wynimg_get(back, i)))
+        i = i + 1
+    }
+    // NaN maps to 0, so pixel 0's R is black and pixel 1 is fully transparent.
+    assert_true(pixel.approx(wynimg_get(back, 0), 0.0, 0.005))
+    assert_true(pixel.approx(wynimg_get(back, 7), 0.0, 0.005))
+    // The UNTOUCHED channels of pixel 0 still round-trip, so the NaN did not
+    // corrupt its neighbours.
+    assert_true(pixel.approx(wynimg_get(back, 1), 0.5, 0.005))
+    wynimg_free(back)
+}
+
+test "saving to an unwritable location fails cleanly, repeatedly" {
+    var b = wynimg_new(64, 64)
+    wynimg_fill(b, 0.5, 0.5, 0.5, 1.0)
+    // A path whose parent does not exist.
+    assert_eq(wynimg_save_png(b, "/tmp/wyncanvas_hd_absent_dir_9x/out.png"), 0)
+    // A path that IS an existing directory.
+    assert_eq(wynimg_save_png(b, "/tmp"), 0)
+    // The filesystem root, which is not writable.
+    assert_eq(wynimg_save_png(b, "/wyncanvas_hd_root_denied.png"), 0)
+    // Repeated, because the row buffer is allocated after setjmp and freed in
+    // the handler: 300 failures leaked 30720 bytes before the volatile fix.
+    var i = 0
+    while i < 300 {
+        assert_eq(wynimg_save_png(b, "/tmp/wyncanvas_hd_absent_dir_9x/out.png"), 0)
+        i = i + 1
+    }
+    // A real save still works afterwards.
+    assert_eq(wynimg_save_png(b, "/tmp/wyncanvas_hd_after.png"), 1)
+    wynimg_free(b)
+}
+
+// ---------------------------------------------------------------------------
+// Descriptors. Wyn hands these across as `long long`, and the C side narrows
+// them to `int`.
+// ---------------------------------------------------------------------------
+
+// DEFECT (fixed in csrc/wynimg_http.c): `if (fd < 0)` then `close((int)fd)`.
+// 4294967296 is 2^32 -- non-negative, and its low 32 bits are all zero -- so it
+// truncated to fd 0 and CLOSED STDIN, returning 1 to report success. The same
+// truncation let wynimg_http_send_file(2^32 + n) write a full HTTP response
+// into whatever fd n happened to be.
+test "a descriptor that does not fit in an int is refused, not truncated" {
+    assert_eq(wynimg_close_fd(0 - 1), 0)
+    assert_eq(wynimg_close_fd(i64_min()), 0)
+    // 2^32: truncates to 0. This is the one that closed stdin.
+    assert_eq(wynimg_close_fd(4294967296), 0)
+    // 2^32 + 1 and 2^32 + 2 truncate to stdout and stderr.
+    assert_eq(wynimg_close_fd(4294967297), 0)
+    assert_eq(wynimg_close_fd(4294967298), 0)
+    assert_eq(wynimg_close_fd(i64_max()), 0)
+
+    assert_eq(wynimg_http_send_file(0 - 1, "/tmp/wyncanvas_hd_after.png", "image/png"), 0)
+    assert_eq(wynimg_http_send_file(4294967296, "/tmp/wyncanvas_hd_after.png", "image/png"), 0)
+    assert_eq(wynimg_http_send_file(i64_max(), "/tmp/wyncanvas_hd_after.png", "image/png"), 0)
+
+    // PROOF that the standard descriptors survived: if stdin/stdout/stderr had
+    // been closed above, a real send would land on one of them. Open a genuine
+    // fd, send to it, and check the bytes -- this both confirms the refusals
+    // did nothing and that the send path still works.
+    var fd = wynimg_open_wr("/tmp/wyncanvas_hd_fdproof.bin")
+    assert_true(fd >= 0)
+    assert_eq(wynimg_http_send_file(fd, "/tmp/wyncanvas_hd_after.png", "image/png"), 1)
+    assert_eq(wynimg_close_fd(fd), 1)
+    assert_true(wynimg_file_size("/tmp/wyncanvas_hd_fdproof.bin") > 0)
+    // The response starts with the status line, i.e. it went to OUR file and
+    // not to a truncated descriptor.
+    assert_eq(wynimg_file_byte("/tmp/wyncanvas_hd_fdproof.bin", 0), 72)   // 'H'
+    assert_eq(wynimg_file_byte("/tmp/wyncanvas_hd_fdproof.bin", 1), 84)   // 'T'
+}
+
+test "the send path refuses an unreadable source without writing anything" {
+    var fd = wynimg_open_wr("/tmp/wyncanvas_hd_nowrite.bin")
+    assert_true(fd >= 0)
+    // A nonexistent file, and a directory. Neither may emit a header: a 200
+    // response with no body is worse than a refusal, because the client caches
+    // an empty image.
+    assert_eq(wynimg_http_send_file(fd, "/tmp/wyncanvas_hd_absent_7c2.png", "image/png"), 0)
+    assert_eq(wynimg_http_send_file(fd, "/tmp", "image/png"), 0)
+    assert_eq(wynimg_close_fd(fd), 1)
+    assert_eq(wynimg_file_size("/tmp/wyncanvas_hd_nowrite.bin"), 0)
+}
+
+test "the file inspection seams refuse bad paths and offsets" {
+    assert_eq(wynimg_file_size("/tmp/wyncanvas_hd_absent_7c2.png"), 0 - 1)
+    assert_eq(wynimg_file_byte("/tmp/wyncanvas_hd_absent_7c2.png", 0), 0 - 1)
+    assert_eq(wynimg_file_byte("/tmp/wyncanvas_hd_after.png", 0 - 1), 0 - 1)
+    assert_eq(wynimg_file_byte("/tmp/wyncanvas_hd_after.png", i64_min()), 0 - 1)
+    // Past the end of a real file.
+    assert_eq(wynimg_file_byte("/tmp/wyncanvas_hd_after.png", i64_max()), 0 - 1)
+    // A real PNG still reads its signature byte, so the guards are not
+    // refusing everything.
+    assert_eq(wynimg_file_byte("/tmp/wyncanvas_hd_after.png", 1), 80)     // 'P'
+}
+
+// ---------------------------------------------------------------------------
+// A NaN must not become PERMANENT. This is the end-to-end statement of why all
+// of the above matters.
+// ---------------------------------------------------------------------------
+
+test "one NaN pixel cannot spread through a composite chain" {
+    // Three buffers composited in sequence, with a NaN planted in the middle
+    // one. Before the fixes, the NaN reached the destination on the first
+    // composite and every subsequent composite propagated it, so the whole
+    // chain ended NaN and max_diff reported the result as IDENTICAL to a clean
+    // render.
+    var base = wynimg_new(4, 4)
+    var mid = wynimg_new(4, 4)
+    var top = wynimg_new(4, 4)
+    wynimg_fill(base, 0.2, 0.2, 0.2, 1.0)
+    wynimg_fill(mid, 0.5, 0.0, 0.0, 0.5)
+    wynimg_fill(top, 0.0, 0.0, 0.5, 0.5)
+    wynimg_set(mid, 3, nan_value())
+    wynimg_set(mid, 5, nan_value())
+
+    assert_eq(wynimg_composite(base, mid, 0, 1, 0.8), 1)
+    assert_eq(wynimg_composite(base, top, 0, 2, 0.6), 1)
+
+    var i = 0
+    while i < 64 {
+        assert_false(is_nan(wynimg_get(base, i)))
+        // And still a valid premultiplied pixel.
+        assert_true(wynimg_get(base, i) >= 0.0)
+        assert_true(wynimg_get(base, i) <= 1.0)
+        i = i + 1
+    }
+    // The buffer is comparable to itself, i.e. free of NaN by max_diff's own
+    // reckoning -- which is the check every golden test depends on.
+    var copy = wynimg_clone(base)
+    assert_true(pixel.approx(wynimg_max_diff(base, copy), 0.0, 0.000001))
+    wynimg_free(copy)
+    wynimg_free(base)
+    wynimg_free(mid)
+    wynimg_free(top)
+}
+
+// ---------------------------------------------------------------------------
+// The handle table's own growth.
+// ---------------------------------------------------------------------------
+
+// DEFECT (fixed in csrc/wynimg_buf.c): the slot table was a flat `WynSlot*`
+// grown with realloc, so wynimg_deref returned a pointer INTO a growable array.
+// Any wynimg_new that triggered the realloc invalidated every WynImg* a caller
+// still held -- and csrc/wynimg_paint.c's wynimg_clone does exactly
+// "deref src, then wynimg_new, then memcpy from src". ASan, against the -O2
+// build: "heap-use-after-free ... READ of size 8 ... in wynimg_clone", freed by
+// realloc in wynimg_new. No invalid input was needed; a 65th live buffer was
+// enough, and the result was silently wrong pixels rather than a crash.
+test "cloning across a handle-table growth copies the right pixels" {
+    // The initial slot capacity is 64. Hold 64 live buffers so the wynimg_new
+    // inside wynimg_clone is the allocation that grows the table.
+    var live = [0]
+    var i = 0
+    while i < 64 {
+        var h = wynimg_new(2, 2)
+        assert_eq(wynimg_alive(h), 1)
+        live.push(h)
+        i = i + 1
+    }
+
+    var src = live.get(1)
+    wynimg_fill(src, 0.25, 0.5, 0.75, 1.0)
+
+    var c = wynimg_clone(src)                  // triggers the growth
+    assert_true(c != 0)
+    assert_eq(wynimg_width(c), 2)
+    assert_eq(wynimg_height(c), 2)
+    // These are the reads that came from freed memory before the fix.
+    assert_true(pixel.approx(wynimg_get(c, 0), 0.25, 0.000001))
+    assert_true(pixel.approx(wynimg_get(c, 1), 0.5, 0.000001))
+    assert_true(pixel.approx(wynimg_get(c, 2), 0.75, 0.000001))
+    assert_true(pixel.approx(wynimg_get(c, 3), 1.0, 0.000001))
+    assert_true(pixel.approx(wynimg_max_diff(src, c), 0.0, 0.000001))
+
+    // EVERY handle taken before the growth must still resolve to ITS OWN
+    // buffer. A moved slot table would leave these reading each other's
+    // pixels, or nothing at all.
+    var j = 1
+    while j < 64 {
+        var h = live.get(j)
+        assert_eq(wynimg_alive(h), 1)
+        assert_eq(wynimg_width(h), 2)
+        j = j + 1
+    }
+    // And a pre-growth handle is still WRITABLE and independent.
+    var other = live.get(40)
+    wynimg_fill(other, 0.1, 0.1, 0.1, 1.0)
+    assert_true(pixel.approx(wynimg_get(other, 0), 0.1, 0.000001))
+    assert_true(pixel.approx(wynimg_get(src, 0), 0.25, 0.000001))
+
+    wynimg_free(c)
+    var k = 1
+    while k < 64 {
+        wynimg_free(live.get(k))
+        k = k + 1
+    }
+}
+
+test "copy_into across a table growth reads the correct source" {
+    // The same hazard in the other two-buffer path: copy_into does not itself
+    // allocate, but it holds two interior pointers at once, so it is the case a
+    // future refactor is most likely to break.
+    var live = [0]
+    var i = 0
+    while i < 70 {
+        live.push(wynimg_new(2, 2))
+        i = i + 1
+    }
+    var a = live.get(1)
+    var b = live.get(65)                       // allocated AFTER the growth
+    wynimg_fill(a, 0.3, 0.6, 0.9, 1.0)
+    wynimg_fill(b, 0.0, 0.0, 0.0, 0.0)
+    assert_eq(wynimg_copy_into(b, a), 1)
+    assert_true(pixel.approx(wynimg_get(b, 0), 0.3, 0.000001))
+    assert_true(pixel.approx(wynimg_get(b, 1), 0.6, 0.000001))
+    assert_true(pixel.approx(wynimg_max_diff(a, b), 0.0, 0.000001))
+    var k = 1
+    while k < 70 {
+        wynimg_free(live.get(k))
+        k = k + 1
+    }
+}

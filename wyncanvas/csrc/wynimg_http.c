@@ -25,6 +25,20 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <limits.h>
+
+// Wyn hands descriptors across as `long long`, and `int fd = (long long)v`
+// TRUNCATES. That is not a pedantic concern: measured before this guard,
+// wynimg_close_fd(4294967296) -- which is 2^32, a value with NO low bits set --
+// truncated to fd 0 and CLOSED STDIN, returning 1 to report success. The same
+// truncation let wynimg_http_send_file(2^32 + 3, ...) write a full HTTP response
+// into whatever fd 3 happened to be, and report success for that too.
+//
+// A descriptor arriving from Wyn is arithmetic that may have gone wrong (a
+// missing accept result is 0, an error is -1, an int overflow is anything), so
+// the range is checked rather than assumed. Refusing is always correct here:
+// both callers already treat 0 as failure.
+static int fd_ok(long long v) { return v >= 0 && v <= (long long)INT_MAX; }
 
 // write(), not send(). Two reasons, in order of importance:
 //
@@ -72,7 +86,7 @@ static int write_all(int fd, const char* p, size_t n) {
 
 long long wynimg_http_send_file(long long fd_ll, const char* path,
                                 const char* content_type) {
-    if (fd_ll < 0 || !path) return 0;
+    if (!fd_ok(fd_ll) || !path) return 0;
     int fd = (int)fd_ll;
 
     FILE* f = fopen(path, "rb");   // "rb", not "r" - the runtime's bug
@@ -127,7 +141,7 @@ long long wynimg_open_wr(const char* path) {
 }
 
 long long wynimg_close_fd(long long fd) {
-    if (fd < 0) return 0;
+    if (!fd_ok(fd)) return 0;
     return close((int)fd) == 0 ? 1 : 0;
 }
 

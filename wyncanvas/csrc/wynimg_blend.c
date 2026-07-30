@@ -2,11 +2,36 @@
 #include <math.h>
 #include <stddef.h>   // size_t, used by the compositor's offset arithmetic
 
+// NaN-SAFE, and that is the whole point of the ordering.
+//
+// The obvious form -- `if (v < 0) return 0; if (v > 1) return 1; return v;` --
+// passes NaN through UNTOUCHED, because both comparisons against NaN are false.
+// That is not a theoretical input: Wyn computes `0.0/0.0` to NaN in pure Wyn
+// (verified) and wynimg_set stores whatever float it is handed, so a NaN
+// reaches these kernels from ordinary user code.
+//
+// The consequence was measured before this guard: 26 of the 27 blend modes
+// returned NaN for a NaN operand, wynimg_composite wrote NaN into all four
+// channels of a destination pixel, and from there NaN spreads to every later
+// composite of that buffer -- a permanent, un-repaintable hole in the document
+// that no bounds check can catch, since a NaN pixel is neither <0 nor >1.
+//
+// Testing `v > 0.0` (rather than `v < 0.0`) makes the false branch the one NaN
+// takes, so NaN is mapped to 0 -- fully transparent / black, the same result an
+// out-of-range low value gets. Refusing to produce a value is not an option
+// here: this returns a double, and there is no error channel.
 static double clamp01d(double v) {
-    if (v < 0.0) return 0.0;
+    if (!(v > 0.0)) return 0.0;    // NaN lands here
     if (v > 1.0) return 1.0;
     return v;
 }
+
+// NaN -> 0, everything else untouched. Distinct from clamp01d because the
+// compositor must NOT clamp the values it reads out of a buffer -- an
+// un-premultiplied channel can legitimately exceed 1 and clamping it here would
+// change the arithmetic for valid data -- while a NaN must still be neutralised
+// before it can propagate into the destination and stay there forever.
+static double denan(double v) { return (v == v) ? v : 0.0; }
 
 // ColorDodge / ColorBurn as their own functions, because vivid_light is
 // *defined* in terms of them and must inherit their guard order exactly.
@@ -111,14 +136,23 @@ long long wynimg_composite(void* dstp, void* srcp, void* maskp,
     if (dst->w != src->w || dst->h != src->h) return 0;
     if (msk && (msk->w != dst->w || msk->h != dst->h)) return 0;
 
-    if (opacity < 0.0) opacity = 0.0;
-    if (opacity > 1.0) opacity = 1.0;
+    // clamp01d, not a hand-rolled pair of comparisons: a NaN opacity would slip
+    // through `if (opacity < 0) ... if (opacity > 1)` untouched and then NaN
+    // every alpha in the buffer. Measured before this change: a NaN opacity gave
+    // every destination pixel alpha = NaN.
+    opacity = clamp01d(opacity);
 
     long long n = dst->w * dst->h;
     for (long long i = 0; i < n; i++) {
         size_t o = (size_t)i * 4;
 
-        double sa = src->px[o+3];
+        // Source alpha is data, so it can be NaN (wynimg_set stores any float).
+        // denan, not clamp01d: an out-of-range-but-finite alpha keeps its
+        // existing treatment (the clamp below handles it), while NaN is removed
+        // here because it is what breaks the `alpha <= 0.0` guard -- that
+        // comparison is FALSE for NaN, so an unclamped NaN alpha sails past the
+        // skip and gets written into the destination.
+        double sa = denan(src->px[o+3]);
         double alpha = sa * opacity;
         if (msk) {
             // Mask R channel is coverage. It MUST be clamped: a mask whose R
@@ -132,16 +166,20 @@ long long wynimg_composite(void* dstp, void* srcp, void* maskp,
         if (alpha <= 0.0) continue;
         alpha = clamp01d(alpha);
 
-        double da = dst->px[o+3];
+        // Destination alpha weights the blend and appears in `1.0 - da`, so a
+        // NaN here would NaN the output even for a perfectly valid source.
+        double da = denan(dst->px[o+3]);
 
         // Un-premultiply both sides: blend formulas are defined on
-        // unpremultiplied colour.
-        double sr = (sa > 0.0) ? src->px[o+0] / sa : 0.0;
-        double sg = (sa > 0.0) ? src->px[o+1] / sa : 0.0;
-        double sb = (sa > 0.0) ? src->px[o+2] / sa : 0.0;
-        double dr = (da > 0.0) ? dst->px[o+0] / da : 0.0;
-        double dg = (da > 0.0) ? dst->px[o+1] / da : 0.0;
-        double db = (da > 0.0) ? dst->px[o+2] / da : 0.0;
+        // unpremultiplied colour. Colour channels are denan'd for the same
+        // reason as the alphas -- a single NaN channel in either buffer would
+        // otherwise poison all three output channels of this pixel.
+        double sr = (sa > 0.0) ? denan(src->px[o+0]) / sa : 0.0;
+        double sg = (sa > 0.0) ? denan(src->px[o+1]) / sa : 0.0;
+        double sb = (sa > 0.0) ? denan(src->px[o+2]) / sa : 0.0;
+        double dr = (da > 0.0) ? denan(dst->px[o+0]) / da : 0.0;
+        double dg = (da > 0.0) ? denan(dst->px[o+1]) / da : 0.0;
+        double db = (da > 0.0) ? denan(dst->px[o+2]) / da : 0.0;
 
         // W3C Compositing and Blending Level 1, sec. 9:
         //     Cr = (1 - ab) * Cs + ab * B(Cb, Cs)
@@ -178,15 +216,22 @@ long long wynimg_composite(void* dstp, void* srcp, void* maskp,
 long long wynimg_brightness(void* bufp, double amount) {
     WynImg* im = wynimg_deref(bufp);
     if (!im || !im->px) return 0;
+    // A NaN amount is REFUSED rather than absorbed. Unlike the compositor, this
+    // function has a return channel, and "adjust brightness by NaN" has no
+    // sensible interpretation -- silently treating it as 0 would report success
+    // for an operation the caller clearly did not mean. Before this guard a NaN
+    // amount NaN'd every colour channel in the buffer and still returned 1,
+    // because `if (v < 0.0)` and `if (v > 1.0)` are both false for NaN.
+    if (amount != amount) return 0;
     long long n = im->w * im->h;
     for (long long i = 0; i < n; i++) {
         size_t o = (size_t)i * 4;
         double a = im->px[o+3];
-        if (a <= 0.0) continue;
+        if (!(a > 0.0)) continue;     // NaN alpha takes the skip, not the maths
         for (int c = 0; c < 3; c++) {
-            double v = im->px[o+c] / a + amount;   // un-premultiply, adjust
-            if (v < 0.0) v = 0.0;
-            if (v > 1.0) v = 1.0;
+            // clamp01d, not two bare comparisons: a NaN already stored in the
+            // buffer must be normalised, not preserved.
+            double v = clamp01d(denan(im->px[o+c]) / a + amount);
             im->px[o+c] = (float)(v * a);          // re-premultiply
         }
     }

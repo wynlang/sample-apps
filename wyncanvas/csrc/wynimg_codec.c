@@ -7,14 +7,21 @@
 
 // sRGB transfer functions, duplicated here so the C side never calls back
 // into Wyn. Must stay numerically identical to src/pixel.wyn.
+// Both are NaN-safe by ordering: `!(v > 0.0)` is TRUE for NaN, so NaN exits at
+// the first line as 0 instead of falling through to pow(). It matters because
+// the write path casts the result to `unsigned char`, and converting a NaN to an
+// integer type is UNDEFINED BEHAVIOUR in C -- not merely a wrong byte. A NaN
+// pixel is reachable from pure Wyn (`0.0/0.0` then wynimg_set), and before this
+// guard `wynimg_save_png` on a buffer with one NaN channel executed that cast
+// and still returned 1.
 static double s2l(double v) {
-    if (v <= 0.0) return 0.0;
+    if (!(v > 0.0)) return 0.0;
     if (v >= 1.0) return 1.0;
     if (v <= 0.04045) return v / 12.92;
     return pow((v + 0.055) / 1.055, 2.4);
 }
 static double l2s(double v) {
-    if (v <= 0.0) return 0.0;
+    if (!(v > 0.0)) return 0.0;
     if (v >= 1.0) return 1.0;
     if (v <= 0.0031308) return v * 12.92;
     return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
@@ -173,8 +180,13 @@ long long wynimg_save_png(void* p, const char* path) {
     for (long long y = 0; y < im->h; y++) {
         for (long long x = 0; x < im->w; x++) {
             size_t o = ((size_t)y * im->w + x) * 4;
+            // `!(a > 0.0)` rather than `a < 0.0`, so a NaN alpha becomes 0 here
+            // instead of reaching the `(unsigned char)(a * 255.0 + 0.5)` cast
+            // below, which for NaN is undefined behaviour rather than a wrong
+            // byte. The two bare comparisons this replaces both evaluate false
+            // for NaN, so it passed straight through them.
             double a = im->px[o+3];
-            if (a < 0.0) a = 0.0;
+            if (!(a > 0.0)) a = 0.0;
             if (a > 1.0) a = 1.0;
             // Un-premultiply, then sRGB encode.
             double r = (a > 0.0) ? im->px[o+0] / a : 0.0;
