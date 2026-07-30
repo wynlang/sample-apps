@@ -337,10 +337,7 @@ fn vtostr_full(v: string) -> string {
         }
         return r
     }
-    if t == "o" {
-        var id = vdata(v).to_int()
-        return "[object Object]"
-    }
+    if t == "o" { return "[object Object]" }
     return vtostr(v)
 }
 
@@ -1635,10 +1632,9 @@ fn callfn(callee: string, args: [string]) -> string {
     var s1 = sdup(src); var p1 = pos; var t1 = tt; var v1 = sdup(tv)
     epush()
     // Bind this
-    var had_this = 0
     if this_depth > 0 {
         var t = this_stack[this_depth - 1]
-        if vtag(t) != "u" { edef("this", t); had_this = 1 }
+        if vtag(t) != "u" { edef("this", t) }
         this_pop()
     }
     // Bind params
@@ -1888,7 +1884,7 @@ fn p_primary() -> string {
         next()
         if tt == 31 { next(); if tt == 40 { next(); return p_arrow("") } return vundef() }
         if tt == 3 {
-            var id1 = tv; var sp = pos; var st = tt; var sv = tv
+            var id1 = tv; var sp = pos
             next()
             if tt == 31 or tt == 36 {
                 var params = id1
@@ -2214,10 +2210,8 @@ fn new_promise() -> string {
     fparams[resolve_fid] = "v"
     fbodies[resolve_fid] = ""
     fcnt = fcnt + 1
-    // Execute the executor synchronously
-    var resolve_val = vundef()
-    // We'll use a simple approach: executor calls resolve(v), we capture it
-    // Store promise id for resolve to find
+    // The executor runs synchronously; resolve/reject are tiny JS bodies that
+    // write the promise's internal slots through `this`.
     edef("__promise_oid__", vnum(oid))
     var rfid = fcnt
     fparams[rfid] = "v"
@@ -2446,7 +2440,6 @@ fn p_stmt() {
         next()
         if tt == 32 { next() }
         epush()
-        var saved_throw = throwflag
         throwflag = 0
         p_block_body()
         epop()
@@ -2953,7 +2946,7 @@ fn map_set_method(oid: int, prop: string) -> string {
     if type_s == "Set" {
         if prop == "add" { if tt == 30 { next(); var v = p_expr(); if tt == 31 { next() } oset(did, vtostr(v), v); return vobj(oid) } return vundef() }
         if prop == "has" { if tt == 30 { next(); var v = p_expr(); if tt == 31 { next() } return vbool(ohas(did, vtostr(v))) } return vundef() }
-        if prop == "delete" { if tt == 30 { next(); var v = p_expr(); if tt == 31 { next() } return vbool(1) } return vundef() }
+        if prop == "delete" { if tt == 30 { next(); p_expr(); if tt == 31 { next() } return vbool(1) } return vundef() }
         if prop == "size" { return vnum(olen(did)) }
         if prop == "forEach" {
             if tt == 30 { next(); var cb = p_expr(); if tt == 31 { next() }
