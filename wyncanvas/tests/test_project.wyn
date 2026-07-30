@@ -1,0 +1,585 @@
+// test_project - the layered document container (".wync").
+//
+// TWO THINGS ARE UNDER TEST, and they fail in opposite ways.
+//
+// 1. THE HAPPY PATH MUST BE EXACT. PNG export flattens and quantises to 8-bit
+//    sRGB; this container exists so that a saved session comes back UNCHANGED.
+//    So every float assertion below demands EQUALITY, not `pixel.approx`. The
+//    format stores raw float32 bytes through zlib, which is lossless on bytes,
+//    so a value that comes back merely CLOSE means something in the path went
+//    via a conversion (sRGB, double, 8-bit) - a bug, not a tolerance. A
+//    tolerance here would hide exactly the defect the format exists to prevent.
+//
+//    The comparison is against values read back out of the ORIGINAL buffer
+//    rather than against decimal literals, so the assertion is "these are the
+//    same float32", independent of whether 0.1 is representable.
+//
+//    EVERY FLOAT COMPARISON IS `assert_true(a == b)`, NEVER `assert_eq(a, b)`.
+//    That is not a style choice: `assert_eq` on floats lowers to
+//    `wyn_assert_eq_int` in the generated C, which TRUNCATES both sides to an
+//    integer, so any two values inside the same unit interval compare equal.
+//    `assert_eq(0.0, -0.1875)` passes. This was caught by mutation testing here
+//    - zeroing the adjustment-amount field in the writer left the whole suite
+//    green, because `assert_eq(amount, -0.1875)` was comparing 0 with 0. Under
+//    `==` the same mutation fails. Every sub-integer float assertion written
+//    with `assert_eq` anywhere in this project is vacuous. Reduced repro is in
+//    this task's report.
+//
+// 2. THE FAILURE PATHS MUST BE DISTINGUISHABLE. A format reader spends its life
+//    on damaged input, and a silent misparse of pixel data is unrecoverable -
+//    the user gets a plausible-looking document with shifted pixels and no way
+//    to tell. So each corruption gets its own code: a nonexistent path, wrong
+//    magic, a bumped version, truncation mid-pixel-data, truncation mid-header,
+//    an absurd layer count, a payload size that disagrees with the dimensions,
+//    and a corrupted zlib stream.
+//
+// THE CORRUPT FIXTURES ARE GENERATED, NOT COMMITTED. They are built here from a
+// known-good save by patching bytes (project.poke_byte) and by copying a prefix
+// (project.truncate_copy). Committing binary fixtures would put files in the
+// repo that nobody can review and that silently rot the moment the layout
+// changes; generating them means the fixture is always in step with the writer.
+//
+// Wyn cannot write these bytes itself: `File.write` routes through a
+// NUL-terminated C string, so it can neither emit an arbitrary byte nor patch
+// one in place - hence the two C test seams.
+//
+// NAMING: locals here avoid `name`, `count`, `mask`, `buffer`, `kind`,
+// `opacity`, `visible`, `load`, `save`. A local `var` whose name matches a
+// `pub fn` of any transitively-imported module (project imports layer, which
+// exports all of those) resolves as that function instead - a known v1.20.0
+// defect that yields "Cannot compare function with int".
+
+import pixel
+import layer
+import project
+
+// ---------------------------------------------------------------------------
+// Fixture: a 3-layer document with nothing left at its default.
+//
+// Distinct per-channel values, two non-default blend modes, a non-1.0 opacity,
+// one HIDDEN layer, one MASK, and one ADJUSTMENT layer (which has no pixels at
+// all). Everything a rebuild needs, and every field the writer emits.
+// ---------------------------------------------------------------------------
+
+// Document dimensions deliberately DIFFER from the layer buffer size, because
+// the document extent is not derivable from the layers: an all-adjustment
+// document has no buffer to measure at all.
+fn doc_w() -> int { return 40 }
+fn doc_h() -> int { return 24 }
+
+fn buf_w() -> int { return 8 }
+fn buf_h() -> int { return 8 }
+
+// Writes a recognisable, NON-uniform pattern: a per-index ramp so that a
+// reader which shifted the data by one pixel, or transposed it, cannot pass.
+// A solid fill would survive almost any indexing bug.
+fn paint_pattern(b: int, seed: float) {
+    var n = buf_w() * buf_h() * 4
+    var i = 0
+    while i < n {
+        wynimg_set(b, i, seed + i.to_float() / 1024.0)
+        i = i + 1
+    }
+}
+
+fn build_doc() -> int {
+    layer.store_new()
+
+    // Bottom: raster, multiply, 37.5% opacity, visible, no mask.
+    var b0 = wynimg_new(buf_w(), buf_h())
+    paint_pattern(b0, 0.125)
+    var id0 = layer.add("base plate", b0, layer.KIND_RASTER())
+    layer.set_blend_mode(id0, 1)          // multiply
+    layer.set_opacity(id0, 0.375)
+    layer.set_visible(id0, true)
+
+    // Middle: raster, screen, HIDDEN, WITH a mask.
+    var b1 = wynimg_new(buf_w(), buf_h())
+    paint_pattern(b1, 0.5)
+    var id1 = layer.add("glow pass", b1, layer.KIND_RASTER())
+    layer.set_blend_mode(id1, 2)          // screen
+    layer.set_opacity(id1, 0.8125)
+    layer.set_visible(id1, false)         // the hidden one
+    var m1 = wynimg_new(buf_w(), buf_h())
+    paint_pattern(m1, 0.0625)             // coverage, not colour
+    layer.set_mask(id1, m1)
+
+    // Top: an ADJUSTMENT layer. No pixels of its own - the whole point of the
+    // non-destructive model - so has_pix must be 0 on disk and its amount must
+    // survive, including a negative one.
+    var id2 = layer.add("darken all", 0, layer.KIND_ADJUST_BRIGHTNESS())
+    layer.set_blend_mode(id2, 3)          // overlay
+    layer.set_opacity(id2, 0.625)
+    layer.set_visible(id2, true)
+    layer.set_adjust_amount(id2, 0.0 - 0.1875)
+
+    return 1
+}
+
+// ---------------------------------------------------------------------------
+// Round trip
+// ---------------------------------------------------------------------------
+
+test "a 3-layer document round-trips every property" {
+    assert_eq(build_doc(), 1)
+    var p_path = "/tmp/wyncanvas_proj_rt.wync"
+    assert_eq(project.save(p_path, doc_w(), doc_h()), 0)
+    assert_true(project.file_len(p_path) > 20)
+
+    assert_eq(project.load(p_path), 0)
+    assert_eq(project.doc_width(), doc_w())
+    assert_eq(project.doc_height(), doc_h())
+    assert_eq(project.layer_count(), 3)
+
+    // Bottom layer: order is file order, so index 0 must still be the base.
+    assert_eq(project.layer_name(0), "base plate")
+    assert_eq(project.layer_kind(0), layer.KIND_RASTER())
+    assert_eq(project.layer_blend(0), 1)
+    assert_true(project.layer_opacity(0) == 0.375)
+    assert_true(project.layer_visible(0))
+    assert_true(project.layer_amount(0) == 0.0)
+    assert_true(project.layer_buffer(0) != 0)
+    assert_eq(project.layer_mask(0), 0)
+
+    // Middle layer: hidden, masked, screen.
+    assert_eq(project.layer_name(1), "glow pass")
+    assert_eq(project.layer_blend(1), 2)
+    assert_true(project.layer_opacity(1) == 0.8125)
+    assert_false(project.layer_visible(1))       // stayed hidden
+    assert_true(project.layer_buffer(1) != 0)
+    assert_true(project.layer_mask(1) != 0)      // the mask came back
+
+    // Top layer: an adjustment, so NO pixels, and a negative amount.
+    assert_eq(project.layer_name(2), "darken all")
+    assert_eq(project.layer_kind(2), layer.KIND_ADJUST_BRIGHTNESS())
+    assert_eq(project.layer_blend(2), 3)
+    assert_true(project.layer_opacity(2) == 0.625)
+    assert_true(project.layer_visible(2))
+    assert_true(project.layer_amount(2) == 0.0 - 0.1875)
+    assert_eq(project.layer_buffer(2), 0)        // adjustment layers store none
+    assert_eq(project.layer_mask(2), 0)
+
+    project.release()
+}
+
+// BIT-IDENTICAL, not approximate. zlib is lossless on bytes and the pixels are
+// written as raw float32, so equality is the correct assertion; a near-miss
+// would mean the data went through a conversion.
+//
+// wynimg_max_diff compares every channel of the whole buffer and returns an
+// impossible 2.0 if the dimensions differ, so "0.0 difference" here means all
+// 256 channels AND both dimensions match - which a spot check of pixel 0 would
+// not.
+test "loaded pixels are bit-identical to the saved pixels" {
+    assert_eq(build_doc(), 1)
+    var p_path = "/tmp/wyncanvas_proj_px.wync"
+
+    // Sample the original before saving. These are the widened float32s that
+    // are actually stored, so comparing against them tests the round trip
+    // rather than the representability of a decimal literal.
+    var orig0 = wynimg_get(layer.buffer(0), 0)
+    var orig7 = wynimg_get(layer.buffer(0), 7)
+    var origlast = wynimg_get(layer.buffer(0), buf_w() * buf_h() * 4 - 1)
+    var origmask = wynimg_get(layer.mask(1), 3)
+
+    assert_eq(project.save(p_path, doc_w(), doc_h()), 0)
+    assert_eq(project.load(p_path), 0)
+
+    var got0 = project.layer_buffer(0)
+    assert_eq(wynimg_width(got0), buf_w())
+    assert_eq(wynimg_height(got0), buf_h())
+    assert_true(wynimg_get(got0, 0) == orig0)
+    assert_true(wynimg_get(got0, 7) == orig7)
+    assert_true(wynimg_get(got0, buf_w() * buf_h() * 4 - 1) == origlast)
+
+    // Whole-buffer equality for all three buffers, against the live originals.
+    assert_true(wynimg_max_diff(got0, layer.buffer(0)) == 0.0)
+    assert_true(wynimg_max_diff(project.layer_buffer(1), layer.buffer(1)) == 0.0)
+    assert_true(wynimg_max_diff(project.layer_mask(1), layer.mask(1)) == 0.0)
+    assert_true(wynimg_get(project.layer_mask(1), 3) == origmask)
+
+    project.release()
+}
+
+// A document with no pixels at all is a real case (an adjustment-only stack)
+// and is where an "infer the size from layer 0" writer would lose the canvas.
+test "an adjustment-only document keeps its canvas size" {
+    layer.store_new()
+    var idx = layer.add("just brighter", 0, layer.KIND_ADJUST_BRIGHTNESS())
+    layer.set_adjust_amount(idx, 0.25)
+    var p_path = "/tmp/wyncanvas_proj_adj.wync"
+    assert_eq(project.save(p_path, 320, 200), 0)
+
+    assert_eq(project.load(p_path), 0)
+    assert_eq(project.doc_width(), 320)
+    assert_eq(project.doc_height(), 200)
+    assert_eq(project.layer_count(), 1)
+    assert_eq(project.layer_buffer(0), 0)
+    assert_true(project.layer_amount(0) == 0.25)
+    project.release()
+}
+
+// ---------------------------------------------------------------------------
+// Ownership
+// ---------------------------------------------------------------------------
+
+// `take` transfers ONE handle out and `release` frees the rest. Getting this
+// wrong is either a leak of a whole document's pixels or a double free, and
+// both are invisible to a property round-trip test.
+test "take transfers a handle and release frees the rest" {
+    assert_eq(build_doc(), 1)
+    var p_path = "/tmp/wyncanvas_proj_own.wync"
+    assert_eq(project.save(p_path, doc_w(), doc_h()), 0)
+    assert_eq(project.load(p_path), 0)
+
+    var kept = project.take_buffer(0)
+    assert_true(kept != 0)
+    assert_eq(wynimg_alive(kept), 1)
+    // A second take must NOT hand out the same buffer again: two owners of one
+    // handle is a double free waiting for the next wynimg_free.
+    assert_eq(project.take_buffer(0), 0)
+
+    // Borrowed handles, captured before release so their fate can be checked.
+    var dropped = project.layer_buffer(1)
+    var droppedmask = project.layer_mask(1)
+    assert_eq(wynimg_alive(dropped), 1)
+    assert_eq(wynimg_alive(droppedmask), 1)
+
+    project.release()
+    assert_eq(wynimg_alive(kept), 1)          // taken: still ours
+    assert_eq(wynimg_alive(dropped), 0)       // not taken: freed
+    assert_eq(wynimg_alive(droppedmask), 0)
+
+    // release is idempotent, so a caller can call it on both paths.
+    project.release()
+    assert_eq(project.layer_count(), 0)
+    wynimg_free(kept)
+}
+
+// The whole point of the format: a caller can rebuild the layer store from what
+// load reports, without this module touching src/layer.wyn.
+test "the reported table is enough to rebuild the stack" {
+    assert_eq(build_doc(), 1)
+    var p_path = "/tmp/wyncanvas_proj_rebuild.wync"
+    var wantmask = wynimg_get(layer.mask(1), 5)
+    assert_eq(project.save(p_path, doc_w(), doc_h()), 0)
+    assert_eq(project.load(p_path), 0)
+
+    layer.store_new()
+    var i = 0
+    while i < project.layer_count() {
+        var idx = layer.add(project.layer_name(i), project.take_buffer(i),
+                            project.layer_kind(i))
+        layer.set_blend_mode(idx, project.layer_blend(i))
+        layer.set_opacity(idx, project.layer_opacity(i))
+        layer.set_visible(idx, project.layer_visible(i))
+        layer.set_adjust_amount(idx, project.layer_amount(i))
+        layer.set_mask(idx, project.take_mask(i))
+        i = i + 1
+    }
+    project.release()
+
+    assert_eq(layer.count(), 3)
+    assert_eq(layer.name(0), "base plate")
+    assert_eq(layer.blend_mode(0), 1)
+    assert_true(layer.opacity(0) == 0.375)
+    assert_false(layer.visible(1))
+    assert_true(layer.adjust_amount(2) == 0.0 - 0.1875)
+    // The rebuilt stack owns live buffers, not the freed ones.
+    assert_eq(wynimg_alive(layer.buffer(0)), 1)
+    assert_eq(wynimg_alive(layer.mask(1)), 1)
+    assert_true(wynimg_get(layer.mask(1), 5) == wantmask)
+}
+
+// ---------------------------------------------------------------------------
+// Failure modes. Each gets its OWN code.
+// ---------------------------------------------------------------------------
+
+test "a nonexistent path is E_OPEN_READ, not a crash" {
+    assert_eq(project.load("/tmp/wyncanvas_no_such_project_8c1f.wync"),
+              project.E_OPEN_READ())
+    assert_eq(project.layer_count(), 0)
+    assert_eq(project.doc_width(), 0)
+}
+
+test "an unwritable path is E_OPEN_WRITE and clears the staging area" {
+    assert_eq(build_doc(), 1)
+    assert_eq(project.save("/nonexistent_dir_x7/doc.wync", doc_w(), doc_h()),
+              project.E_OPEN_WRITE())
+    // The next save must not inherit the abandoned document's layers.
+    layer.store_new()
+    var solo = wynimg_new(4, 4)
+    wynimg_fill(solo, 0.5, 0.5, 0.5, 1.0)
+    layer.add("only", solo, layer.KIND_RASTER())
+    var p_path = "/tmp/wyncanvas_proj_after_fail.wync"
+    assert_eq(project.save(p_path, 4, 4), 0)
+    assert_eq(project.load(p_path), 0)
+    assert_eq(project.layer_count(), 1)
+    project.release()
+}
+
+// Header layout (see csrc/wynimg_proj.c): magic at 0, version at 4, doc width
+// at 8, doc height at 12, layer count at 16.
+test "wrong magic is E_MAGIC" {
+    assert_eq(build_doc(), 1)
+    var good = "/tmp/wyncanvas_proj_good.wync"
+    assert_eq(project.save(good, doc_w(), doc_h()), 0)
+
+    var bad = "/tmp/wyncanvas_proj_badmagic.wync"
+    assert_true(project.truncate_copy(good, bad, project.file_len(good)) > 20)
+    assert_eq(project.poke_byte(bad, 0, 88), 1)          // 'W' -> 'X'
+    assert_eq(project.load(bad), project.E_MAGIC())
+    assert_eq(project.layer_count(), 0)
+}
+
+// A version this build does not understand must be REFUSED. Reading a future
+// layout with today's field offsets would misparse the pixel lengths and hand
+// back a plausible-looking but corrupt document.
+test "a bumped version byte is E_VERSION, never a guess" {
+    assert_eq(build_doc(), 1)
+    var good = "/tmp/wyncanvas_proj_v1.wync"
+    assert_eq(project.save(good, doc_w(), doc_h()), 0)
+    assert_eq(project.format_version(), 1)
+
+    var bumped = "/tmp/wyncanvas_proj_v99.wync"
+    assert_true(project.truncate_copy(good, bumped, project.file_len(good)) > 20)
+    assert_eq(project.poke_byte(bumped, 4, 99), 1)       // version int32 LSB
+    assert_eq(project.load(bumped), project.E_VERSION())
+    assert_eq(project.layer_count(), 0)
+
+    // ...and the untouched file still loads, so the check is on the version
+    // field and not on the copy having broken something.
+    assert_eq(project.load(good), 0)
+    assert_eq(project.layer_count(), 3)
+    project.release()
+}
+
+// Truncation mid-pixel-data must fail AT the truncation, not read past the
+// buffer. The last bytes of the file are the top raster layer's zlib stream, so
+// dropping four of them leaves a declared compressed length larger than the
+// bytes that remain.
+test "truncation mid-pixel-data is E_TRUNCATED" {
+    assert_eq(build_doc(), 1)
+    var good = "/tmp/wyncanvas_proj_full.wync"
+    assert_eq(project.save(good, doc_w(), doc_h()), 0)
+    var n = project.file_len(good)
+    assert_true(n > 24)
+
+    var cut = "/tmp/wyncanvas_proj_cut.wync"
+    assert_eq(project.truncate_copy(good, cut, n - 4), n - 4)
+    assert_eq(project.load(cut), project.E_TRUNCATED())
+    assert_eq(project.layer_count(), 0)
+}
+
+// Truncation in the HEADER takes a different path (the fixed fields), so it is
+// asserted separately rather than assumed to be covered by the above.
+test "truncation mid-header is E_TRUNCATED" {
+    assert_eq(build_doc(), 1)
+    var good = "/tmp/wyncanvas_proj_hdr.wync"
+    assert_eq(project.save(good, doc_w(), doc_h()), 0)
+
+    var stub = "/tmp/wyncanvas_proj_hdrcut.wync"
+    assert_eq(project.truncate_copy(good, stub, 10), 10)  // magic + version + 2
+    assert_eq(project.load(stub), project.E_TRUNCATED())
+
+    // An empty file cannot even hold the magic.
+    var empty = "/tmp/wyncanvas_proj_empty.wync"
+    assert_eq(project.truncate_copy(good, empty, 0), 0)
+    assert_eq(project.load(empty), project.E_TRUNCATED())
+}
+
+// The check that must happen BEFORE the allocation: a corrupt layer count of
+// 0x7FFFFFFF is an error return, not a two-billion-element calloc.
+test "an absurd layer count is refused before allocating" {
+    assert_eq(build_doc(), 1)
+    var good = "/tmp/wyncanvas_proj_lc.wync"
+    assert_eq(project.save(good, doc_w(), doc_h()), 0)
+
+    var huge = "/tmp/wyncanvas_proj_lchuge.wync"
+    assert_true(project.truncate_copy(good, huge, project.file_len(good)) > 20)
+    assert_eq(project.poke_byte(huge, 16, 255), 1)
+    assert_eq(project.poke_byte(huge, 17, 255), 1)
+    assert_eq(project.poke_byte(huge, 18, 255), 1)
+    assert_eq(project.poke_byte(huge, 19, 127), 1)       // 0x7FFFFFFF layers
+    assert_eq(project.load(huge), project.E_LAYER_COUNT())
+    assert_eq(project.layer_count(), 0)
+}
+
+test "a zero document dimension is E_DIMENSIONS" {
+    assert_eq(build_doc(), 1)
+    var good = "/tmp/wyncanvas_proj_dim.wync"
+    assert_eq(project.save(good, doc_w(), doc_h()), 0)
+
+    var zero = "/tmp/wyncanvas_proj_dimzero.wync"
+    assert_true(project.truncate_copy(good, zero, project.file_len(good)) > 20)
+    assert_eq(project.poke_byte(zero, 8, 0), 1)          // width int32 = 0
+    assert_eq(project.poke_byte(zero, 9, 0), 1)
+    assert_eq(project.poke_byte(zero, 10, 0), 1)
+    assert_eq(project.poke_byte(zero, 11, 0), 1)
+    assert_eq(project.load(zero), project.E_DIMENSIONS())
+}
+
+// A corrupt name length must be bounded before the malloc that consumes it.
+test "an absurd name length is refused" {
+    layer.store_new()
+    var b = wynimg_new(4, 4)
+    wynimg_fill(b, 0.25, 0.5, 0.75, 1.0)
+    layer.add("L", b, layer.KIND_RASTER())
+    var good = "/tmp/wyncanvas_proj_nl.wync"
+    assert_eq(project.save(good, 4, 4), 0)
+
+    var bad = "/tmp/wyncanvas_proj_nlbad.wync"
+    assert_true(project.truncate_copy(good, bad, project.file_len(good)) > 20)
+    // Layer 0's name-length int32 sits at offset 20, straight after the header.
+    assert_eq(project.poke_byte(bad, 20, 255), 1)
+    assert_eq(project.poke_byte(bad, 21, 255), 1)
+    assert_eq(project.poke_byte(bad, 22, 255), 1)
+    assert_eq(project.poke_byte(bad, 23, 15), 1)         // ~268M byte name
+    assert_eq(project.load(bad), project.E_NAME_LEN())
+
+    // A merely IMPLAUSIBLE length - under the cap but longer than the whole
+    // file - is truncation, and must not become a 3000-byte read past the end.
+    var short_p = "/tmp/wyncanvas_proj_nlshort.wync"
+    assert_true(project.truncate_copy(good, short_p, project.file_len(good)) > 20)
+    assert_eq(project.poke_byte(short_p, 20, 184), 1)    // 0x0BB8 = 3000
+    assert_eq(project.poke_byte(short_p, 21, 11), 1)
+    assert_eq(project.poke_byte(short_p, 22, 0), 1)
+    assert_eq(project.poke_byte(short_p, 23, 0), 1)
+    assert_eq(project.load(short_p), project.E_TRUNCATED())
+}
+
+// A file that disagrees with ITSELF is the dangerous case: the dimensions say
+// one payload size and the stored raw length says another, so inflating would
+// write the wrong number of bytes into a correctly-sized buffer and produce a
+// shifted image. That must be an error, not a best effort.
+//
+// Offsets for a single layer whose name is one byte ("L"):
+//   20 name_len(4) 24 name(1) 25 kind(4) 29 blend(4) 33 opacity(4)
+//   37 visible(4) 41 amount(4) 45 has_pix(4) 49 has_mask(4)
+//   53 blob_w(4) 57 blob_h(4) 61 raw(8) 69 comp(8) 77 payload
+test "a payload size that disagrees with the dimensions is refused" {
+    layer.store_new()
+    var b = wynimg_new(4, 4)
+    wynimg_fill(b, 0.25, 0.5, 0.75, 1.0)
+    layer.add("L", b, layer.KIND_RASTER())
+    var good = "/tmp/wyncanvas_proj_ps.wync"
+    assert_eq(project.save(good, 4, 4), 0)
+    assert_true(project.file_len(good) > 77)
+    assert_eq(project.load(good), 0)                     // the fixture is valid
+    project.release()
+
+    var bad = "/tmp/wyncanvas_proj_psbad.wync"
+    assert_true(project.truncate_copy(good, bad, project.file_len(good)) > 77)
+    // 4*4*4*4 = 256 raw bytes; make the LSB of `raw` say 255 instead.
+    assert_eq(project.poke_byte(bad, 61, 255), 1)
+    assert_eq(project.load(bad), project.E_PAYLOAD_SIZE())
+    assert_eq(project.layer_count(), 0)
+}
+
+// THE LENGTH IS CHECKED BEFORE IT IS USED TO ALLOCATE. A corrupt compressed
+// length is the one field a reader would otherwise hand straight to malloc, so
+// this asserts the ORDER of the two operations, not just that loading fails:
+// with the "comp vs bytes remaining" bound in place the answer is E_TRUNCATED,
+// and with it removed the same file answers E_MEMORY - measured - because the
+// reader got as far as attempting a 2^55-byte allocation before noticing. Both
+// are non-zero, so a test that only asserted "it failed" would pass either way.
+//
+// Offsets for a single layer with a one-byte name, per csrc/wynimg_proj.c:
+// the blob's `comp` int64 starts at 69, so byte 75 is its second-highest.
+test "a corrupt compressed length is refused before allocating" {
+    layer.store_new()
+    var b = wynimg_new(4, 4)
+    wynimg_fill(b, 0.25, 0.5, 0.75, 1.0)
+    layer.add("L", b, layer.KIND_RASTER())
+    var good = "/tmp/wyncanvas_proj_cl.wync"
+    assert_eq(project.save(good, 4, 4), 0)
+    var n = project.file_len(good)
+    assert_true(n > 77)
+
+    var bad = "/tmp/wyncanvas_proj_clbad.wync"
+    assert_eq(project.truncate_copy(good, bad, n), n)
+    assert_eq(project.poke_byte(bad, 75, 1), 1)          // comp = 2^56 bytes
+    assert_eq(project.load(bad), project.E_TRUNCATED())
+    assert_eq(project.layer_count(), 0)
+}
+
+// A corrupt compressed stream is its own code, so the UI can say "damaged
+// pixels" rather than "damaged file". The final byte of the file is inside the
+// last zlib stream's adler32 trailer, so flipping it is a guaranteed data error
+// rather than a probabilistic one.
+test "a corrupted zlib stream is E_ZLIB" {
+    layer.store_new()
+    var b = wynimg_new(4, 4)
+    wynimg_fill(b, 0.25, 0.5, 0.75, 1.0)
+    layer.add("L", b, layer.KIND_RASTER())
+    var good = "/tmp/wyncanvas_proj_z.wync"
+    assert_eq(project.save(good, 4, 4), 0)
+
+    var bad = "/tmp/wyncanvas_proj_zbad.wync"
+    var n = project.file_len(good)
+    assert_eq(project.truncate_copy(good, bad, n), n)
+    assert_eq(project.poke_byte(bad, n - 1, 170), 1)
+    assert_eq(project.poke_byte(bad, n - 2, 85), 1)
+    assert_eq(project.load(bad), project.E_ZLIB())
+    assert_eq(project.layer_count(), 0)
+}
+
+// A code the caller cannot explain is a code the caller cannot act on, so every
+// one has its own message and none collide.
+test "every error code has its own message" {
+    assert_eq(project.error_message(project.OK()), "ok")
+    assert_true(project.error_message(project.E_MAGIC())
+                != project.error_message(project.E_VERSION()))
+    assert_true(project.error_message(project.E_TRUNCATED())
+                != project.error_message(project.E_ZLIB()))
+    assert_true(project.error_message(project.E_LAYER_COUNT())
+                != project.error_message(project.E_NAME_LEN()))
+    assert_true(project.error_message(project.E_PAYLOAD_SIZE())
+                != project.error_message(project.E_DIMENSIONS()))
+    assert_eq(project.error_message(4242), "unknown project error")
+}
+
+// The codes must be DISTINCT integers, not just distinct strings - the caller
+// branches on the number.
+test "the error codes are distinct non-zero integers" {
+    var codes = [project.E_OPEN_READ(), project.E_MAGIC(), project.E_VERSION(),
+                 project.E_TRUNCATED(), project.E_DIMENSIONS(),
+                 project.E_LAYER_COUNT(), project.E_NAME_LEN(),
+                 project.E_ZLIB(), project.E_PAYLOAD_SIZE(),
+                 project.E_WRITE(), project.E_OPEN_WRITE()]
+    var i = 0
+    while i < codes.len() {
+        assert_true(codes[i] != 0)
+        var j = i + 1
+        while j < codes.len() {
+            assert_true(codes[i] != codes[j])
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// zlib is not decoration at this size: float32 RGBA is 16 bytes/pixel, so a
+// 256x256 layer is 1 MiB raw. A gradient (not a solid fill, which compresses to
+// almost nothing and would prove little) must still land far under the raw size.
+test "pixel data is compressed, not stored raw" {
+    layer.store_new()
+    var big = wynimg_new(256, 256)
+    var n = 256 * 256 * 4
+    var i = 0
+    while i < n {
+        wynimg_set(big, i, (i % 512).to_float() / 512.0)
+        i = i + 1
+    }
+    layer.add("gradient", big, layer.KIND_RASTER())
+    var p_path = "/tmp/wyncanvas_proj_big.wync"
+    assert_eq(project.save(p_path, 256, 256), 0)
+
+    var raw = 256 * 256 * 4 * 4                 // 1048576 bytes of float32
+    assert_true(project.file_len(p_path) < raw / 2)
+
+    // Lossless all the same: bit-identical after the compressed round trip.
+    assert_eq(project.load(p_path), 0)
+    assert_true(wynimg_max_diff(project.layer_buffer(0), big) == 0.0)
+    project.release()
+}

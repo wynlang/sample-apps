@@ -1,0 +1,226 @@
+// project - save and load a LAYERED WynCanvas document (".wync").
+//
+// PNG export flattens. This does not: an edit session saved here and reopened
+// still has its layer stack, per-layer blend modes, opacities, visibility,
+// adjustment amounts and masks. That is the difference between an export format
+// and a document format, and it is the reason a separate container exists at
+// all. The format itself, its versioning, and every bounds check live in
+// csrc/wynimg_proj.c - read the long comment at the top of that file for the
+// on-disk layout and for why this is WynCanvas's own container rather than PSD.
+//
+// PIXELS NEVER ENTER WYN. A Wyn array cell is a 16-byte tagged union, so a 4MP
+// float32 RGBA document would be ~256MB of tagged cells to move a 64MB buffer.
+// C compresses straight out of the pixel memory and inflates straight into it;
+// Wyn passes a path, some scalars, and opaque handles.
+//
+// SAVE IS STAGED, NOT ONE CALL, for the same reason src/layer.wyn is parallel
+// arrays: Wyn cannot hand C an array of layer records. So the stack is walked
+// here and pushed row by row - `save_begin`, one `save_layer` per row,
+// `save_finish` - and C owns the staging.
+//
+// LOAD RETURNS A TABLE, NOT A REBUILT STORE. This module deliberately does NOT
+// write into src/layer.wyn. Rebuilding the layer store is the integrator's job
+// (src/ui.wyn already owns "clear the stack and rebuild the widget table"), and
+// a loader that mutated the store would have to decide what happens to the
+// handles of the document being replaced - a policy question the loader has no
+// business answering. Instead `load` populates a result table in C and the
+// accessors below report every property a caller needs to rebuild it.
+//
+// OWNERSHIP OF LOADED BUFFERS. The result table owns the buffers it inflated.
+// `take_buffer`/`take_mask` transfer ONE handle out (and yield 0 on a second
+// call, because handing the same buffer to two owners is how a double free
+// happens); `release` frees everything not taken. A caller that only inspects a
+// file calls `release` and leaks nothing.
+//
+// CALL CONVENTION -- v1.20.0 codegen constraint, see the note in src/render.wyn.
+// Every `pub fn` here reaches C through `wynproj::name(...)`, which is the only
+// spelling that lowers to the real C symbol from inside a module.
+//
+// FFI CONTRACT: Wyn `int` <-> C `long long`, Wyn `float` <-> C `double`, and
+// handles are spelled `int` (never `ptr`, which emits the undefined C type
+// `project_ptr` in a module signature).
+
+import layer
+
+// ---- the C container ------------------------------------------------------
+//
+// Save is staged: begin, one layer at a time, finish. Compression happens per
+// layer at staging time, so peak memory is one compressed blob rather than the
+// whole document twice, and a buffer freed between staging and finish cannot
+// turn a staged layer into an empty one.
+extern fn wynproj_save_begin(w: int, h: int) -> int;
+extern fn wynproj_save_layer(name: string, kind: int, blend: int, opacity: float,
+                             visible: int, amount: float, buf: int, mask: int) -> int;
+extern fn wynproj_save_finish(path: string) -> int;
+
+extern fn wynproj_load(path: string) -> int;
+extern fn wynproj_doc_width() -> int;
+extern fn wynproj_doc_height() -> int;
+extern fn wynproj_layer_count() -> int;
+extern fn wynproj_layer_name(i: int) -> string;
+extern fn wynproj_layer_kind(i: int) -> int;
+extern fn wynproj_layer_blend(i: int) -> int;
+extern fn wynproj_layer_opacity(i: int) -> float;
+extern fn wynproj_layer_visible(i: int) -> int;
+extern fn wynproj_layer_amount(i: int) -> float;
+extern fn wynproj_layer_buffer(i: int) -> int;
+extern fn wynproj_layer_mask(i: int) -> int;
+extern fn wynproj_take_buffer(i: int) -> int;
+extern fn wynproj_take_mask(i: int) -> int;
+extern fn wynproj_release();
+extern fn wynproj_error_message(code: int) -> string;
+extern fn wynproj_version() -> int;
+
+extern fn wynproj_err_open_read() -> int;
+extern fn wynproj_err_magic() -> int;
+extern fn wynproj_err_version() -> int;
+extern fn wynproj_err_truncated() -> int;
+extern fn wynproj_err_dimensions() -> int;
+extern fn wynproj_err_layer_count() -> int;
+extern fn wynproj_err_name_len() -> int;
+extern fn wynproj_err_zlib() -> int;
+extern fn wynproj_err_payload_size() -> int;
+extern fn wynproj_err_write() -> int;
+extern fn wynproj_err_open_write() -> int;
+
+// Test seams for the corrupt-file cases. Wyn's `File.write` routes through a
+// NUL-terminated C string, so it can neither emit an arbitrary byte nor patch
+// one in place - which means the failure modes that matter most in a format
+// reader would be untestable from Wyn. These build the damaged fixtures from a
+// good file instead of committing binary blobs nobody can review.
+extern fn wynproj_poke_byte(path: string, off: int, val: int) -> int;
+extern fn wynproj_truncate_copy(src: string, dst: string, len: int) -> int;
+extern fn wynproj_file_len(path: string) -> int;
+
+// ---- error codes ----------------------------------------------------------
+//
+// Every failure mode is its own code, because "loading failed" is not
+// actionable: the UI must be able to tell "this file is newer than I
+// understand" (offer an upgrade) from "these bytes are damaged" (offer the
+// backup) from "I cannot open that path" (offer a file dialog). A single
+// boolean would collapse all three into the same useless dialog.
+
+pub fn OK() -> int { return 0 }
+pub fn E_OPEN_READ() -> int    { return wynproj::err_open_read() }
+pub fn E_MAGIC() -> int        { return wynproj::err_magic() }
+pub fn E_VERSION() -> int      { return wynproj::err_version() }
+pub fn E_TRUNCATED() -> int    { return wynproj::err_truncated() }
+pub fn E_DIMENSIONS() -> int   { return wynproj::err_dimensions() }
+pub fn E_LAYER_COUNT() -> int  { return wynproj::err_layer_count() }
+pub fn E_NAME_LEN() -> int     { return wynproj::err_name_len() }
+pub fn E_ZLIB() -> int         { return wynproj::err_zlib() }
+pub fn E_PAYLOAD_SIZE() -> int { return wynproj::err_payload_size() }
+pub fn E_WRITE() -> int        { return wynproj::err_write() }
+pub fn E_OPEN_WRITE() -> int   { return wynproj::err_open_write() }
+
+// The format version this build writes and is willing to read.
+pub fn format_version() -> int { return wynproj::version() }
+
+// A code turned into something a user can act on.
+// Interpolated for the same borrow-not-copy reason as `layer_name`. These
+// messages point at static string literals in C so they never dangle, but going
+// through the same wrapper means the safe idiom is the one habit in this file
+// rather than a case-by-case judgement.
+pub fn error_message(code: int) -> string { return "${wynproj::error_message(code)}" }
+
+// ---- save -----------------------------------------------------------------
+
+// Writes the CURRENT layer stack (src/layer.wyn, bottom row first) to `path`.
+// Returns 0 on success, else an E_* code.
+//
+// `w`/`h` are the DOCUMENT dimensions, which are not derivable from the layers:
+// an all-adjustment-layer document has no pixel buffer to measure, and a layer
+// buffer is allowed to differ from the canvas. Per-layer buffer dimensions are
+// stored alongside each layer's pixels, so a load restores both.
+//
+// The walk stops at the first staging failure and still calls `save_finish`, so
+// the staging area is cleared rather than left holding a partial document that
+// would bleed into the next save.
+pub fn save(path: string, w: int, h: int) -> int {
+    var rc = wynproj::save_begin(w, h)
+    if rc != 0 {
+        wynproj::save_finish(path)
+        return rc
+    }
+
+    var i = 0
+    while i < layer.count() {
+        var vis = 0
+        if layer.visible(i) { vis = 1 }
+        rc = wynproj::save_layer(layer.name(i), layer.kind(i), layer.blend_mode(i),
+                                 layer.opacity(i), vis, layer.adjust_amount(i),
+                                 layer.buffer(i), layer.mask(i))
+        if rc != 0 {
+            wynproj::save_finish(path)
+            return rc
+        }
+        i = i + 1
+    }
+    return wynproj::save_finish(path)
+}
+
+// ---- load -----------------------------------------------------------------
+
+// Reads `path` into the result table. Returns 0 on success, else an E_* code.
+//
+// On failure NOTHING is left allocated and the accessors report an empty
+// document, so a caller that ignores the code sees zero layers rather than a
+// half-parsed stack. On success the caller must eventually `release()` (after
+// `take_*`-ing whatever it keeps).
+pub fn load(path: string) -> int { return wynproj::load(path) }
+
+pub fn doc_width() -> int   { return wynproj::doc_width() }
+pub fn doc_height() -> int  { return wynproj::doc_height() }
+pub fn layer_count() -> int { return wynproj::layer_count() }
+
+// THE `"${...}"` IS LOAD-BEARING, not formatting. Wyn BORROWS the `char*` from
+// an `extern fn -> string` instead of copying it, so the Wyn string aliases C
+// memory. `var n = project.layer_name(0)` followed by `project.release()` (or by
+// the next `project.load`) then reads freed memory: measured, the assertion
+// `layer.name(0) == "base plate"` got a single replacement character back after
+// a release, and a two-file repro shows a stored name reading as the bytes the C
+// side later wrote over it. Interpolation forces a real copy, which is what a
+// caller storing the name into src/layer.wyn needs. Reduced repro is in this
+// task's report; remove the wrapper when the compiler copies.
+pub fn layer_name(i: int) -> string  { return "${wynproj::layer_name(i)}" }
+pub fn layer_kind(i: int) -> int     { return wynproj::layer_kind(i) }
+pub fn layer_blend(i: int) -> int    { return wynproj::layer_blend(i) }
+pub fn layer_opacity(i: int) -> float { return wynproj::layer_opacity(i) }
+pub fn layer_visible(i: int) -> bool { return wynproj::layer_visible(i) == 1 }
+pub fn layer_amount(i: int) -> float { return wynproj::layer_amount(i) }
+
+// BORROWED handles: the table keeps ownership, so these are safe to read
+// repeatedly. Use them to inspect a file; use `take_*` to keep a buffer.
+// 0 means the layer has none - which is the normal state of an adjustment
+// layer (no pixels) and of an unmasked layer.
+pub fn layer_buffer(i: int) -> int { return wynproj::layer_buffer(i) }
+pub fn layer_mask(i: int) -> int   { return wynproj::layer_mask(i) }
+
+// TRANSFERRING handles: the handle leaves the table, so `release()` will not
+// free it and the caller owns it from here. A second `take` of the same index
+// returns 0 rather than the same handle twice, because two owners of one buffer
+// is a double free waiting for the next `wynimg_free`.
+pub fn take_buffer(i: int) -> int { return wynproj::take_buffer(i) }
+pub fn take_mask(i: int) -> int   { return wynproj::take_mask(i) }
+
+// Frees every loaded handle not taken, and the table. Idempotent, so a caller
+// can call it on both the success and the failure path.
+pub fn release() { wynproj::release() }
+
+// ---- fixture helpers (tests) ----------------------------------------------
+//
+// Exposed as `pub fn` rather than left to the test file so the corrupt-file
+// tests do not have to re-declare the externs and drift out of step with the C.
+
+pub fn file_len(path: string) -> int { return wynproj::file_len(path) }
+
+// Overwrites one byte in place. Returns 1 on success.
+pub fn poke_byte(path: string, off: int, val: int) -> int {
+    return wynproj::poke_byte(path, off, val)
+}
+
+// Copies the first `len` bytes of `src` to `dst`. Returns the bytes written,
+// or -1. Builds a file truncated at a chosen offset.
+pub fn truncate_copy(src: string, dst: string, len: int) -> int {
+    return wynproj::truncate_copy(src, dst, len)
+}
