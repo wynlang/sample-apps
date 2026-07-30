@@ -1,0 +1,247 @@
+// text - the Wyn surface over the text engine (csrc/wynimg_text.c).
+//
+// TEXT IS COVERAGE, AND THAT IS THE WHOLE DESIGN.
+//
+// Nothing in this module writes a colour into a layer directly. Laying out a
+// string produces a float 0..1 COVERAGE field in a wynimg buffer's R channel -
+// the identical shape a brush stroke produces - and `draw` then hands that to
+// `wynimg_stroke_apply`, the same kernel `paint.seg` uses. So text inherits, for
+// free and by construction:
+//
+//   * premultiplied linear-light compositing that agrees with the brush;
+//   * the eraser's destination-out semantics (pass erase=1);
+//   * one-entry undo, because the caller records one before/after pair;
+//   * layer masks and any future selection, because those also multiply
+//     coverage.
+//
+// A `draw_text` that composited colours itself would have re-derived premultiply
+// and linear-light rules, and would have disagreed with the brush the first time
+// either was fixed. This is the same argument csrc/wynimg_paint.c makes for the
+// bucket fill going through the stroke kernel.
+//
+// GAMMA IS A PARAMETER, NOT A HIDDEN CONSTANT. stbtt reports geometric AREA
+// coverage; fonts are designed against renderers that blend in a PERCEPTUAL
+// space. Blending area coverage in linear light - which this project must, its
+// buffers being linear - renders the same outline visibly thinner. `draw` takes
+// `gamma`: 1.0 is raw area (correct for a matte or stencil), 2.2 fully
+// compensates (the weight the designer drew), 1.8 is a reasonable default for
+// display text. See the long note in csrc/wynimg_text.c.
+//
+// FONT HANDLES ARE `int`, LIKE BUFFER HANDLES, and generation-tagged for the
+// same reason: Wyn cannot be stopped from holding a stale one. The hazard is
+// worse for fonts than for buffers, because `stbtt_fontinfo` holds raw pointers
+// INTO the font file bytes - a stale handle that resolved to a freed slot would
+// read a freed 700KB mapping and render GARBLED GLYPHS rather than crash, which
+// is the worst kind of failure because it looks like a font bug. A freed handle
+// resolves to NULL in C and every entry point takes the null path.
+//
+// CALL CONVENTION -- v1.20.0 codegen constraint. `extern fn`s are emitted
+// unprefixed, so importers call them BARE (`wynimg_font_default()`), while a
+// `pub fn` here must reach them as `wynimg::font_default()` - the `::` form
+// lowers to the real C symbol before the module prefixer runs. See the long
+// note at the top of src/render.wyn.
+//
+// This module declares its OWN externs rather than adding them to src/pixel.wyn,
+// so the text engine is one file's worth of surface area.
+
+import pixel
+
+// ---- font handles ----------------------------------------------------------
+
+// Loads a TTF/TTC. Returns a generation-tagged handle, or 0 on any failure
+// (missing file, unreadable, not a font, no usable vertical metrics). The file
+// bytes are kept alive inside C for the font's lifetime, because stbtt keeps
+// pointers into them.
+extern fn wynimg_font_load(path: string) -> int;
+
+// The first usable SYSTEM font, or 0 if the machine has none.
+//
+// This exists so the text tests need no committed TTF: an asset in the repo
+// would add hundreds of KB and a licence question to every checkout, to test
+// code that does not care which typeface it measures. Callers - the tests
+// included - must treat 0 as SKIP, not as failure: a machine with no fonts is a
+// fact about the machine.
+extern fn wynimg_font_default() -> int;
+
+// Which path wynimg_font_default actually opened, or "" if none did. Printed by
+// the tests so a run is reproducible on a differently-provisioned machine.
+extern fn wynimg_font_default_path() -> string;
+
+extern fn wynimg_font_alive(f: int) -> int;
+extern fn wynimg_font_free(f: int);
+
+// ---- metrics ---------------------------------------------------------------
+//
+// `px` is the ASCENT-TO-DESCENT height, matching stbtt_ScaleForPixelHeight and
+// repos/gui's Win_font - NOT the em size. Keeping that convention means the
+// editor's text and the toolkit's are the same size at the same number.
+extern fn wynimg_font_ascent(f: int, px: float) -> float;
+extern fn wynimg_font_descent(f: int, px: float) -> float;    // negative
+extern fn wynimg_font_line_gap(f: int, px: float) -> float;
+extern fn wynimg_font_line_height(f: int, px: float) -> float;
+
+// Advance width of the widest line, kerned, in pixels. "" is 0.0. Never rounded
+// per glyph: rounding is what makes "MM" differ from twice "M".
+extern fn wynimg_text_width(f: int, s: string, px: float) -> float;
+
+extern fn wynimg_text_lines(f: int, s: string, px: float, wrap_w: float) -> int;
+extern fn wynimg_text_box_w(f: int, s: string, px: float, wrap_w: float) -> float;
+extern fn wynimg_text_box_h(f: int, s: string, px: float, line_h: float,
+                            wrap_w: float) -> float;
+
+// ---- rasterisation ---------------------------------------------------------
+//
+// Accumulates coverage into `cov`'s R channel with max(), so glyphs whose
+// antialiased edges overlap saturate rather than growing a dark seam at the
+// join, and so two calls can build one text block.
+//
+// (x, y) is the TOP-LEFT of the layout box, not the baseline - a layout engine
+// knows where a paragraph starts, and making callers add the ascent is how text
+// ends up one line too high in half the call sites.
+extern fn wynimg_text_layout(cov: int, f: int, s: string,
+                             x: float, y: float, px: float,
+                             line_h: float, align: int,
+                             wrap_w: float, gamma: float) -> int;
+
+// Coverage statistics. In C because a Wyn-side scan of a 200x120 buffer is
+// 24,000 FFI calls, and bulk pixels never cross the boundary.
+extern fn wynimg_text_cov_sum(p: int) -> float;
+extern fn wynimg_text_cov_max(p: int) -> float;
+extern fn wynimg_text_cov_centroid_x(p: int) -> float;   // -1.0 if no ink
+extern fn wynimg_text_cov_centroid_y(p: int) -> float;
+extern fn wynimg_text_cov_peak_x(p: int) -> int;         // -1 if no ink
+extern fn wynimg_text_cov_peak_y(p: int) -> int;
+
+// Compositing kernels borrowed from the paint path. Declared here (not imported
+// from pixel) because an extern is emitted unprefixed into each importing unit;
+// re-declaring with the identical signature is how the other modules do it.
+extern fn wynimg_new(w: int, h: int) -> int;
+extern fn wynimg_free(p: int);
+extern fn wynimg_width(p: int) -> int;
+extern fn wynimg_height(p: int) -> int;
+extern fn wynimg_clone(p: int) -> int;
+extern fn wynimg_stroke_apply(dst: int, base: int, stroke: int,
+                              r: float, g: float, b: float, a: float,
+                              erase: int) -> int;
+
+// ---- alignment constants ---------------------------------------------------
+//
+// Functions rather than constants because a module-level `var` is mutable state
+// the caller could stomp, and this project already spells its enums this way
+// (paint.TOOL_BRUSH()).
+pub fn ALIGN_LEFT() -> int { return 0 }
+pub fn ALIGN_CENTER() -> int { return 1 }
+pub fn ALIGN_RIGHT() -> int { return 2 }
+
+// The gamma that makes display text look like the type designer drew it. Not
+// applied implicitly anywhere - `draw` takes gamma explicitly, so a caller
+// rasterising a stencil gets geometric truth by asking for 1.0.
+pub fn GAMMA_DISPLAY() -> float { return 1.8 }
+pub fn GAMMA_LINEAR() -> float { return 1.0 }
+
+// ---- fonts -----------------------------------------------------------------
+
+pub fn load(path: string) -> int { return wynimg::font_load(path) }
+
+// 0 when the machine has no usable font. Callers SKIP on 0.
+pub fn default_font() -> int { return wynimg::font_default() }
+
+// The path default_font() opened, or "".
+pub fn default_font_path() -> string { return wynimg::font_default_path() }
+
+pub fn font_alive(f: int) -> bool { return wynimg::font_alive(f) == 1 }
+pub fn free_font(f: int) { wynimg::font_free(f) }
+
+pub fn ascent(f: int, px: float) -> float { return wynimg::font_ascent(f, px) }
+pub fn descent(f: int, px: float) -> float { return wynimg::font_descent(f, px) }
+pub fn line_gap(f: int, px: float) -> float { return wynimg::font_line_gap(f, px) }
+pub fn line_height(f: int, px: float) -> float { return wynimg::font_line_height(f, px) }
+
+pub fn width(f: int, s: string, px: float) -> float {
+    return wynimg::text_width(f, s, px)
+}
+
+pub fn line_count(f: int, s: string, px: float, wrap_w: float) -> int {
+    return wynimg::text_lines(f, s, px, wrap_w)
+}
+
+pub fn box_w(f: int, s: string, px: float, wrap_w: float) -> float {
+    return wynimg::text_box_w(f, s, px, wrap_w)
+}
+
+pub fn box_h(f: int, s: string, px: float, line_h: float, wrap_w: float) -> float {
+    return wynimg::text_box_h(f, s, px, line_h, wrap_w)
+}
+
+// ---- coverage --------------------------------------------------------------
+
+// Rasterises `s` into `cov` (a wynimg buffer used as a coverage field). Returns
+// true on success. Coverage is combined with max(), so repeated calls build one
+// block rather than overwriting.
+pub fn rasterize(cov: int, f: int, s: string, x: float, y: float, px: float,
+                 line_h: float, align: int, wrap_w: float,
+                 gamma: float) -> bool {
+    return wynimg::text_layout(cov, f, s, x, y, px, line_h, align, wrap_w, gamma) == 1
+}
+
+pub fn cov_sum(p: int) -> float { return wynimg::text_cov_sum(p) }
+pub fn cov_max(p: int) -> float { return wynimg::text_cov_max(p) }
+pub fn cov_centroid_x(p: int) -> float { return wynimg::text_cov_centroid_x(p) }
+pub fn cov_centroid_y(p: int) -> float { return wynimg::text_cov_centroid_y(p) }
+pub fn cov_peak_x(p: int) -> int { return wynimg::text_cov_peak_x(p) }
+pub fn cov_peak_y(p: int) -> int { return wynimg::text_cov_peak_y(p) }
+
+// ---- drawing ---------------------------------------------------------------
+
+// Draws `s` into the target buffer at (x, y) in LINEAR-light colour (r,g,b) at
+// `alpha`. Returns true on success.
+//
+// The colour is LINEAR and UNPREMULTIPLIED, because that is what
+// wynimg_stroke_apply takes and what `paint.color_linear(c)` produces - so the
+// brush colour and the text colour are the same value going through the same
+// kernel. Passing an sRGB value here paints a visibly too-light glyph; the way
+// to avoid that is to go through `pixel.srgb_to_linear`, which is the only path
+// paint.wyn offers either.
+//
+// The coverage buffer is allocated and freed here rather than being a parameter,
+// because the caller has no use for it afterwards and a leaked coverage buffer
+// per drawn string is the obvious way to lose memory in an editor. A caller that
+// DOES want the coverage (a text layer that stays live and re-renders on edit)
+// uses `rasterize` and its own buffer.
+//
+// `erase` selects destination-out, so a text-shaped eraser is this function with
+// one flag rather than a second code path.
+pub fn draw(dst: int, f: int, s: string, x: float, y: float, px: float,
+            r: float, g: float, b: float, alpha: float,
+            line_h: float, align: int, wrap_w: float, gamma: float,
+            erase: int) -> bool {
+    if dst == 0 { return false }
+    if f == 0 { return false }
+    var w = wynimg::width(dst)
+    var h = wynimg::height(dst)
+    if w == 0 { return false }
+
+    var cov = wynimg::new(w, h)
+    if cov == 0 { return false }
+    if wynimg::text_layout(cov, f, s, x, y, px, line_h, align, wrap_w, gamma) != 1 {
+        wynimg::free(cov)
+        return false
+    }
+
+    // stroke_apply needs a BASE distinct from the destination in general (the
+    // brush passes a pre-stroke snapshot so a live drag can be recomputed), but
+    // a single text draw is a one-shot destructive apply, so the destination is
+    // its own base. The kernel handles dst == base explicitly.
+    var ok = wynimg::stroke_apply(dst, dst, cov, r, g, b, alpha, erase)
+    wynimg::free(cov)
+    return ok == 1
+}
+
+// The common case: opaque display text, left-aligned, no wrap, display gamma.
+// Colour is still LINEAR - there is no sRGB-taking overload, because an
+// "obvious" one is exactly how a project ends up compositing sRGB by accident.
+pub fn draw_simple(dst: int, f: int, s: string, x: float, y: float, px: float,
+                   r: float, g: float, b: float) -> bool {
+    return draw(dst, f, s, x, y, px, r, g, b, 1.0,
+                1.0, ALIGN_LEFT(), 0.0, GAMMA_DISPLAY(), 0)
+}

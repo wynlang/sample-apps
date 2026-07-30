@@ -1,0 +1,771 @@
+// test_text - the text engine, asserted on NUMBERS and PIXELS.
+//
+// Every assertion here is derived from first principles rather than from a
+// previous run, because the failure modes of a text renderer are quiet:
+//
+//   * measuring "MM" as anything other than twice "M" (within kerning) means
+//     advances are being ROUNDED per glyph, which is the bug that makes long
+//     lines drift and small text look unevenly spaced. A test that only checked
+//     "width > 0" would never see it.
+//   * doubling the pixel size must roughly quadruple the inked AREA. That is
+//     asserted as a ratio BAND, not a count: the exact number depends on the
+//     typeface, and a machine with a different default font must still be able
+//     to run this suite.
+//   * centre alignment is checked by where the ink's CENTROID lands, not by a
+//     returned offset - an alignment bug that computed the offset correctly and
+//     then failed to apply it would pass the second kind of check.
+//   * the corners of the buffer must be EXACTLY zero. A rasteriser that wrote
+//     outside the glyph box, or that leaked a stale scratch buffer between
+//     glyphs, shows up there and nowhere else.
+//
+// NO COMMITTED FONT. `text.default_font()` searches the platform's own font
+// directories, and every test SKIPS with a printed message when it returns 0.
+// Shipping a TTF would add hundreds of KB and a licence question to every
+// checkout in order to test code that does not care which typeface it measures;
+// a machine with no fonts is a fact about the machine, not a defect here. The
+// path actually used is printed so a run is reproducible elsewhere.
+//
+// SKIPS ARE `if have { ... }`, NOT AN EARLY `return`. That is not a style
+// choice - `return` inside a `test` block miscompiles into a `return` from the
+// generated `main`, which SILENTLY SKIPS EVERY LATER TEST IN THE FILE and still
+// prints "All tests passed". Minimal repro, filed with this work:
+//
+//     test "first uses return" { if 1 == 1 { return }  assert_eq(1, 2) }
+//     test "second never runs" { assert_eq(1, 2) }
+//     // -> "1 passed, 0 failed / All tests passed", exit 0
+//
+// So a guard here is a block, and each test's body is inside it.
+//
+// Local names avoid `width`, `ascent`, `draw`, `load`, `approx` and friends: a
+// local `var` in a test block whose name matching a `pub fn` of any transitively
+// imported module resolves as that FUNCTION, and the error ("Cannot compare
+// function with int") does not mention the collision. Hence `fnt`, `wid`, `asc`.
+
+import pixel
+import text
+
+test "a loaded font handle is alive, and a freed one is not" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font found on this machine") }
+    else {
+        var used = text.default_font_path()
+        print("test_text: using font ${used}")
+
+        assert_true(text.font_alive(fnt))
+        text.free_font(fnt)
+        // Generation-tagged, so the handle Wyn still holds is now dead rather
+        // than dangling. This is the assertion that a stale handle cannot become
+        // a read of a freed 700KB font file - which would render garbled glyphs
+        // rather than crash, the worst possible failure because it looks like a
+        // font bug.
+        assert_false(text.font_alive(fnt))
+        // Freeing twice is a no-op, not a double free.
+        text.free_font(fnt)
+        assert_false(text.font_alive(fnt))
+    }
+}
+
+test "a stale font handle is a safe no-op everywhere, not a crash" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        text.free_font(fnt)
+        var s = "Hg"
+        assert_true(pixel.approx(text.width(fnt, s, 30.0), 0.0, 0.0001))
+        assert_true(pixel.approx(text.ascent(fnt, 30.0), 0.0, 0.0001))
+        assert_true(pixel.approx(text.line_height(fnt, 30.0), 0.0, 0.0001))
+        assert_eq(text.line_count(fnt, s, 30.0, 0.0), 0)
+
+        var buf = wynimg_new(32, 32)
+        assert_false(text.rasterize(buf, fnt, s, 0.0, 0.0, 20.0, 1.0, 0, 0.0, 1.0))
+        assert_true(pixel.approx(text.cov_sum(buf), 0.0, 0.0001))
+        assert_false(text.draw(buf, fnt, s, 0.0, 0.0, 20.0,
+                               1.0, 1.0, 1.0, 1.0, 1.0, 0, 0.0, 1.0, 0))
+        wynimg_free(buf)
+
+        // A path that does not exist, and a path that is not a font, both yield 0
+        // rather than a partly-initialised handle.
+        var missing = "/nonexistent/definitely-not-a.ttf"
+        assert_eq(text.load(missing), 0)
+        var notfont = "csrc/wynimg.h"
+        assert_eq(text.load(notfont), 0)
+    }
+}
+
+test "measuring the empty string is width zero" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        var e = ""
+        assert_true(pixel.approx(text.width(fnt, e, 40.0), 0.0, 0.0001))
+        // ...and a space is NOT zero, so the above is not passing because every
+        // measurement returns zero.
+        var sp = " "
+        assert_true(text.width(fnt, sp, 40.0) > 1.0)
+        text.free_font(fnt)
+    }
+}
+
+test "MM is twice M: advances are not rounded per glyph" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        var one = "M"
+        var two = "MM"
+        var w1 = text.width(fnt, one, 40.0)
+        var w2 = text.width(fnt, two, 40.0)
+        assert_true(w1 > 5.0)
+        // Kerning between M and M is zero or near it in every text face, so the
+        // tolerance here is for kerning, not for rounding: an implementation that
+        // rounded each advance to an integer would be off by up to 1px at 40px
+        // (>3%), and by proportionally more at small sizes.
+        var want = w1 * 2.0
+        assert_true(pixel.approx(w2, want, want * 0.05))
+
+        // AND the sharp version of the same check, because the one above is not
+        // enough on its own: at 40px vs 20px the rounding error of an
+        // integer-advance implementation happens to cancel (measured: ratio
+        // 1.0000 even when every advance was floor(x+0.5)). What does NOT cancel
+        // is a long string at a SMALL size, where each glyph's rounding is a
+        // larger fraction of its advance. Scale is exactly linear in the pixel
+        // size, so this ratio is 1.0 to within float noise - and the per-glyph
+        // rounding mutation measured 1.085 at 7px, 1.046 at 10px.
+        var many = "Hamburgefonstiv"
+        var tiny = text.width(fnt, many, 7.0)
+        var quad = text.width(fnt, many, 28.0)
+        assert_true(tiny > 10.0)
+        assert_true(pixel.approx(quad / (4.0 * tiny), 1.0, 0.01))
+        var small = text.width(fnt, many, 10.0)
+        assert_true(pixel.approx(text.width(fnt, many, 40.0) / (4.0 * small),
+                                 1.0, 0.01))
+
+        // AND the LAYOUT pen must round the same way the measurement does, which
+        // is a separate code path and therefore a separate mutation. Rasterise a
+        // long narrow run into a buffer only just wider than the measured width:
+        // if the pen accumulated integer advances while `width` accumulated
+        // doubles, the run overflows the buffer and loses ink at the right edge.
+        // Measured: 30 'i's at 9px lost 8% of its coverage under exactly that
+        // mutation, and 0% without it.
+        var run = "iiiiiiiiiiiiiiiiiiiiiiiiiiiiii"
+        var runw = text.width(fnt, run, 9.0)
+        var tight = runw.to_int() + 4          // 2px origin + measured + slack
+        var bt = wynimg_new(tight, 40)
+        assert_true(text.rasterize(bt, fnt, run, 2.0, 2.0, 9.0, 1.0, 0, 0.0, 1.0))
+        var bw = wynimg_new(tight + 60, 40)
+        assert_true(text.rasterize(bw, fnt, run, 2.0, 2.0, 9.0, 1.0, 0, 0.0, 1.0))
+        assert_true(text.cov_sum(bw) > 20.0)
+        assert_true(pixel.approx(text.cov_sum(bt) / text.cov_sum(bw), 1.0, 0.005))
+        wynimg_free(bt)
+        wynimg_free(bw)
+        text.free_font(fnt)
+    }
+}
+
+test "ascent is positive, descent is negative, line height spans both" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        var asc = text.ascent(fnt, 40.0)
+        var dsc = text.descent(fnt, 40.0)
+        var gap = text.line_gap(fnt, 40.0)
+        var lht = text.line_height(fnt, 40.0)
+
+        // ascent > 0 > descent.
+        assert_true(asc > 0.0)
+        assert_true(dsc < 0.0)
+        assert_true(asc > 0.0 and 0.0 > dsc)
+        assert_true(gap >= 0.0)
+        // The scale convention is ascent-to-descent = the requested pixel size
+        // (stbtt_ScaleForPixelHeight), so this is an identity the metrics must
+        // obey and not a fudge: if the scale were computed from the em size
+        // instead, this would be off by ~20%.
+        assert_true(pixel.approx(asc - dsc, 40.0, 0.5))
+        assert_true(pixel.approx(lht, asc - dsc + gap, 0.01))
+        text.free_font(fnt)
+    }
+}
+
+test "rasterising l at 40px inks somewhere and leaves the corners at zero" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        var el = "l"
+        var buf = wynimg_new(80, 80)
+        assert_true(text.rasterize(buf, fnt, el, 20.0, 10.0, 40.0,
+                                   1.0, text.ALIGN_LEFT(), 0.0, 1.0))
+
+        // Non-zero somewhere, and fully inked somewhere - an 'l' is a vertical
+        // stem several pixels wide at 40px, so a peak below 1.0 would mean the
+        // whole glyph is being sampled as partial coverage.
+        assert_true(text.cov_sum(buf) > 5.0)
+        assert_true(text.cov_max(buf) > 0.99)
+
+        // EXACTLY zero in all four corners. Not approximately: any ink there is a
+        // write outside the glyph box or a stale scratch buffer, and both are
+        // bugs a tolerance would hide.
+        assert_eq(wynimg_get(buf, pixel.px_index(80, 0, 0, 0)), 0.0)
+        assert_eq(wynimg_get(buf, pixel.px_index(80, 79, 0, 0)), 0.0)
+        assert_eq(wynimg_get(buf, pixel.px_index(80, 0, 79, 0)), 0.0)
+        assert_eq(wynimg_get(buf, pixel.px_index(80, 79, 79, 0)), 0.0)
+
+        // The ink is where it was asked for: the stem sits at the requested x,
+        // and the baseline is y + ascent, so the peak is above that baseline.
+        var pkx = text.cov_peak_x(buf)
+        var pky = text.cov_peak_y(buf)
+        assert_true(pkx >= 20)
+        assert_true(pkx < 40)
+        var base = 10.0 + text.ascent(fnt, 40.0)
+        assert_true(pky.to_float() < base)
+        assert_true(pky.to_float() > 9.0)
+
+        wynimg_free(buf)
+        text.free_font(fnt)
+    }
+}
+
+test "an empty coverage buffer reports no ink rather than ink at the origin" {
+    var buf = wynimg_new(16, 16)
+    assert_true(pixel.approx(text.cov_sum(buf), 0.0, 0.0001))
+    // -1 is an impossible coordinate, so "nothing drawn" can never be mistaken
+    // for "drawn at (0,0)" - which is what a 0 return would allow.
+    assert_eq(text.cov_peak_x(buf), 0 - 1)
+    assert_eq(text.cov_peak_y(buf), 0 - 1)
+    assert_true(pixel.approx(text.cov_centroid_x(buf), 0.0 - 1.0, 0.0001))
+    assert_true(pixel.approx(text.cov_centroid_y(buf), 0.0 - 1.0, 0.0001))
+    wynimg_free(buf)
+}
+
+test "text off the edge of the buffer is clipped, not wrapped" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        var s = "MMMM"
+        // Entirely off the buffer: nothing at all is written. A rasteriser that
+        // wrapped coordinates (or dropped its bounds check) would deposit ink
+        // somewhere inside instead, which is a heap write past the end for any
+        // coordinate large enough - a corruption that looks like a random speckle.
+        var off = wynimg_new(40, 40)
+        assert_true(text.rasterize(off, fnt, s, 200.0, 200.0, 40.0, 1.0,
+                                   0, 0.0, 1.0))
+        assert_true(pixel.approx(text.cov_sum(off), 0.0, 0.0001))
+        assert_eq(text.cov_peak_x(off), 0 - 1)
+
+        // Straddling the left and top edges: the visible part is inked, and the
+        // ink is contiguous from the edge rather than reappearing on the far side.
+        var half = wynimg_new(40, 40)
+        assert_true(text.rasterize(half, fnt, s, 0.0 - 30.0, 0.0 - 10.0, 40.0,
+                                   1.0, 0, 0.0, 1.0))
+        assert_true(text.cov_sum(half) > 5.0)
+        // With glyphs starting 30px to the LEFT, coverage must be concentrated in
+        // the left half. A wrapping implementation puts the clipped-off columns
+        // back on the right, which moves the centroid past the middle.
+        assert_true(text.cov_centroid_x(half) < 20.0)
+
+        wynimg_free(off)
+        wynimg_free(half)
+        text.free_font(fnt)
+    }
+}
+
+test "doubling the pixel size roughly quadruples the inked area" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        // Gamma 1.0 on purpose: coverage is then geometric AREA, which is the
+        // quantity that scales with the square of the size. At gamma 2.2 the ramp
+        // is non-linear and the ratio would not be a clean 4.
+        var s = "Hamburgefonstiv"
+        var small = wynimg_new(400, 200)
+        assert_true(text.rasterize(small, fnt, s, 10.0, 10.0, 20.0, 1.0, 0, 0.0, 1.0))
+        var big = wynimg_new(800, 400)
+        assert_true(text.rasterize(big, fnt, s, 20.0, 20.0, 40.0, 1.0, 0, 0.0, 1.0))
+
+        var a1 = text.cov_sum(small)
+        var a2 = text.cov_sum(big)
+        assert_true(a1 > 50.0)
+        var ratio = a2 / a1
+        // A BAND, not a count. Antialiased edges are a perimeter term, so the
+        // ratio is a little under 4 (the edge fraction shrinks as the glyph
+        // grows); 3.5 to 4.5 is wide enough for any typeface and still fails hard
+        // for a linear (~2x) or unscaled (~1x) implementation.
+        assert_true(ratio > 3.5)
+        assert_true(ratio < 4.5)
+
+        wynimg_free(small)
+        wynimg_free(big)
+        text.free_font(fnt)
+    }
+}
+
+test "centre alignment centres the ink; left alignment does not" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        var s = "Hg"
+        var boxw = 300.0
+        var mid = boxw / 2.0
+
+        var cl = wynimg_new(320, 60)
+        assert_true(text.rasterize(cl, fnt, s, 0.0, 5.0, 30.0, 1.0,
+                                   text.ALIGN_LEFT(), boxw, 1.0))
+        var cc = wynimg_new(320, 60)
+        assert_true(text.rasterize(cc, fnt, s, 0.0, 5.0, 30.0, 1.0,
+                                   text.ALIGN_CENTER(), boxw, 1.0))
+        var cr = wynimg_new(320, 60)
+        assert_true(text.rasterize(cr, fnt, s, 0.0, 5.0, 30.0, 1.0,
+                                   text.ALIGN_RIGHT(), boxw, 1.0))
+
+        var xl = text.cov_centroid_x(cl)
+        var xc = text.cov_centroid_x(cc)
+        var xr = text.cov_centroid_x(cr)
+
+        // Centred: the centroid is within a few pixels of the box centre. It is
+        // not exactly the centre because a glyph's ink is not symmetric within
+        // its advance (side bearings differ), so 6px at 30px type is the honest
+        // bound.
+        assert_true(pixel.approx(xc, mid, 6.0))
+        // Left: NOT centred. This is the half of the assertion that catches an
+        // alignment offset computed and then never applied - which would put all
+        // three centroids in the same place and pass a centre-only check.
+        assert_true(xl < mid - 50.0)
+        assert_true(xr > mid + 50.0)
+        // Ordering, so the three cases cannot all collapse to one value.
+        assert_true(xl < xc)
+        assert_true(xc < xr)
+        // Right-aligned ink ends inside the box rather than running past it.
+        assert_true(xr < boxw)
+
+        wynimg_free(cl)
+        wynimg_free(cc)
+        wynimg_free(cr)
+        text.free_font(fnt)
+    }
+}
+
+test "a glyph drawn in pure red leaves a red pixel" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        var el = "l"
+        var dst = wynimg_new(100, 60)
+        // Linear-light pure red at full alpha, gamma 1.0 so the stem interior is
+        // coverage 1.0 exactly and the colour is not diluted by the ramp.
+        assert_true(text.draw(dst, fnt, el, 20.0, 5.0, 40.0,
+                              1.0, 0.0, 0.0, 1.0,
+                              1.0, text.ALIGN_LEFT(), 0.0, 1.0, 0))
+
+        // Find a pixel the rasteriser fully inked rather than guessing one: a
+        // hard-coded coordinate would couple this test to one typeface's stem.
+        var probe = wynimg_new(100, 60)
+        text.rasterize(probe, fnt, el, 20.0, 5.0, 40.0, 1.0,
+                       text.ALIGN_LEFT(), 0.0, 1.0)
+        var qx = text.cov_peak_x(probe)
+        var qy = text.cov_peak_y(probe)
+        assert_true(qx >= 0)
+
+        // Un-premultiplied read, so this is the COLOUR and not colour*alpha.
+        assert_true(pixel.approx(wynimg_pick(dst, qx, qy, 0), 1.0, 0.01))
+        assert_true(pixel.approx(wynimg_pick(dst, qx, qy, 1), 0.0, 0.01))
+        assert_true(pixel.approx(wynimg_pick(dst, qx, qy, 2), 0.0, 0.01))
+        assert_true(pixel.approx(wynimg_pick(dst, qx, qy, 3), 1.0, 0.01))
+        // Well away from the glyph, nothing was touched: the draw is a
+        // text-shaped composite, not a rectangle fill.
+        assert_true(pixel.approx(wynimg_pick(dst, 95, 55, 3), 0.0, 0.001))
+
+        wynimg_free(dst)
+        wynimg_free(probe)
+        text.free_font(fnt)
+    }
+}
+
+test "drawing with erase takes alpha away instead of adding colour" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        // Text-shaped erasing is the same function with one flag, which is the
+        // point of routing text through the brush's compositing kernel.
+        var dst = wynimg_new(100, 60)
+        wynimg_fill(dst, 0.8, 0.1, 0.1, 1.0)         // opaque red, premultiplied
+        var el = "l"
+        var probe = wynimg_new(100, 60)
+        text.rasterize(probe, fnt, el, 20.0, 5.0, 40.0, 1.0, 0, 0.0, 1.0)
+        var qx = text.cov_peak_x(probe)
+        var qy = text.cov_peak_y(probe)
+
+        assert_true(text.draw(dst, fnt, el, 20.0, 5.0, 40.0,
+                              0.0, 0.0, 0.0, 1.0, 1.0, 0, 0.0, 1.0, 1))
+        // Fully erased under the stem: alpha zero AND the raw stored channel zero
+        // - an eraser that zeroed only alpha would leave premultiplied red behind
+        // and show a halo the moment anything composited over it.
+        assert_true(pixel.approx(wynimg_pick(dst, qx, qy, 3), 0.0, 0.001))
+        assert_true(pixel.approx(wynimg_get(dst, pixel.px_index(100, qx, qy, 0)),
+                                 0.0, 0.001))
+        // Outside the glyph the red survives.
+        assert_true(pixel.approx(wynimg_pick(dst, 95, 55, 3), 1.0, 0.001))
+
+        wynimg_free(dst)
+        wynimg_free(probe)
+        text.free_font(fnt)
+    }
+}
+
+test "gamma thickens coverage and is applied exactly once" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        var s = "Hamburgefonstiv"
+        var raw = wynimg_new(400, 80)
+        assert_true(text.rasterize(raw, fnt, s, 5.0, 5.0, 24.0, 1.0, 0, 0.0, 1.0))
+        var lit = wynimg_new(400, 80)
+        assert_true(text.rasterize(lit, fnt, s, 5.0, 5.0, 24.0, 1.0, 0, 0.0, 2.2))
+
+        var a_raw = text.cov_sum(raw)
+        var a_lit = text.cov_sum(lit)
+        // Coverage is in [0,1], so raising it to the 1/gamma power BRIGHTENS it -
+        // exactly the compensation that keeps linear-light text from looking too
+        // thin. It must be a real difference, not a rounding one.
+        assert_true(a_lit > a_raw * 1.05)
+        // ...and it cannot run away: no pixel exceeds full coverage.
+        assert_true(text.cov_max(lit) <= 1.0)
+        assert_true(text.cov_max(raw) <= 1.0)
+
+        // A second identical pass is bit-identical, i.e. the ramp is applied once
+        // and not accidentally compounded per glyph or per call.
+        var again = wynimg_new(400, 80)
+        assert_true(text.rasterize(again, fnt, s, 5.0, 5.0, 24.0, 1.0, 0, 0.0, 1.0))
+        assert_true(pixel.approx(wynimg_max_diff(raw, again), 0.0, 0.000001))
+
+        wynimg_free(raw)
+        wynimg_free(lit)
+        wynimg_free(again)
+        text.free_font(fnt)
+    }
+}
+
+test "explicit newlines make lines, and blank lines are kept" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        var three = "ab\ncd\nef"
+        assert_eq(text.line_count(fnt, three, 20.0, 0.0), 3)
+        // A blank line the author typed must survive: dropping it silently closes
+        // up a paragraph break.
+        var withblank = "a\n\nb"
+        assert_eq(text.line_count(fnt, withblank, 20.0, 0.0), 3)
+        var single = "abc"
+        assert_eq(text.line_count(fnt, single, 20.0, 0.0), 1)
+
+        // The reported width is the WIDEST line, not the total.
+        var uneven = "i\nMMMM"
+        var justwide = "MMMM"
+        assert_true(pixel.approx(text.width(fnt, uneven, 20.0),
+                                 text.width(fnt, justwide, 20.0), 0.01))
+
+        // Box height grows by one line advance per extra line, and a one-line box
+        // is ink height (ascent - descent), not a full line advance - so a single
+        // line is not padded by a gap that belongs between lines.
+        var lht = text.line_height(fnt, 20.0)
+        var ink = text.ascent(fnt, 20.0) - text.descent(fnt, 20.0)
+        assert_true(pixel.approx(text.box_h(fnt, single, 20.0, 1.0, 0.0), ink, 0.01))
+        assert_true(pixel.approx(text.box_h(fnt, three, 20.0, 1.0, 0.0),
+                                 ink + 2.0 * lht, 0.01))
+        // The line-height multiplier multiplies the ADVANCE, not the ink.
+        assert_true(pixel.approx(text.box_h(fnt, three, 20.0, 2.0, 0.0),
+                                 ink + 4.0 * lht, 0.01))
+        text.free_font(fnt)
+    }
+}
+
+test "multi-line layout stacks the lines by the line height" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        // Two identical lines, so any difference in their ink is a layout
+        // difference. Their vertical centroids must be one line height apart.
+        var lht = text.line_height(fnt, 24.0)
+        var one = "nn"
+        var two = "nn\nnn"
+
+        var b1 = wynimg_new(160, 200)
+        assert_true(text.rasterize(b1, fnt, one, 10.0, 10.0, 24.0, 1.0, 0, 0.0, 1.0))
+        var b2 = wynimg_new(160, 200)
+        assert_true(text.rasterize(b2, fnt, two, 10.0, 10.0, 24.0, 1.0, 0, 0.0, 1.0))
+
+        var y1 = text.cov_centroid_y(b1)
+        var y2 = text.cov_centroid_y(b2)
+        // Two lines: the mean of the pair sits half a line height below one line.
+        assert_true(pixel.approx(y2 - y1, lht / 2.0, 1.5))
+        // Twice the ink, near enough - identical strings.
+        var r2 = text.cov_sum(b2) / text.cov_sum(b1)
+        assert_true(r2 > 1.9)
+        assert_true(r2 < 2.1)
+
+        // A 2.0 line-height multiplier pushes the second line twice as far down.
+        var b3 = wynimg_new(160, 200)
+        assert_true(text.rasterize(b3, fnt, two, 10.0, 10.0, 24.0, 2.0, 0, 0.0, 1.0))
+        assert_true(pixel.approx(text.cov_centroid_y(b3) - y1, lht, 1.5))
+
+        wynimg_free(b1)
+        wynimg_free(b2)
+        wynimg_free(b3)
+        text.free_font(fnt)
+    }
+}
+
+test "word wrap breaks at spaces and respects the width" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        var s = "one two three four five six seven eight"
+        assert_eq(text.line_count(fnt, s, 20.0, 0.0), 1)      // no wrap requested
+        var narrow = text.line_count(fnt, s, 20.0, 60.0)
+        var wide = text.line_count(fnt, s, 20.0, 200.0)
+        assert_true(narrow > wide)
+        assert_true(wide > 1)
+
+        // Every wrapped line FITS, which is the actual contract. Checked by
+        // rasterising into a buffer exactly the wrap width wide and asserting no
+        // ink reaches the last column - a greedy wrapper that measured the wrong
+        // prefix would spill there.
+        var wrapw = 200.0
+        var buf = wynimg_new(200, 400)
+        assert_true(text.rasterize(buf, fnt, s, 0.0, 0.0, 20.0, 1.0, 0, wrapw, 1.0))
+        var yy = 0
+        var spill = 0
+        while yy < 400 {
+            if wynimg_get(buf, pixel.px_index(200, 199, yy, 0)) > 0.0 {
+                spill = spill + 1
+            }
+            yy = yy + 1
+        }
+        assert_eq(spill, 0)
+        assert_true(text.cov_sum(buf) > 50.0)
+
+        // box_w is the wrap width when wrapping, because that is what alignment
+        // is measured against; otherwise it is the widest line.
+        assert_true(pixel.approx(text.box_w(fnt, s, 20.0, wrapw), wrapw, 0.001))
+        assert_true(pixel.approx(text.box_w(fnt, s, 20.0, 0.0),
+                                 text.width(fnt, s, 20.0), 0.001))
+
+        wynimg_free(buf)
+        text.free_font(fnt)
+    }
+}
+
+test "coverage accumulates with max, so two passes do not double up" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        // Adjacent glyphs whose antialiased edges overlap must saturate, not add:
+        // a summing accumulator grows a dark seam at tight letter joins.
+        // Rasterising the same string twice into one buffer is the sharpest
+        // version of that check - the result must be identical to one pass.
+        var s = "AVWA"
+        var once = wynimg_new(300, 60)
+        assert_true(text.rasterize(once, fnt, s, 5.0, 5.0, 30.0, 1.0, 0, 0.0, 1.0))
+        var twice = wynimg_new(300, 60)
+        assert_true(text.rasterize(twice, fnt, s, 5.0, 5.0, 30.0, 1.0, 0, 0.0, 1.0))
+        assert_true(text.rasterize(twice, fnt, s, 5.0, 5.0, 30.0, 1.0, 0, 0.0, 1.0))
+        assert_true(pixel.approx(wynimg_max_diff(once, twice), 0.0, 0.000001))
+        assert_true(text.cov_max(twice) <= 1.0)
+
+        wynimg_free(once)
+        wynimg_free(twice)
+        text.free_font(fnt)
+    }
+}
+
+test "sub-pixel positioning moves the ink by less than a whole pixel" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        // A half-pixel offset must actually change the sampling. A renderer that
+        // rounded the pen to an integer would produce identical buffers here,
+        // which is what makes small text look unevenly spaced.
+        var el = "l"
+        var at0 = wynimg_new(60, 60)
+        assert_true(text.rasterize(at0, fnt, el, 20.0, 10.0, 30.0, 1.0, 0, 0.0, 1.0))
+        var at5 = wynimg_new(60, 60)
+        assert_true(text.rasterize(at5, fnt, el, 20.5, 10.0, 30.0, 1.0, 0, 0.0, 1.0))
+        assert_true(wynimg_max_diff(at0, at5) > 0.05)
+
+        // ...and the shift is SUB-pixel: the centroid moves about half a pixel,
+        // not a whole one and not zero.
+        var d = text.cov_centroid_x(at5) - text.cov_centroid_x(at0)
+        assert_true(d > 0.2)
+        assert_true(d < 0.8)
+        // Total ink is essentially unchanged - it moved, it did not grow.
+        var rr = text.cov_sum(at5) / text.cov_sum(at0)
+        assert_true(rr > 0.9)
+        assert_true(rr < 1.1)
+
+        wynimg_free(at0)
+        wynimg_free(at5)
+        text.free_font(fnt)
+    }
+}
+
+test "kerning is applied, and measurement agrees with layout" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        // "AV" kerns negatively in every text face with a kern table. Written as
+        // "not wider than the unkerned sum", so a font with no kern table does
+        // not fail the suite.
+        var a = "A"
+        var v = "V"
+        var av = "AVAVAVAVAV"
+        var sum = 5.0 * (text.width(fnt, a, 40.0) + text.width(fnt, v, 40.0))
+        var pair = text.width(fnt, av, 40.0)
+        assert_true(pair <= sum + 0.001)
+
+        // MEASUREMENT AND LAYOUT MUST AGREE ON THE KERNING, and each is a
+        // separate code path, so each needs its own check.
+        //
+        // Here: the measured width must match where the ink actually ENDS, to
+        // within one glyph's right side bearing. Nine kern pairs at 40px in Arial
+        // take 24px off the unkerned sum (measured), so a measurement that
+        // skipped kerning would report a width ~24px past the last inked column -
+        // and would then centre and right-align every kerned string wrongly.
+        var wide = 500
+        var raster = wynimg_new(wide, 60)
+        assert_true(text.rasterize(raster, fnt, av, 0.0, 5.0, 40.0, 1.0,
+                                   0, 0.0, 1.0))
+        var col = wide - 1
+        var last = 0 - 1
+        while col >= 0 {
+            var row = 0
+            var inked = 0
+            while row < 60 {
+                if wynimg_get(raster, pixel.px_index(wide, col, row, 0)) > 0.0 {
+                    inked = 1
+                }
+                row = row + 1
+            }
+            if inked == 1 and last < 0 { last = col }
+            col = col - 1
+        }
+        assert_true(last > 0)
+        // Slack of at most 3px: a 'V' has almost no right side bearing.
+        assert_true(pair - last.to_float() < 3.0)
+        assert_true(pair - last.to_float() > 0.0 - 1.0)
+
+        // And layout's own pen: right-align into a box exactly `pair` wide and
+        // assert nothing reaches the final column.
+        var wpx = pair.to_int() + 2
+        var buf = wynimg_new(wpx, 60)
+        assert_true(text.rasterize(buf, fnt, av, 0.0, 5.0, 40.0, 1.0,
+                                   text.ALIGN_RIGHT(), pair, 1.0))
+        assert_true(text.cov_sum(buf) > 20.0)
+        var c2 = 0
+        var edge = 0
+        while c2 < 60 {
+            if wynimg_get(buf, pixel.px_index(wpx, wpx - 1, c2, 0)) > 0.0 {
+                edge = edge + 1
+            }
+            c2 = c2 + 1
+        }
+        assert_eq(edge, 0)
+
+        wynimg_free(raster)
+        wynimg_free(buf)
+        text.free_font(fnt)
+    }
+}
+
+test "the engine refuses nonsense sizes instead of allocating wildly" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        var s = "x"
+        var buf = wynimg_new(32, 32)
+        // Zero, negative, and past-the-cap sizes are all REFUSED rather than
+        // clamped: a clamp turns a typo into a silently wrong render, and
+        // 40000px of type is 1.6 billion pixels of scratch bitmap.
+        assert_false(text.rasterize(buf, fnt, s, 0.0, 0.0, 0.0, 1.0, 0, 0.0, 1.0))
+        assert_false(text.rasterize(buf, fnt, s, 0.0, 0.0, 0.0 - 12.0, 1.0,
+                                    0, 0.0, 1.0))
+        assert_false(text.rasterize(buf, fnt, s, 0.0, 0.0, 40000.0, 1.0,
+                                    0, 0.0, 1.0))
+        assert_true(pixel.approx(text.cov_sum(buf), 0.0, 0.0001))
+        assert_true(pixel.approx(text.width(fnt, s, 0.0), 0.0, 0.0001))
+        // A dead destination buffer is refused too, not written through.
+        wynimg_free(buf)
+        assert_false(text.rasterize(buf, fnt, s, 0.0, 0.0, 20.0, 1.0, 0, 0.0, 1.0))
+        assert_false(text.draw(buf, fnt, s, 0.0, 0.0, 20.0,
+                               1.0, 1.0, 1.0, 1.0, 1.0, 0, 0.0, 1.0, 0))
+        text.free_font(fnt)
+    }
+}
+
+test "draw_simple is exactly draw with the display defaults" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        var s = "Wyn"
+        var one = wynimg_new(200, 60)
+        assert_true(text.draw_simple(one, fnt, s, 10.0, 5.0, 30.0, 0.0, 1.0, 0.0))
+        var two = wynimg_new(200, 60)
+        assert_true(text.draw(two, fnt, s, 10.0, 5.0, 30.0,
+                              0.0, 1.0, 0.0, 1.0,
+                              1.0, text.ALIGN_LEFT(), 0.0, text.GAMMA_DISPLAY(), 0))
+        // Asserted rather than assumed - the two must be bit-identical, or the
+        // convenience wrapper is a second set of defaults that can drift.
+        assert_true(pixel.approx(wynimg_max_diff(one, two), 0.0, 0.000001))
+        // Green, and green only.
+        var probe = wynimg_new(200, 60)
+        text.rasterize(probe, fnt, s, 10.0, 5.0, 30.0, 1.0, 0, 0.0,
+                       text.GAMMA_DISPLAY())
+        var qx = text.cov_peak_x(probe)
+        var qy = text.cov_peak_y(probe)
+        assert_true(pixel.approx(wynimg_pick(one, qx, qy, 1), 1.0, 0.01))
+        assert_true(pixel.approx(wynimg_pick(one, qx, qy, 0), 0.0, 0.01))
+
+        wynimg_free(one)
+        wynimg_free(two)
+        wynimg_free(probe)
+        text.free_font(fnt)
+    }
+}
+
+test "a font handle survives being passed around as an int" {
+    var fnt = text.default_font()
+    if fnt == 0 { print("SKIP test_text: no system font") }
+    else {
+        // The whole project spells handles `int` (Wyn `int` is C `long long`). A
+        // 32-bit truncation of a generation-tagged handle would resolve to a
+        // different slot or to nothing, so this asserts fidelity rather than
+        // assuming it.
+        var copy = fnt
+        var s = "Mg"
+        assert_eq(copy, fnt)
+        assert_true(pixel.approx(text.width(copy, s, 30.0),
+                                 text.width(fnt, s, 30.0), 0.000001))
+        assert_true(text.font_alive(copy))
+        text.free_font(copy)
+        // Freeing through the copy invalidates the original: one slot, one
+        // lifetime.
+        assert_false(text.font_alive(fnt))
+    }
+}
+
+test "two fonts loaded at once have independent handles" {
+    var f1 = text.default_font()
+    if f1 == 0 { print("SKIP test_text: no system font") }
+    else {
+        var used = text.default_font_path()
+        var f2 = text.load(used)
+        assert_true(f2 != 0)
+        // Distinct slots, so freeing one cannot kill the other - the failure that
+        // a single global font would hide.
+        assert_true(f1 != f2)
+        assert_true(text.font_alive(f1))
+        assert_true(text.font_alive(f2))
+        text.free_font(f1)
+        assert_false(text.font_alive(f1))
+        assert_true(text.font_alive(f2))
+        var s = "Mg"
+        assert_true(text.width(f2, s, 30.0) > 1.0)
+        text.free_font(f2)
+    }
+}
