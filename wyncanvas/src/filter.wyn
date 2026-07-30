@@ -1,0 +1,360 @@
+// filter - image adjustments and convolutions, over LINEAR PREMULTIPLIED float32.
+//
+// WHAT MAKES A FILTER ENGINE CORRECT HERE IS ONE DISTINCTION, and it decides
+// every function below. The buffers hold colour ALREADY MULTIPLIED BY ALPHA:
+//
+//   * A CONVOLUTION (blur) runs ON the premultiplied data, deliberately. A
+//     weighted average of premultiplied samples averages colour contribution and
+//     coverage with the same weights, so a transparent neighbour contributes
+//     nothing. Unpremultiplying first and blurring the bare colour drags the
+//     undefined (stored as 0, i.e. black) colour of transparent pixels into the
+//     result and gives every soft edge a DARK HALO. This is the single most
+//     common blur bug there is, and premultiplied buffers are the fix for it.
+//
+//   * A POINT OPERATION that is not linear-and-homogeneous - a CURVE, levels,
+//     contrast, brightness, invert, threshold, posterize - MUST unpremultiply,
+//     apply, then repremultiply. f(a*c) != a*f(c) for anything with a constant
+//     term or a bend in it, so applying such a filter to the stored value shifts
+//     the COLOUR of a semi-transparent pixel. Measured, and not subtle: a
+//     50%-opaque pixel of 0.6 grey put through contrast(2.0) comes back 0.986
+//     correctly and 0.772 if the unpremultiply is skipped - a 22% colour shift
+//     caused purely by the pixel being half transparent.
+//
+//   * SATURATION and HUE ROTATION are linear maps, so premultiplication
+//     commutes with them in exact arithmetic - but not through the CLAMP.
+//     Boosting saturation on stored values clamps in the wrong scale and can
+//     leave colour > alpha, which is not a representable premultiplied pixel and
+//     misbehaves the moment it is composited. They unpremultiply too, so the
+//     clamp happens where the gamut is.
+//
+// GAUSSIAN BLUR IS SEPARABLE: two 1D passes, O(radius) per pixel rather than
+// O(radius^2). At radius 30 that is 61 taps instead of 3721.
+//
+// BOX BLUR IS A RUNNING SUM, so its per-pixel cost does not depend on radius at
+// all - which is what makes it the right primitive for a live preview.
+//
+// Both claims are MEASURED, not asserted: three passes over a 512x512 buffer at
+// radii 2 / 32 / 128 took
+//   box   61 / 46 / 40 ms   -- flat, i.e. genuinely radius-independent
+//   gauss 19 / 201 / 715 ms -- linear in radius (a non-separable O(r^2) kernel
+//                              would have been ~4900 ms at radius 128, 7x worse)
+// The tests assert the CORRECTNESS properties; these are the cost properties,
+// and they are recorded here because a "separable" blur that quietly became
+// quadratic would still pass every pixel assertion in the suite.
+//
+// BORDERS CLAMP TO EDGE. Zero-padding a premultiplied buffer means "the image is
+// surrounded by transparency", so blurring an opaque photo eats its frame: the
+// corner of a uniform white field comes back grey AND half-transparent.
+//
+// RESTRICTED APPLICATION. Every function takes a coverage-mask handle, and 0
+// means "the whole buffer". The mask's R channel is linear coverage - the exact
+// same convention as wynimg_composite's layer masks and as the coverage buffers
+// paint.wyn and text.wyn build - and the result is
+// `original*(1-coverage) + filtered*coverage`. That is everything a selection
+// needs, and because the blend lives in the C driver rather than in each kernel,
+// a filter added later cannot forget it.
+//
+// WHY SO LITTLE HAPPENS IN THIS FILE. A 12MP buffer is 48M channel values; a
+// Wyn-side loop over them would be 48M FFI calls, and a Wyn array cell is a
+// 16-byte tagged union so the pixels cannot be brought over in bulk either. So
+// Wyn passes handles and scalars, and csrc/wynimg_filter.c does the work - the
+// same division as every other kernel in this project.
+//
+// CALL CONVENTION -- v1.20.0 codegen constraint, see the long note at the top of
+// src/pixel.wyn. `extern fn`s are emitted UNPREFIXED into each importing unit,
+// so importers call them BARE; a `pub fn` here must reach them as
+// `wynimg::flt_gaussian(...)`, because both the bare and the dotted spellings
+// get double-prefixed to `filter_wynimg_*`.
+//
+// This module declares its OWN externs rather than adding them to src/pixel.wyn,
+// so the filter engine is one file's worth of surface area. Re-declaring
+// wynimg_new / wynimg_free with identical signatures is how src/text.wyn does it
+// and is safe: an extern is emitted once per compilation unit.
+
+import pixel
+
+// ---- externs (csrc/wynimg_filter.c) ---------------------------------------
+//
+// Handles are `int`, never `ptr` (`ptr` in a module `pub fn` signature emits the
+// undefined C type `filter_ptr`). C takes them as `void*` and resolves every one
+// through wynimg_deref(), so a stale handle is a null-path no-op rather than a
+// use-after-free. Wyn `float` <-> C `double`, Wyn `int` <-> C `long long`;
+// getting that wrong returns silent garbage.
+
+extern fn wynimg_flt_gaussian(buf: int, radius: float, mask: int) -> int;
+extern fn wynimg_flt_box(buf: int, radius: int, mask: int) -> int;
+extern fn wynimg_flt_unsharp(buf: int, radius: float, amount: float,
+                             threshold: float, mask: int) -> int;
+extern fn wynimg_flt_brightness(buf: int, amount: float, mask: int) -> int;
+extern fn wynimg_flt_contrast(buf: int, amount: float, mask: int) -> int;
+extern fn wynimg_flt_exposure(buf: int, stops: float, mask: int) -> int;
+extern fn wynimg_flt_saturation(buf: int, amount: float, mask: int) -> int;
+extern fn wynimg_flt_greyscale(buf: int, amount: float, mask: int) -> int;
+extern fn wynimg_flt_hue_rotate(buf: int, degrees: float, mask: int) -> int;
+extern fn wynimg_flt_levels(buf: int, black: float, white: float,
+                            gamma: float, mask: int) -> int;
+extern fn wynimg_flt_invert(buf: int, mask: int) -> int;
+extern fn wynimg_flt_threshold(buf: int, level: float, mask: int) -> int;
+extern fn wynimg_flt_posterize(buf: int, levels: int, mask: int) -> int;
+extern fn wynimg_flt_curve(buf: int, lut: int, mask: int) -> int;
+
+extern fn wynimg_lut_identity(lut: int) -> int;
+extern fn wynimg_lut_set(lut: int, i: int, r: float, g: float, b: float) -> int;
+extern fn wynimg_lut_get(lut: int, i: int, chan: int) -> float;
+
+extern fn wynimg_flt_cov_rect(mask: int, x: int, y: int, w: int, h: int,
+                              cov: float) -> int;
+extern fn wynimg_flt_sum(buf: int, chan: int) -> float;
+
+// Buffer lifecycle, re-declared here (see the note above).
+extern fn wynimg_new(w: int, h: int) -> int;
+extern fn wynimg_free(p: int);
+extern fn wynimg_width(p: int) -> int;
+extern fn wynimg_height(p: int) -> int;
+
+// ---- blurs -----------------------------------------------------------------
+
+// Gaussian blur. `radius` is the kernel half-width in pixels; sigma is
+// radius/3, so the kernel is truncated at 3 sigma (99.73% of the distribution -
+// cutting closer leaves a visible step at the kernel edge).
+//
+// Separable: a horizontal pass then a vertical one. radius <= 0 succeeds as a
+// no-op, which is what a slider at zero should do; a radius above 512, or NaN,
+// is REFUSED rather than turned into a multi-minute convolution.
+pub fn gaussian(buf: int, radius: float, mask: int) -> bool {
+    return wynimg::flt_gaussian(buf, radius, mask) == 1
+}
+
+// Box blur, running-sum, so the per-pixel cost is two adds regardless of
+// `radius`. The window is 2*radius+1 and clamps to the edge at both ends, which
+// is what keeps the window width constant everywhere and therefore leaves a
+// uniform field exactly unchanged.
+//
+// Three box passes approximate a gaussian to within ~3%, which is the standard
+// way to get a fast large-radius blur; that composition is left to the caller
+// rather than hidden here, so `box_blur` stays the primitive it is.
+pub fn box_blur(buf: int, radius: int, mask: int) -> bool {
+    return wynimg::flt_box(buf, radius, mask) == 1
+}
+
+// Unsharp mask: original + amount * (original - blurred).
+//
+// BUILT ON THE GAUSSIAN, not on a fixed 3x3 kernel. A 3x3 sharpen has one
+// hard-coded scale and rings on anything larger; unsharp masking with a radius
+// is the operation photographers mean. Reusing the blur also means the two
+// cannot drift: if the blur's normalisation broke, "sharpen of a uniform field
+// is unchanged" fails too.
+//
+// `threshold` is why this is usable on a photograph. Without it, sharpening
+// amplifies sensor noise in flat areas exactly as hard as it amplifies edges,
+// because noise IS high-frequency detail. A pixel whose largest per-channel
+// deviation from its blurred self is below the threshold is left untouched.
+pub fn unsharp(buf: int, radius: float, amount: float, threshold: float,
+               mask: int) -> bool {
+    return wynimg::flt_unsharp(buf, radius, amount, threshold, mask) == 1
+}
+
+// The common sharpen: radius 1.5, no threshold. `amount` is the only knob most
+// callers want.
+pub fn sharpen(buf: int, amount: float, mask: int) -> bool {
+    return wynimg::flt_unsharp(buf, 1.5, amount, 0.0, mask) == 1
+}
+
+// ---- tone ------------------------------------------------------------------
+
+// ADDITIVE offset in linear light. Additive because that is what lifts shadows;
+// the multiplicative control is `exposure`.
+pub fn brightness(buf: int, amount: float, mask: int) -> bool {
+    return wynimg::flt_brightness(buf, amount, mask) == 1
+}
+
+// Scales values away from PERCEPTUAL mid-grey. 1.0 identity, 0.0 flattens to the
+// pivot, >1 increases.
+//
+// THE PIVOT IS THE LINEAR VALUE OF sRGB 0.5 (0.2140), NOT LINEAR 0.5. This is
+// the choice the task calls out and it is worth being explicit: "contrast" means
+// "push away from the middle", and the middle a user sees is the middle of the
+// grey ramp they see, which is sRGB 0.5. Linear 0.5 is sRGB 0.735 - a light grey
+// - so pivoting there makes a contrast boost darken everything below
+// three-quarters brightness, which reads as "contrast also made it much darker".
+// `levels` and `curve`, by contrast, are documented as numeric controls that
+// operate on LINEAR values directly: a user typing a black point of 0.5 there
+// means the linear 0.5.
+pub fn contrast(buf: int, amount: float, mask: int) -> bool {
+    return wynimg::flt_contrast(buf, amount, mask) == 1
+}
+
+// Multiplies by 2^stops. This is the operation that is physically an exposure
+// change, and it is only meaningful in LINEAR light - the same multiply applied
+// to sRGB-encoded values is not a stop of anything.
+pub fn exposure(buf: int, stops: float, mask: int) -> bool {
+    return wynimg::flt_exposure(buf, stops, mask) == 1
+}
+
+// Black/white point remap followed by a gamma: t = (v-black)/(white-black),
+// out = t^(1/gamma). gamma > 1 brightens midtones. white <= black and
+// gamma <= 0 are refused - both are caller errors with no sane reading, and
+// silently clamping them would hide a bad slider binding.
+pub fn levels(buf: int, black: float, white: float, gamma: float,
+              mask: int) -> bool {
+    return wynimg::flt_levels(buf, black, white, gamma, mask) == 1
+}
+
+// ---- colour ----------------------------------------------------------------
+
+// Interpolates each channel against the pixel's own Rec.709 luminance. 0 fully
+// desaturates, 1 is identity, >1 boosts.
+pub fn saturation(buf: int, amount: float, mask: int) -> bool {
+    return wynimg::flt_saturation(buf, amount, mask) == 1
+}
+
+// Mixes towards Rec.709 luminance; amount 1.0 is fully grey.
+//
+// THE WEIGHTS ARE THE WHOLE CONTENT of this function: 0.2126 R, 0.7152 G,
+// 0.0722 B. Pure red becomes 0.2126, not 0.3333 - an equal-weight "greyscale"
+// makes red 57% too bright and green 53% too dark, which is obvious the first
+// time a red is compared with a green. tests/test_filter.wyn asserts the exact
+// weight, twice, so the flat average cannot creep back in.
+pub fn greyscale(buf: int, amount: float, mask: int) -> bool {
+    return wynimg::flt_greyscale(buf, amount, mask) == 1
+}
+
+// Rotates hue by `degrees`, PRESERVING LUMINANCE.
+//
+// Done by rotating the two Rec.709 chroma axes, not by round-tripping through
+// HSV. HSV's "value" is max(r,g,b), so an HSV hue rotation changes how bright a
+// colour looks: rotating pure red to pure blue keeps V=1 while luminance falls
+// from 0.2126 to 0.0722. Rotating the chroma plane leaves Y untouched by
+// construction.
+//
+// Honest limitation: the Rec.709 gamut is not a cylinder, so a fully saturated
+// colour rotated far enough leaves it and is clamped. No rotation both preserves
+// luminance and stays in gamut for saturated primaries.
+pub fn hue_rotate(buf: int, degrees: float, mask: int) -> bool {
+    return wynimg::flt_hue_rotate(buf, degrees, mask) == 1
+}
+
+// out = 1 - in, in LINEAR light.
+//
+// This is NOT the same picture as inverting 8-bit sRGB bytes, which is what most
+// editors do: linear 0.2140 (sRGB 0.5) inverts to linear 0.7860 (sRGB 0.906),
+// where a byte invert would return sRGB 0.5 unchanged. Linear is the right
+// choice for a linear pipeline - it makes invert an involution on the values
+// actually stored, which is asserted.
+pub fn invert(buf: int, mask: int) -> bool {
+    return wynimg::flt_invert(buf, mask) == 1
+}
+
+// Rec.709 luminance below `level` becomes black, at or above becomes white.
+// Luminance rather than per-channel, because a per-channel threshold turns a
+// mid-red into pure red instead of into black or white.
+pub fn threshold(buf: int, level: float, mask: int) -> bool {
+    return wynimg::flt_threshold(buf, level, mask) == 1
+}
+
+// Quantises each channel to `n` evenly spaced levels (n >= 2). The endpoints are
+// hit exactly, which is what stops posterize from dimming whites.
+pub fn posterize(buf: int, n: int, mask: int) -> bool {
+    return wynimg::flt_posterize(buf, n, mask) == 1
+}
+
+// ---- per-channel curves ----------------------------------------------------
+//
+// A CURVE IS AN N x 1 WYNIMG BUFFER whose R/G/B channels hold the output for
+// each of N equally spaced inputs in [0,1]. Reusing the buffer type means a
+// curve gets the same generation-tagged-handle safety as everything else - a
+// freed curve is a refusal, not a wild read - and needs no second allocator, no
+// second free path, and no new Wyn type. Values between entries are linearly
+// interpolated, so a 32-entry table is a smooth curve and not 32 visible bands.
+
+// A curve with `n` control points, pre-filled with the identity ramp. 0 on
+// failure. Free it with `free_curve`.
+pub fn new_curve(n: int) -> int {
+    if n < 2 { return 0 }
+    var h = wynimg::new(n, 1)
+    if h == 0 { return 0 }
+    if wynimg::lut_identity(h) != 1 {
+        wynimg::free(h)
+        return 0
+    }
+    return h
+}
+
+pub fn free_curve(c: int) { wynimg::free(c) }
+
+// Number of control points in a curve, or 0 if the handle is stale.
+pub fn curve_points(c: int) -> int { return wynimg::width(c) }
+
+// Sets control point `i` to (r,g,b). Out-of-range indices and NaN are refused
+// rather than wrapped or absorbed.
+pub fn curve_set(c: int, i: int, r: float, g: float, b: float) -> bool {
+    return wynimg::lut_set(c, i, r, g, b) == 1
+}
+
+// Reads one channel of control point `i`. -1.0 when refused; a valid entry is in
+// [0,1] so the sentinel cannot be mistaken for data.
+pub fn curve_get(c: int, i: int, chan: int) -> float {
+    return wynimg::lut_get(c, i, chan)
+}
+
+// Applies a curve. A stale or null curve handle is REFUSED, not treated as
+// identity: "the curve you built was freed" must not look like a working no-op.
+pub fn curve(buf: int, c: int, mask: int) -> bool {
+    return wynimg::flt_curve(buf, c, mask) == 1
+}
+
+// A gamma curve, sampled into `n` points: out = in^(1/g). Convenience over
+// new_curve + a loop, and the only curve most callers want.
+pub fn gamma_curve(n: int, g: float) -> int {
+    if g <= 0.0 { return 0 }
+    var c = new_curve(n)
+    if c == 0 { return 0 }
+    var i = 0
+    while i < n {
+        var t = i.to_float() / (n - 1).to_float()
+        var v = Math.pow(t, 1.0 / g)
+        wynimg::lut_set(c, i, v, v, v)
+        i = i + 1
+    }
+    return c
+}
+
+// ---- coverage masks --------------------------------------------------------
+
+// A mask buffer of the given size, coverage 0 everywhere (so a filter through a
+// fresh mask changes nothing until a region is added). 0 on failure.
+pub fn new_mask(w: int, h: int) -> int { return wynimg::new(w, h) }
+
+pub fn free_mask(m: int) { wynimg::free(m) }
+
+// Sets constant coverage over an axis-aligned rectangle, clipped to the buffer.
+// This is the minimum a selection needs; it is in C because a 12MP rectangle
+// would otherwise be 12 million FFI calls.
+pub fn mask_rect(m: int, x: int, y: int, w: int, h: int, cov: float) -> bool {
+    return wynimg::flt_cov_rect(m, x, y, w, h, cov) == 1
+}
+
+// ---- measurement -----------------------------------------------------------
+
+// Sum of one channel over the whole buffer, AS STORED (premultiplied).
+//
+// This exists so a test can assert that a blur CONSERVES ENERGY, which is the
+// single most useful property of a correctly normalised kernel and one that no
+// per-pixel assertion can express. -1.0 when refused; a real sum of clamped data
+// is never negative.
+pub fn channel_sum(buf: int, chan: int) -> float {
+    return wynimg::flt_sum(buf, chan)
+}
+
+// Rec.709 luminance of an UNPREMULTIPLIED triple. Exposed because the hue and
+// greyscale assertions need the same weights the kernel uses, and hard-coding
+// them a second time in the test file is how a "verified" weight ends up being
+// verified against itself.
+pub fn luminance(r: float, g: float, b: float) -> float {
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+// The LINEAR value of sRGB 0.5 - the pivot `contrast` uses. A function, not a
+// module `var`, because a mutable module-level value is state a caller could
+// stomp; this project spells its constants this way throughout.
+pub fn mid_grey_linear() -> float { return 0.21404114 }

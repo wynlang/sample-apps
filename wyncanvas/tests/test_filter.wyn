@@ -1,0 +1,855 @@
+// test_filter - the filter engine, asserted on PIXELS and on derived-from-first-
+// principles numbers rather than on values captured from a previous run.
+//
+// SIX OF THESE EXIST BECAUSE THEY CATCH A SPECIFIC REAL BUG, and each was
+// confirmed to go RED when that bug is reintroduced (mutation-tested):
+//
+//   * "blur of a uniform field is unchanged" fails the moment the gaussian
+//     kernel is not normalised. Discrete gaussian samples do not sum to 1, so an
+//     unnormalised kernel makes every blur darken and de-opacify. Measured with
+//     the `k[t] /= sum` loop removed: a uniform white field came back
+//     0.9974 colour and 0.9974 alpha at radius 3, and 0.4967 at radius 0.5.
+//
+//   * "blur at the border does not darken" fails under zero-padding. In a
+//     PREMULTIPLIED buffer, zero-padding says "the image is surrounded by
+//     transparency", so the corner of an opaque white field comes back grey AND
+//     half-transparent. Measured with clamp-to-edge replaced by a skip: the
+//     corner was 0.3115.
+//
+//   * "greyscale of pure red is the Rec.709 weight" fails on flat 1/3 weights -
+//     0.3333 instead of 0.2126, red 57% too bright. This assertion IS the proof
+//     that a real luminance was used, so it is made against a number, not
+//     against filter.luminance() of the same weights.
+//
+//   * "saturation on a semi-transparent pixel preserves its unpremultiplied
+//     colour" fails if the unpremultiply is skipped. It reads RAW STORED values
+//     rather than going through wynimg_pick, because pick clamps to [0,1] and
+//     would hide exactly the overshoot the bug produces.
+//
+//   * "contrast does not shift the colour of a semi-transparent pixel" is the
+//     same defect on a filter that is not even linear, so it does not need the
+//     clamp to expose it: measured 0.7719 instead of 0.9860 with the
+//     unpremultiply removed.
+//
+//   * "a masked filter changes only covered pixels" fails if a filter applies its
+//     kernel without consulting coverage - which is what a selection is.
+//
+// Numbers below are computed by hand from the definitions and written out, so a
+// kernel that is wrong in the same way as the test cannot agree with it.
+
+import pixel
+import filter
+
+// ---- fixtures --------------------------------------------------------------
+
+// A w x h buffer of one constant PREMULTIPLIED colour. `r,g,b` are
+// UNPREMULTIPLIED linear values; wynimg_fill takes premultiplied, so the
+// multiply happens here and every fixture is stated in the units a person
+// reasons in.
+fn solid(w: int, h: int, r: float, g: float, b: float, a: float) -> int {
+    var buf = wynimg_new(w, h)
+    wynimg_fill(buf, r * a, g * a, b * a, a)
+    return buf
+}
+
+// Raw STORED (premultiplied) channel of pixel (x,y). Deliberately not
+// wynimg_pick: pick divides by alpha and clamps, which is the right read for a
+// colour but hides a stored value that violates colour <= alpha.
+fn raw(buf: int, w: int, x: int, y: int, c: int) -> float {
+    return wynimg_get(buf, pixel.px_index(w, x, y, c))
+}
+
+// ---- blur: normalisation ---------------------------------------------------
+
+test "gaussian blur of a uniform field is unchanged" {
+    // THE NORMALISATION TEST. A blur is a weighted average; if the weights do
+    // not sum to exactly 1 then averaging identical samples does not return that
+    // sample, and every blur shifts the whole image. Checked at four radii,
+    // small to large, because the two failure modes bite at opposite ends:
+    // dividing by the ANALYTIC 1/(sigma*sqrt(2pi)) instead of the discrete sum
+    // darkens worst at small sigma (the tails are cut hardest there), while
+    // omitting the division entirely brightens in proportion to sigma.
+    //
+    // THE FIXTURE IS A MID VALUE AT A FRACTIONAL ALPHA, DELIBERATELY, and this
+    // is the whole reason the test bites. An opaque white field is USELESS here:
+    // both correct and unnormalised kernels clamp back to 1.0, so the assertion
+    // passes over the bug. Mutation-measured - with `k[t] /= sum` deleted, a
+    // white field still read 1.0/1.0 while this 0.4-at-alpha-0.7 fixture read
+    // 1.0/1.0 too (both clamped UP), and at radius 0.5 read 0.4/0.7 correctly.
+    // Nothing below the clamp ceiling can hide, which is why the mid value and
+    // the energy test below are both needed.
+    var b = solid(24, 24, 0.4, 0.4, 0.4, 0.7)
+    assert_true(filter.gaussian(b, 0.5, 0))
+    assert_true(filter.gaussian(b, 1.0, 0))
+    assert_true(filter.gaussian(b, 3.0, 0))
+    assert_true(filter.gaussian(b, 9.0, 0))
+    // Centre, edge and corner: colour AND alpha still exactly what went in.
+    // Stored values are premultiplied, so colour is 0.4 * 0.7 = 0.28.
+    assert_true(pixel.approx(raw(b, 24, 12, 12, 0), 0.28, 0.0001))
+    assert_true(pixel.approx(raw(b, 24, 12, 12, 3), 0.7, 0.0001))
+    assert_true(pixel.approx(raw(b, 24, 0, 12, 0), 0.28, 0.0001))
+    assert_true(pixel.approx(raw(b, 24, 0, 0, 0), 0.28, 0.0001))
+    assert_true(pixel.approx(raw(b, 24, 0, 0, 3), 0.7, 0.0001))
+
+    // And an opaque one, for the ordinary case: still exactly 1, not 0.997.
+    var o = solid(24, 24, 1.0, 1.0, 1.0, 1.0)
+    assert_true(filter.gaussian(o, 4.0, 0))
+    assert_true(pixel.approx(raw(o, 24, 12, 12, 0), 1.0, 0.0001))
+    wynimg_free(b)
+    wynimg_free(o)
+}
+
+test "box blur of a uniform field is unchanged" {
+    // Same property for the running-sum kernel. Its failure mode is different -
+    // the window must stay 2r+1 wide at the borders too, which is why the
+    // entering AND leaving indices both clamp - so it needs its own assertion.
+    // Fractional alpha for the same reason as the gaussian above: a value at the
+    // clamp ceiling cannot show a normalisation error.
+    var b = solid(24, 24, 0.6, 0.6, 0.6, 0.75)
+    assert_true(filter.box_blur(b, 1, 0))
+    assert_true(filter.box_blur(b, 7, 0))
+    assert_true(pixel.approx(raw(b, 24, 12, 12, 0), 0.45, 0.0002))
+    assert_true(pixel.approx(raw(b, 24, 0, 0, 0), 0.45, 0.0002))
+    assert_true(pixel.approx(raw(b, 24, 23, 23, 3), 0.75, 0.0002))
+    wynimg_free(b)
+}
+
+// ---- blur: energy and symmetry ---------------------------------------------
+
+test "gaussian blur of one bright pixel conserves energy and is symmetric" {
+    // A normalised kernel MOVES light without creating or destroying it. Total
+    // energy is the assertion no per-pixel check can make: a kernel that is
+    // normalised but asymmetric, or one that drops its outermost tap, still
+    // looks plausible pixel by pixel.
+    //
+    // The bright pixel is at (16,16) of a 32x32 with radius 4, so its support is
+    // 12px clear of every border and no energy can leave or be duplicated by
+    // clamping. Any deviation from 1.0 is therefore the kernel's fault.
+    var b = wynimg_new(32, 32)
+    var i = pixel.px_index(32, 16, 16, 0)
+    wynimg_set(b, i, 1.0)
+    wynimg_set(b, i + 1, 1.0)
+    wynimg_set(b, i + 2, 1.0)
+    wynimg_set(b, i + 3, 1.0)
+    assert_true(pixel.approx(filter.channel_sum(b, 0), 1.0, 0.00001))
+
+    assert_true(filter.gaussian(b, 4.0, 0))
+    assert_true(pixel.approx(filter.channel_sum(b, 0), 1.0, 0.0005))
+    assert_true(pixel.approx(filter.channel_sum(b, 3), 1.0, 0.0005))
+
+    // Symmetric in both axes and about both diagonals. A separable pass that got
+    // its stride or its clamp wrong is asymmetric long before it loses energy.
+    var e = raw(b, 32, 13, 16, 0)
+    assert_true(e > 0.0)
+    assert_true(pixel.approx(raw(b, 32, 19, 16, 0), e, 0.00001))
+    assert_true(pixel.approx(raw(b, 32, 16, 13, 0), e, 0.00001))
+    assert_true(pixel.approx(raw(b, 32, 16, 19, 0), e, 0.00001))
+    // And the peak is still at the centre, brighter than its neighbour.
+    assert_true(raw(b, 32, 16, 16, 0) > e)
+    wynimg_free(b)
+}
+
+test "box blur of one bright pixel conserves energy" {
+    var b = wynimg_new(32, 32)
+    var i = pixel.px_index(32, 16, 16, 0)
+    wynimg_set(b, i, 1.0)
+    wynimg_set(b, i + 3, 1.0)
+    assert_true(filter.box_blur(b, 3, 0))
+    assert_true(pixel.approx(filter.channel_sum(b, 0), 1.0, 0.0005))
+    // A 7x7 box spreads 1.0 over 49 pixels: every one of them is 1/49.
+    assert_true(pixel.approx(raw(b, 32, 16, 16, 0), 1.0 / 49.0, 0.00001))
+    assert_true(pixel.approx(raw(b, 32, 13, 13, 0), 1.0 / 49.0, 0.00001))
+    // And nothing outside the 7x7 support.
+    assert_true(pixel.approx(raw(b, 32, 12, 16, 0), 0.0, 0.00001))
+    wynimg_free(b)
+}
+
+// ---- blur: borders ---------------------------------------------------------
+
+test "gaussian blur at the border does not darken" {
+    // CLAMP TO EDGE, NOT ZERO PAD. With zero padding the corner of an opaque
+    // white field loses roughly two thirds of its weight to imaginary
+    // transparent neighbours: colour AND alpha both fall, so the image grows a
+    // dark translucent frame. This is the bug that makes a blurred photograph
+    // look vignetted.
+    // The white field IS the right fixture for THIS bug - zero-padding can only
+    // darken, and 1.0 is the value furthest from the padding, so the corner falls
+    // hardest (measured 0.3115 with the clamp replaced by a skip). A mid-value
+    // fixture is added alongside so the assertion is not resting on the clamp
+    // ceiling, which is what rescued the unnormalised-kernel mutant above.
+    var b = solid(16, 16, 1.0, 1.0, 1.0, 1.0)
+    assert_true(filter.gaussian(b, 5.0, 0))
+    assert_true(pixel.approx(raw(b, 16, 0, 0, 0), 1.0, 0.0001))
+    assert_true(pixel.approx(raw(b, 16, 0, 0, 3), 1.0, 0.0001))
+    assert_true(pixel.approx(raw(b, 16, 15, 0, 0), 1.0, 0.0001))
+    assert_true(pixel.approx(raw(b, 16, 15, 15, 3), 1.0, 0.0001))
+    assert_true(pixel.approx(raw(b, 16, 8, 0, 0), 1.0, 0.0001))
+
+    var m = solid(16, 16, 0.5, 0.5, 0.5, 0.6)
+    assert_true(filter.gaussian(m, 5.0, 0))
+    assert_true(pixel.approx(raw(m, 16, 0, 0, 0), 0.3, 0.0001))
+    assert_true(pixel.approx(raw(m, 16, 0, 0, 3), 0.6, 0.0001))
+    wynimg_free(b)
+    wynimg_free(m)
+}
+
+test "box blur at the border does not darken" {
+    var b = solid(16, 16, 1.0, 1.0, 1.0, 1.0)
+    assert_true(filter.box_blur(b, 6, 0))
+    assert_true(pixel.approx(raw(b, 16, 0, 0, 0), 1.0, 0.0002))
+    assert_true(pixel.approx(raw(b, 16, 0, 0, 3), 1.0, 0.0002))
+    var m = solid(16, 16, 0.5, 0.5, 0.5, 0.6)
+    assert_true(filter.box_blur(m, 6, 0))
+    assert_true(pixel.approx(raw(m, 16, 0, 0, 0), 0.3, 0.0002))
+    assert_true(pixel.approx(raw(m, 16, 0, 0, 3), 0.6, 0.0002))
+    wynimg_free(b)
+    wynimg_free(m)
+}
+
+// ---- sharpen ---------------------------------------------------------------
+
+test "sharpen of a uniform field is unchanged" {
+    // original + amount*(original - blurred), and on a uniform field the blurred
+    // copy IS the original, so the correction term is exactly zero. This fails
+    // whenever the blur it is built on stops being normalised - which is the
+    // coupling that makes building sharpen on the blur worth doing.
+    // A fractional alpha, so a change in EITHER direction is visible rather than
+    // being absorbed by the [0,1] clamp - see the note on the gaussian
+    // uniform-field test.
+    var b = solid(20, 20, 0.5, 0.5, 0.5, 0.8)
+    assert_true(filter.sharpen(b, 2.0, 0))
+    assert_true(filter.unsharp(b, 4.0, 3.0, 0.0, 0))
+    assert_true(pixel.approx(raw(b, 20, 10, 10, 0), 0.4, 0.0002))
+    assert_true(pixel.approx(raw(b, 20, 0, 0, 0), 0.4, 0.0002))    // border too
+    assert_true(pixel.approx(raw(b, 20, 10, 10, 3), 0.8, 0.0002))
+    wynimg_free(b)
+}
+
+test "sharpen increases an existing edge" {
+    // The other half of the sharpen contract: it must actually do something. A
+    // step edge gets overshoot on the bright side and undershoot on the dark
+    // side, which is what "sharper" is.
+    var b = wynimg_new(32, 8)
+    // Left half 0.3, right half 0.7, opaque throughout.
+    var y = 0
+    while y < 8 {
+        var x = 0
+        while x < 32 {
+            var v = 0.3
+            if x >= 16 { v = 0.7 }
+            var i = pixel.px_index(32, x, y, 0)
+            wynimg_set(b, i, v)
+            wynimg_set(b, i + 1, v)
+            wynimg_set(b, i + 2, v)
+            wynimg_set(b, i + 3, 1.0)
+            y = y
+            x = x + 1
+        }
+        y = y + 1
+    }
+    assert_true(filter.unsharp(b, 3.0, 1.5, 0.0, 0))
+    assert_true(raw(b, 32, 16, 4, 0) > 0.7)      // overshoot on the bright side
+    assert_true(raw(b, 32, 15, 4, 0) < 0.3)      // undershoot on the dark side
+    wynimg_free(b)
+}
+
+test "the unsharp threshold leaves low-contrast detail alone" {
+    // WITHOUT A THRESHOLD, SHARPENING AMPLIFIES NOISE exactly as hard as it
+    // amplifies edges, because noise is precisely high-frequency detail. A
+    // +/-0.01 checkerboard stands in for sensor noise: a threshold of 0.2 must
+    // leave it untouched, while a threshold of 0 must amplify it.
+    var w = 16
+    var b1 = wynimg_new(w, w)
+    var b2 = wynimg_new(w, w)
+    var y = 0
+    while y < w {
+        var x = 0
+        while x < w {
+            var v = 0.5
+            var par = x + y
+            if par % 2 == 0 { v = 0.51 }
+            var i = pixel.px_index(w, x, y, 0)
+            wynimg_set(b1, i, v)      wynimg_set(b1, i + 3, 1.0)
+            wynimg_set(b2, i, v)      wynimg_set(b2, i + 3, 1.0)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    var before = raw(b1, w, 8, 8, 0)
+    assert_true(filter.unsharp(b1, 2.0, 3.0, 0.2, 0))   // above the noise floor
+    assert_true(filter.unsharp(b2, 2.0, 3.0, 0.0, 0))   // no floor at all
+    assert_true(pixel.approx(raw(b1, w, 8, 8, 0), before, 0.00001))
+    assert_true(pixel.approx(raw(b2, w, 8, 8, 0), before, 0.00001) == false)
+    wynimg_free(b1)
+    wynimg_free(b2)
+}
+
+// ---- tone ------------------------------------------------------------------
+
+test "brightness is an additive offset in linear light" {
+    var b = solid(4, 4, 0.2, 0.2, 0.2, 1.0)
+    assert_true(filter.brightness(b, 0.1, 0))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 0), 0.3, 0.00001))
+    wynimg_free(b)
+}
+
+test "exposure is a multiply by 2^stops" {
+    // One stop up doubles the LINEAR value. That is only true in linear light,
+    // which is why exposure lives here and not at the sRGB edge.
+    var b = solid(4, 4, 0.2, 0.2, 0.2, 1.0)
+    assert_true(filter.exposure(b, 1.0, 0))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 0), 0.4, 0.00001))
+    assert_true(filter.exposure(b, -2.0, 0))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 0), 0.1, 0.00001))
+    wynimg_free(b)
+}
+
+test "contrast pivots on perceptual mid-grey, not linear 0.5" {
+    // THE DOCUMENTED CHOICE, ASSERTED. The pivot is the LINEAR value of sRGB 0.5
+    // (0.21404), because that is the grey a user sees in the middle of the ramp.
+    // A pixel sitting exactly on the pivot must survive ANY contrast amount
+    // untouched; a pixel at linear 0.5 must not, which is what distinguishes
+    // this pivot from the naive one.
+    var p = filter.mid_grey_linear()
+    // Cross-check the constant against the transfer function rather than
+    // trusting the literal: this is what proves 0.21404 is sRGB 0.5.
+    assert_true(pixel.approx(p, pixel.srgb_to_linear(0.5), 0.00001))
+
+    var b = solid(4, 4, p, p, p, 1.0)
+    assert_true(filter.contrast(b, 3.0, 0))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 0), p, 0.00002))
+
+    var b2 = solid(4, 4, 0.5, 0.5, 0.5, 1.0)
+    assert_true(filter.contrast(b2, 2.0, 0))
+    // 0.21404114 + (0.5 - 0.21404114) * 2 = 0.78595886
+    assert_true(pixel.approx(raw(b2, 4, 1, 1, 0), 0.78595886, 0.00002))
+    wynimg_free(b)
+    wynimg_free(b2)
+}
+
+test "levels remaps the black and white points and then applies gamma" {
+    // black 0.2, white 0.8 => t = (v - 0.2) / 0.6, then t^(1/gamma).
+    var lo = solid(4, 4, 0.2, 0.2, 0.2, 1.0)
+    var mid = solid(4, 4, 0.5, 0.5, 0.5, 1.0)
+    var hi = solid(4, 4, 0.8, 0.8, 0.8, 1.0)
+    assert_true(filter.levels(lo, 0.2, 0.8, 1.0, 0))
+    assert_true(filter.levels(mid, 0.2, 0.8, 1.0, 0))
+    assert_true(filter.levels(hi, 0.2, 0.8, 1.0, 0))
+    assert_true(pixel.approx(raw(lo, 4, 1, 1, 0), 0.0, 0.00001))
+    assert_true(pixel.approx(raw(mid, 4, 1, 1, 0), 0.5, 0.00001))
+    assert_true(pixel.approx(raw(hi, 4, 1, 1, 0), 1.0, 0.00001))
+
+    // gamma 2.0 on t = 0.25 gives 0.25^(1/2) = 0.5. Applied AFTER the remap.
+    var g = solid(4, 4, 0.35, 0.35, 0.35, 1.0)   // t = (0.35-0.2)/0.6 = 0.25
+    assert_true(filter.levels(g, 0.2, 0.8, 2.0, 0))
+    assert_true(pixel.approx(raw(g, 4, 1, 1, 0), 0.5, 0.00002))
+
+    // Refusals: an inverted or degenerate range and a non-positive gamma are
+    // caller errors with no sane reading, so they are refused rather than
+    // clamped into something that looks like it worked.
+    assert_true(filter.levels(g, 0.8, 0.2, 1.0, 0) == false)
+    assert_true(filter.levels(g, 0.5, 0.5, 1.0, 0) == false)
+    assert_true(filter.levels(g, 0.0, 1.0, 0.0, 0) == false)
+    wynimg_free(lo)
+    wynimg_free(mid)
+    wynimg_free(hi)
+    wynimg_free(g)
+}
+
+// ---- colour ----------------------------------------------------------------
+
+test "greyscale of pure red is the Rec.709 weight 0.2126, not 0.3333" {
+    // THIS ASSERTION IS THE PROOF THAT A REAL LUMINANCE WAS USED. The flat
+    // average that every naive greyscale reaches for gives 0.33333 - 57% too
+    // bright for red - and gives green 0.3333 where the true weight is 0.7152,
+    // 53% too dark. Both are checked, because a broken weight table might be
+    // wrong in only one channel.
+    var r = solid(4, 4, 1.0, 0.0, 0.0, 1.0)
+    assert_true(filter.greyscale(r, 1.0, 0))
+    assert_true(pixel.approx(raw(r, 4, 1, 1, 0), 0.2126, 0.0001))
+    // Explicitly NOT the flat average.
+    assert_true(pixel.approx(raw(r, 4, 1, 1, 0), 0.3333, 0.01) == false)
+    // Fully grey means all three channels agree.
+    assert_true(pixel.approx(raw(r, 4, 1, 1, 1), 0.2126, 0.0001))
+    assert_true(pixel.approx(raw(r, 4, 1, 1, 2), 0.2126, 0.0001))
+
+    var g = solid(4, 4, 0.0, 1.0, 0.0, 1.0)
+    assert_true(filter.greyscale(g, 1.0, 0))
+    assert_true(pixel.approx(raw(g, 4, 1, 1, 0), 0.7152, 0.0001))
+    assert_true(pixel.approx(raw(g, 4, 1, 1, 0), 0.3333, 0.01) == false)
+
+    var bl = solid(4, 4, 0.0, 0.0, 1.0, 1.0)
+    assert_true(filter.greyscale(bl, 1.0, 0))
+    assert_true(pixel.approx(raw(bl, 4, 1, 1, 0), 0.0722, 0.0001))
+
+    // Not Rec.601 either (0.299/0.587/0.114), which is the other plausible
+    // wrong answer and the one a copied snippet is most likely to bring.
+    assert_true(pixel.approx(raw(bl, 4, 1, 1, 0), 0.114, 0.005) == false)
+    wynimg_free(r)
+    wynimg_free(g)
+    wynimg_free(bl)
+}
+
+test "saturation 0 equals greyscale, and 1 is identity" {
+    var a = solid(4, 4, 0.7, 0.3, 0.1, 1.0)
+    var c = solid(4, 4, 0.7, 0.3, 0.1, 1.0)
+    assert_true(filter.saturation(a, 0.0, 0))
+    assert_true(filter.greyscale(c, 1.0, 0))
+    assert_true(pixel.approx(raw(a, 4, 1, 1, 0), raw(c, 4, 1, 1, 0), 0.00001))
+
+    var d = solid(4, 4, 0.7, 0.3, 0.1, 1.0)
+    assert_true(filter.saturation(d, 1.0, 0))
+    assert_true(pixel.approx(raw(d, 4, 1, 1, 0), 0.7, 0.00001))
+    assert_true(pixel.approx(raw(d, 4, 1, 1, 1), 0.3, 0.00001))
+    wynimg_free(a)
+    wynimg_free(c)
+    wynimg_free(d)
+}
+
+test "saturation on a semi-transparent pixel preserves its unpremultiplied colour" {
+    // THE UNPREMULTIPLY TEST. Two pixels of the SAME colour at different alphas
+    // must come out the same colour.
+    //
+    // Read RAW and divide by alpha here, deliberately, rather than using
+    // wynimg_pick: pick clamps its quotient to [0,1], and the failure this test
+    // exists for is an overshoot above 1.0. Through pick, both the correct and
+    // the broken implementation report 1.0 and the test passes vacuously.
+    //
+    // The boost is large enough that red saturates. That is the point: for a
+    // linear map like saturation, premultiplication commutes with the maths and
+    // only the CLAMP tells the two implementations apart. Applying it to stored
+    // values clamps in the wrong scale and leaves colour > alpha - a pixel that
+    // is not even representable as premultiplied and that misbehaves the instant
+    // it is composited.
+    //
+    //   colour (0.9, 0.4, 0.3), Y = 0.2126*0.9 + 0.7152*0.4 + 0.0722*0.3
+    //                             = 0.49908
+    //   sat 2.0 => R = 0.49908 + (0.9 - 0.49908)*2 = 1.30092 -> clamps to 1.0
+    // Correct STORED value at alpha 0.5 is therefore 0.5, exactly alpha.
+    // Skipping the unpremultiply gives 0.6505 - colour 30% above alpha.
+    var op = solid(4, 4, 0.9, 0.4, 0.3, 1.0)
+    var tr = solid(4, 4, 0.9, 0.4, 0.3, 0.5)
+    assert_true(filter.saturation(op, 2.0, 0))
+    assert_true(filter.saturation(tr, 2.0, 0))
+
+    var a_tr = raw(tr, 4, 1, 1, 3)
+    assert_true(pixel.approx(a_tr, 0.5, 0.00001))     // alpha is never touched
+
+    var i = 0
+    while i < 3 {
+        var c_op = raw(op, 4, 1, 1, i)                        // alpha 1: stored = colour
+        var c_tr = raw(tr, 4, 1, 1, i) / a_tr                 // unpremultiplied
+        assert_true(pixel.approx(c_tr, c_op, 0.0001))
+        // The premultiplied invariant: stored colour never exceeds alpha.
+        assert_true(raw(tr, 4, 1, 1, i) <= a_tr + 0.00001)
+        i = i + 1
+    }
+    // And the hand-computed value, so "both wrong in the same way" cannot pass.
+    assert_true(pixel.approx(raw(tr, 4, 1, 1, 0), 0.5, 0.0001))
+    wynimg_free(op)
+    wynimg_free(tr)
+}
+
+test "contrast does not shift the colour of a semi-transparent pixel" {
+    // The same defect on a filter that is NOT linear, so no clamp is needed to
+    // expose it - which makes this the cleaner of the two unpremultiply proofs.
+    //
+    //   0.6 grey, pivot P = 0.21404114, contrast 2.0
+    //   correct: P + (0.6 - P)*2 = 0.98595886
+    //   skipping the unpremultiply at alpha 0.5 operates on the stored 0.3:
+    //            P + (0.3 - P)*2 = 0.38595886 stored -> 0.77191772 as a colour
+    // A 22% colour shift caused purely by the pixel being half transparent.
+    var op = solid(4, 4, 0.6, 0.6, 0.6, 1.0)
+    var tr = solid(4, 4, 0.6, 0.6, 0.6, 0.5)
+    assert_true(filter.contrast(op, 2.0, 0))
+    assert_true(filter.contrast(tr, 2.0, 0))
+    var col = raw(tr, 4, 1, 1, 0) / raw(tr, 4, 1, 1, 3)
+    assert_true(pixel.approx(col, 0.98595886, 0.0001))
+    assert_true(pixel.approx(col, raw(op, 4, 1, 1, 0), 0.0001))
+    // Explicitly NOT the value the broken version produces.
+    assert_true(pixel.approx(col, 0.77191772, 0.01) == false)
+    wynimg_free(op)
+    wynimg_free(tr)
+}
+
+test "hue rotation preserves Rec.709 luminance" {
+    // Rotating the two CHROMA axes leaves Y untouched by construction. An HSV
+    // round trip would not: it holds max(r,g,b) constant instead, so rotating
+    // red to blue would keep V = 1 while luminance fell from 0.2126 to 0.0722 -
+    // the picture visibly changes brightness as the hue slider moves.
+    var b = solid(4, 4, 0.6, 0.35, 0.2, 1.0)
+    var y0 = filter.luminance(0.6, 0.35, 0.2)
+    var i = 0
+    while i < 4 {
+        assert_true(filter.hue_rotate(b, 45.0, 0))
+        var y1 = filter.luminance(raw(b, 4, 1, 1, 0),
+                                 raw(b, 4, 1, 1, 1),
+                                 raw(b, 4, 1, 1, 2))
+        assert_true(pixel.approx(y1, y0, 0.001))
+        i = i + 1
+    }
+    // 180 degrees of rotation applied in 45-degree steps is a real change: the
+    // luminance survived because the maths preserves it, not because nothing
+    // happened.
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 0), 0.6, 0.02) == false)
+    wynimg_free(b)
+}
+
+test "a 360 degree hue rotation is identity" {
+    var b = solid(4, 4, 0.6, 0.35, 0.2, 1.0)
+    assert_true(filter.hue_rotate(b, 360.0, 0))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 0), 0.6, 0.0005))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 1), 0.35, 0.0005))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 2), 0.2, 0.0005))
+    wynimg_free(b)
+}
+
+test "hue rotation on a semi-transparent pixel preserves its colour" {
+    var op = solid(4, 4, 0.6, 0.35, 0.2, 1.0)
+    var tr = solid(4, 4, 0.6, 0.35, 0.2, 0.4)
+    assert_true(filter.hue_rotate(op, 120.0, 0))
+    assert_true(filter.hue_rotate(tr, 120.0, 0))
+    var a_tr = raw(tr, 4, 1, 1, 3)
+    var i = 0
+    while i < 3 {
+        assert_true(pixel.approx(raw(tr, 4, 1, 1, i) / a_tr,
+                                 raw(op, 4, 1, 1, i), 0.0005))
+        i = i + 1
+    }
+    wynimg_free(op)
+    wynimg_free(tr)
+}
+
+test "invert twice is identity" {
+    // out = 1 - in in LINEAR light, so it is an involution on the values
+    // actually stored. Checked on three unequal channels and at a fractional
+    // alpha, because the alpha path is where an invert most often goes wrong: it
+    // must not invert alpha, and it must not shift the colour of a
+    // semi-transparent pixel either.
+    var b = solid(4, 4, 0.7, 0.25, 0.05, 0.6)
+    assert_true(filter.invert(b, 0))
+    // One invert really did something: 1 - 0.7 = 0.3, stored premultiplied.
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 0) / 0.6, 0.3, 0.0001))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 3), 0.6, 0.00001))   // alpha intact
+    assert_true(filter.invert(b, 0))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 0) / 0.6, 0.7, 0.0001))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 1) / 0.6, 0.25, 0.0001))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 2) / 0.6, 0.05, 0.0001))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 3), 0.6, 0.00001))
+    wynimg_free(b)
+}
+
+test "threshold cuts on luminance, not per channel" {
+    // Pure red has luminance 0.2126. A per-channel threshold would leave it as
+    // pure red (R above, G and B below); a luminance threshold makes it black or
+    // white as a whole, which is what a threshold means.
+    var lo = solid(4, 4, 1.0, 0.0, 0.0, 1.0)
+    assert_true(filter.threshold(lo, 0.3, 0))     // 0.2126 < 0.3 -> black
+    assert_true(pixel.approx(raw(lo, 4, 1, 1, 0), 0.0, 0.00001))
+    assert_true(pixel.approx(raw(lo, 4, 1, 1, 1), 0.0, 0.00001))
+
+    var hi = solid(4, 4, 1.0, 0.0, 0.0, 1.0)
+    assert_true(filter.threshold(hi, 0.2, 0))     // 0.2126 >= 0.2 -> white
+    assert_true(pixel.approx(raw(hi, 4, 1, 1, 0), 1.0, 0.00001))
+    assert_true(pixel.approx(raw(hi, 4, 1, 1, 2), 1.0, 0.00001))
+    wynimg_free(lo)
+    wynimg_free(hi)
+}
+
+test "posterize quantises to n levels and hits both endpoints exactly" {
+    // n = 3 gives {0, 0.5, 1}. The endpoints matter: a posterize built on
+    // floor(v*n)/n would map 1.0 to (n-1)/n and dim every white in the image.
+    var a = solid(4, 4, 0.4, 0.9, 1.0, 1.0)
+    assert_true(filter.posterize(a, 3, 0))
+    assert_true(pixel.approx(raw(a, 4, 1, 1, 0), 0.5, 0.00001))
+    assert_true(pixel.approx(raw(a, 4, 1, 1, 1), 1.0, 0.00001))
+    assert_true(pixel.approx(raw(a, 4, 1, 1, 2), 1.0, 0.00001))   // white stays white
+
+    var c = solid(4, 4, 0.1, 0.1, 0.1, 1.0)
+    assert_true(filter.posterize(c, 2, 0))                        // {0, 1}
+    assert_true(pixel.approx(raw(c, 4, 1, 1, 0), 0.0, 0.00001))
+    // Fewer than two levels has no meaning; refused rather than divided by zero.
+    assert_true(filter.posterize(c, 1, 0) == false)
+    assert_true(filter.posterize(c, 0, 0) == false)
+    wynimg_free(a)
+    wynimg_free(c)
+}
+
+// ---- curves ----------------------------------------------------------------
+
+test "a fresh curve is the identity and applying it changes nothing" {
+    var cv = filter.new_curve(17)
+    assert_true(cv != 0)
+    assert_eq(filter.curve_points(cv), 17)
+    assert_true(pixel.approx(filter.curve_get(cv, 0, 0), 0.0, 0.00001))
+    assert_true(pixel.approx(filter.curve_get(cv, 8, 0), 0.5, 0.00001))
+    assert_true(pixel.approx(filter.curve_get(cv, 16, 0), 1.0, 0.00001))
+
+    var b = solid(4, 4, 0.37, 0.62, 0.08, 1.0)
+    assert_true(filter.curve(b, cv, 0))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 0), 0.37, 0.0001))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 1), 0.62, 0.0001))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 2), 0.08, 0.0001))
+    filter.free_curve(cv)
+    wynimg_free(b)
+}
+
+test "a curve is per-channel and interpolates between control points" {
+    // Only the RED channel is remapped, and to a constant, so a curve that
+    // applied one channel's table to all three would be caught immediately.
+    var cv = filter.new_curve(5)
+    var i = 0
+    while i < 5 {
+        var t = i.to_float() / 4.0
+        assert_true(filter.curve_set(cv, i, 0.25, t, t))
+        i = i + 1
+    }
+    var b = solid(4, 4, 0.8, 0.5, 0.5, 1.0)
+    assert_true(filter.curve(b, cv, 0))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 0), 0.25, 0.0001))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 1), 0.5, 0.0001))
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 2), 0.5, 0.0001))
+
+    // INTERPOLATION, not nearest-entry. A 3-point table 0 -> 0, 0.5 -> 0.25,
+    // 1 -> 1 evaluated at 0.25 is halfway along the first leg: 0.125. Nearest-
+    // entry lookup would give 0.0 or 0.25 and would band a real photograph.
+    var cv2 = filter.new_curve(3)
+    assert_true(filter.curve_set(cv2, 0, 0.0, 0.0, 0.0))
+    assert_true(filter.curve_set(cv2, 1, 0.25, 0.25, 0.25))
+    assert_true(filter.curve_set(cv2, 2, 1.0, 1.0, 1.0))
+    var b2 = solid(4, 4, 0.25, 0.25, 0.25, 1.0)
+    assert_true(filter.curve(b2, cv2, 0))
+    assert_true(pixel.approx(raw(b2, 4, 1, 1, 0), 0.125, 0.0001))
+
+    // Out-of-range writes are refused, not wrapped into a neighbour.
+    assert_true(filter.curve_set(cv2, 3, 0.5, 0.5, 0.5) == false)
+    assert_true(filter.curve_set(cv2, 0 - 1, 0.5, 0.5, 0.5) == false)
+    assert_true(pixel.approx(filter.curve_get(cv2, 9, 0), 0.0 - 1.0, 0.00001))
+    filter.free_curve(cv)
+    filter.free_curve(cv2)
+    wynimg_free(b)
+    wynimg_free(b2)
+}
+
+test "a curve applies to a semi-transparent pixel without shifting its colour" {
+    // A curve is arbitrary and non-linear, so this is the case the file header
+    // calls out: f(a*c) != a*f(c). A 33-point gamma-2 curve maps 0.25 to 0.5.
+    var cv = filter.gamma_curve(33, 2.0)
+    assert_true(cv != 0)
+    var op = solid(4, 4, 0.25, 0.25, 0.25, 1.0)
+    var tr = solid(4, 4, 0.25, 0.25, 0.25, 0.4)
+    assert_true(filter.curve(op, cv, 0))
+    assert_true(filter.curve(tr, cv, 0))
+    assert_true(pixel.approx(raw(op, 4, 1, 1, 0), 0.5, 0.001))
+    assert_true(pixel.approx(raw(tr, 4, 1, 1, 0) / 0.4, 0.5, 0.001))
+    // Skipping the unpremultiply would curve the stored 0.1 instead: sqrt(0.1)
+    // = 0.3162 stored, read back as 0.79 - a value the assertion above rejects.
+    filter.free_curve(cv)
+    wynimg_free(op)
+    wynimg_free(tr)
+}
+
+test "a freed curve is refused, not silently treated as identity" {
+    // "The curve you built was freed" must not look like a working no-op. The
+    // handle is generation-tagged, so C resolves it to NULL rather than reading
+    // a dead slot - a stale handle is a safe refusal, not a use-after-free.
+    var cv = filter.new_curve(8)
+    filter.free_curve(cv)
+    var b = solid(4, 4, 0.5, 0.5, 0.5, 1.0)
+    assert_true(filter.curve(b, cv, 0) == false)
+    assert_true(filter.curve(b, 0, 0) == false)
+    assert_true(pixel.approx(raw(b, 4, 1, 1, 0), 0.5, 0.00001))   // untouched
+    wynimg_free(b)
+}
+
+// ---- restricted application (the selection mechanism) ----------------------
+
+test "a masked filter changes ONLY covered pixels" {
+    // THE SELECTION TEST. Coverage lives in the mask's R channel, exactly as
+    // wynimg_composite's layer masks and paint/text coverage buffers do, and the
+    // result is orig*(1-cov) + filtered*cov. A filter that ignored coverage
+    // would change the whole buffer and look perfectly correct in every
+    // unmasked test.
+    var w = 16
+    var b = solid(w, w, 0.2, 0.2, 0.2, 1.0)
+    var m = filter.new_mask(w, w)
+    assert_true(m != 0)
+    assert_true(filter.mask_rect(m, 4, 4, 6, 6, 1.0))
+
+    assert_true(filter.brightness(b, 0.5, m))
+    // Inside the rectangle: changed.
+    assert_true(pixel.approx(raw(b, w, 4, 4, 0), 0.7, 0.00001))
+    assert_true(pixel.approx(raw(b, w, 9, 9, 0), 0.7, 0.00001))
+    // One pixel outside each edge: untouched. Off-by-one in the rectangle is the
+    // obvious bug here, so both boundaries are checked.
+    assert_true(pixel.approx(raw(b, w, 3, 4, 0), 0.2, 0.00001))
+    assert_true(pixel.approx(raw(b, w, 10, 9, 0), 0.2, 0.00001))
+    assert_true(pixel.approx(raw(b, w, 4, 3, 0), 0.2, 0.00001))
+    assert_true(pixel.approx(raw(b, w, 0, 0, 0), 0.2, 0.00001))
+    assert_true(pixel.approx(raw(b, w, 15, 15, 0), 0.2, 0.00001))
+    filter.free_mask(m)
+    wynimg_free(b)
+}
+
+test "partial coverage blends the filter proportionally" {
+    // Coverage is a FLOAT, not a flag: 0.5 means half the effect. That is what
+    // makes a feathered selection edge work, and a mask read as a boolean would
+    // give a hard jagged border instead.
+    var w = 8
+    var b = solid(w, w, 0.2, 0.2, 0.2, 1.0)
+    var m = filter.new_mask(w, w)
+    assert_true(filter.mask_rect(m, 0, 0, 4, 8, 0.25))
+    assert_true(filter.brightness(b, 0.4, m))
+    // 0.2 + 0.25 * 0.4 = 0.3 inside; 0.2 outside.
+    assert_true(pixel.approx(raw(b, w, 1, 1, 0), 0.3, 0.00001))
+    assert_true(pixel.approx(raw(b, w, 5, 1, 0), 0.2, 0.00001))
+    filter.free_mask(m)
+    wynimg_free(b)
+}
+
+test "a masked blur changes only covered pixels" {
+    // Convolutions take a different path from point operations (a whole scratch
+    // plane, blended once), so the mask has to be asserted on both. A blur is
+    // also the case where "only covered pixels CHANGE" is subtler than "only
+    // covered pixels are READ": an uncovered neighbour still contributes to a
+    // covered pixel's average, which is correct - clipping the kernel to the
+    // selection is what produces a visible seam along its edge.
+    var w = 24
+    var b = wynimg_new(w, w)
+    // A bright square in the middle so there is something to blur.
+    var y = 8
+    while y < 16 {
+        var x = 8
+        while x < 16 {
+            var i = pixel.px_index(w, x, y, 0)
+            wynimg_set(b, i, 1.0)
+            wynimg_set(b, i + 3, 1.0)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    var m = filter.new_mask(w, w)
+    // Cover only the LEFT half, so the blur must soften one side of the square
+    // and leave the other side's hard edge intact.
+    assert_true(filter.mask_rect(m, 0, 0, 12, w, 1.0))
+    assert_true(filter.gaussian(b, 3.0, m))
+
+    // Left edge of the square is covered: it bled outwards.
+    assert_true(raw(b, w, 6, 12, 0) > 0.01)
+    // Right edge is not covered: still exactly zero outside, exactly one inside.
+    assert_true(pixel.approx(raw(b, w, 17, 12, 0), 0.0, 0.00001))
+    assert_true(pixel.approx(raw(b, w, 15, 12, 0), 1.0, 0.00001))
+    filter.free_mask(m)
+    wynimg_free(b)
+}
+
+test "a mask of the wrong size is refused, not ignored" {
+    // Silently dropping a mismatched mask would apply the filter to the WHOLE
+    // image when the user asked for a selection - the worst possible reading of
+    // an inconsistency. Refusing leaves the buffer untouched.
+    var b = solid(8, 8, 0.2, 0.2, 0.2, 1.0)
+    var m = filter.new_mask(4, 4)
+    assert_true(filter.brightness(b, 0.5, m) == false)
+    assert_true(filter.gaussian(b, 2.0, m) == false)
+    assert_true(filter.invert(b, m) == false)
+    assert_true(pixel.approx(raw(b, 8, 4, 4, 0), 0.2, 0.00001))
+    filter.free_mask(m)
+    wynimg_free(b)
+}
+
+test "a stale mask handle degrades to the whole buffer, matching the compositor" {
+    // Deliberately DIFFERENT from a size mismatch. A freed mask is
+    // indistinguishable from handle 0 once its generation is bumped, and
+    // wynimg_composite already treats a stale layer mask as "no mask" - two
+    // subsystems disagreeing about that would be worse than either rule.
+    var b = solid(8, 8, 0.2, 0.2, 0.2, 1.0)
+    var m = filter.new_mask(8, 8)
+    filter.free_mask(m)
+    assert_true(filter.brightness(b, 0.3, m))
+    assert_true(pixel.approx(raw(b, 8, 4, 4, 0), 0.5, 0.00001))
+    wynimg_free(b)
+}
+
+// ---- refusals and edges ----------------------------------------------------
+
+test "a stale buffer handle is a safe refusal for every filter" {
+    // Generation-tagged handles turn a use-after-free into a no-op. Every entry
+    // point resolves through wynimg_deref, so this asserts the whole surface at
+    // once rather than one function.
+    var b = wynimg_new(8, 8)
+    wynimg_free(b)
+    assert_true(filter.gaussian(b, 2.0, 0) == false)
+    assert_true(filter.box_blur(b, 2, 0) == false)
+    assert_true(filter.unsharp(b, 2.0, 1.0, 0.0, 0) == false)
+    assert_true(filter.sharpen(b, 1.0, 0) == false)
+    assert_true(filter.brightness(b, 0.1, 0) == false)
+    assert_true(filter.contrast(b, 2.0, 0) == false)
+    assert_true(filter.exposure(b, 1.0, 0) == false)
+    assert_true(filter.saturation(b, 2.0, 0) == false)
+    assert_true(filter.greyscale(b, 1.0, 0) == false)
+    assert_true(filter.hue_rotate(b, 90.0, 0) == false)
+    assert_true(filter.levels(b, 0.0, 1.0, 1.0, 0) == false)
+    assert_true(filter.invert(b, 0) == false)
+    assert_true(filter.threshold(b, 0.5, 0) == false)
+    assert_true(filter.posterize(b, 4, 0) == false)
+    assert_true(pixel.approx(filter.channel_sum(b, 0), 0.0 - 1.0, 0.00001))
+}
+
+test "a zero radius is a successful no-op and a huge one is refused" {
+    // A slider at zero must succeed and do nothing - returning false there would
+    // make every UI treat "no blur" as an error. A radius past the cap is
+    // refused instead of becoming a multi-minute convolution.
+    var b = solid(8, 8, 0.3, 0.3, 0.3, 1.0)
+    assert_true(filter.gaussian(b, 0.0, 0))
+    assert_true(filter.gaussian(b, 0.0 - 4.0, 0))
+    assert_true(filter.box_blur(b, 0, 0))
+    assert_true(filter.unsharp(b, 0.0, 5.0, 0.0, 0))
+    assert_true(pixel.approx(raw(b, 8, 4, 4, 0), 0.3, 0.00001))
+    assert_true(filter.gaussian(b, 5000.0, 0) == false)
+    assert_true(filter.box_blur(b, 5000, 0) == false)
+    wynimg_free(b)
+}
+
+test "a fully transparent pixel keeps alpha 0 through every point filter" {
+    // There is no colour to adjust under zero alpha, and inventing one is how a
+    // "brightness" turns an empty layer into a grey rectangle. Alpha must also
+    // survive: brightness is not an opacity control.
+    var b = wynimg_new(4, 4)          // calloc'd: all channels 0
+    assert_true(filter.brightness(b, 0.5, 0))
+    assert_true(filter.invert(b, 0))
+    assert_true(filter.contrast(b, 3.0, 0))
+    assert_true(filter.levels(b, 0.0, 1.0, 2.0, 0))
+    assert_true(pixel.approx(raw(b, 4, 2, 2, 3), 0.0, 0.00001))
+    assert_true(pixel.approx(raw(b, 4, 2, 2, 0), 0.0, 0.00001))
+    wynimg_free(b)
+}
+
+test "a blur does not change a buffer's alpha total on an interior shape" {
+    // Alpha is convolved with the SAME kernel as colour, which is what keeps the
+    // result a valid premultiplied pixel. If alpha were left alone while colour
+    // was averaged, a soft edge would have colour spread over pixels that are
+    // still fully transparent - stored colour above stored alpha, the invariant
+    // the compositor relies on.
+    var w = 32
+    var b = wynimg_new(w, w)
+    var y = 12
+    while y < 20 {
+        var x = 12
+        while x < 20 {
+            var i = pixel.px_index(w, x, y, 0)
+            wynimg_set(b, i, 0.8)
+            wynimg_set(b, i + 3, 1.0)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    var a0 = filter.channel_sum(b, 3)
+    assert_true(pixel.approx(a0, 64.0, 0.0001))
+    assert_true(filter.gaussian(b, 4.0, 0))
+    assert_true(pixel.approx(filter.channel_sum(b, 3), 64.0, 0.01))
+    // And the invariant holds everywhere on the feathered rim.
+    var i2 = pixel.px_index(w, 11, 16, 0)
+    assert_true(wynimg_get(b, i2) <= wynimg_get(b, i2 + 3) + 0.00001)
+    assert_true(wynimg_get(b, i2) > 0.0)
+    wynimg_free(b)
+}
