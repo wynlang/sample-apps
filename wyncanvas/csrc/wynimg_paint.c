@@ -144,7 +144,7 @@ long long wynimg_stroke_seg(void* strokep,
             double c = falloff(d, radius, hardness);
             if (c <= 0.0) continue;
             size_t o = (size_t)(y * s->w + x) * 4;
-            s->px[o] = (float)((double)s->px[o] + c);   /* SABOTAGE: accumulate */
+            if (c > (double)s->px[o]) s->px[o] = (float)c;
         }
     }
     return 1;
