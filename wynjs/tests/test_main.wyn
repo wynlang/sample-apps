@@ -1,18 +1,111 @@
-// WynJS Test Runner
-fn main() {
-    print("=== WynJS Test Suite ===")
+// WynJS test runner.
+//
+// Each case in tests/cases/ is a pair: NAME.js (the JS program) and NAME.out
+// (its exact expected stdout). The runner builds the interpreter once, runs
+// every case, and diffs actual against expected, so a regression names the
+// failing case and the differing line instead of only moving a counter.
+//
+// Run from the wynjs directory:  ../../wyn/wyn run tests/test_main.wyn
 
-    // Copy test file for wynjs to read
-    System_exec("cp tests/test.js /tmp/_wynjs_input.js")
+fn run_case(name: string, wynjs: string) -> int {
+    js_path = "tests/cases/" + name + ".js"
+    want_path = "tests/cases/" + name + ".out"
 
-    // Run wynjs
-    var output = System_exec("perl -e \"alarm 30; exec @ARGV\" ../../wyn/wyn run src/main.wyn 2>/dev/null")
-
-    if output.contains("0 fail") {
-        print("✓ " + output.trim())
+    want = File.read(want_path)
+    if want.len() == 0 {
+        print("  FAIL " + name + ": missing or empty " + want_path)
         return 0
     }
-    print("✗ Test failed:")
-    print(output)
-    return 1
+
+    // stderr is folded into stdout and the exit status ignored on purpose: the
+    // RangeError case exits non-zero, and its message IS the expected output.
+    got = System_exec("perl -e 'alarm 120; exec @ARGV' -- " + wynjs + " " + js_path + " 2>&1")
+
+    if got.trim() == want.trim() {
+        print("  ok   " + name)
+        return 1
+    }
+
+    print("  FAIL " + name)
+    want_lines = want.trim().split("\n")
+    got_lines = got.trim().split("\n")
+    n = want_lines.len()
+    if got_lines.len() > n { n = got_lines.len() }
+    i = 0
+    shown = 0
+    while i < n {
+        w = "<missing>"
+        g = "<missing>"
+        if i < want_lines.len() { w = want_lines[i] }
+        if i < got_lines.len() { g = got_lines[i] }
+        if w != g {
+            if shown < 5 {
+                print("    line " + (i + 1).to_string() + ": want [" + w + "] got [" + g + "]")
+            }
+            shown = shown + 1
+        }
+        i = i + 1
+    }
+    if shown > 5 { print("    ... and " + (shown - 5).to_string() + " more differing lines") }
+    return 0
+}
+
+fn main() {
+    print("=== WynJS test suite ===")
+
+    // Build the interpreter once; every case runs against this one binary.
+    wynjs = "/tmp/wynjs_test_bin"
+    System_exec("rm -f " + wynjs)
+    build_out = System_exec("../../wyn/wyn build src/main.wyn -o " + wynjs + " 2>&1")
+    if not File.exists(wynjs) {
+        print("BUILD FAILED:")
+        print(build_out)
+        return 1
+    }
+
+    // Listed explicitly so a missing case file fails loudly instead of silently
+    // shrinking the suite.
+    cases = [
+        "arith_precedence",
+        "string_number_coercion",
+        "declarations",
+        "control_flow",
+        "functions",
+        "closures",
+        "recursion",
+        "short_circuit",
+        "early_return",
+        "objects_arrays",
+        "strings",
+        "classes_errors",
+        "builtins",
+        "modern_syntax",
+        "loops_braceless",
+        "promises_math",
+        "limits",
+        "limits_overflow",
+        "uncaught_throw"
+    ]
+
+    pass = 0
+    fail = 0
+    for name in cases {
+        if run_case(name, wynjs) == 1 { pass = pass + 1 } else { fail = fail + 1 }
+    }
+
+    // The legacy suite is one JS file that self-reports its own assertion count.
+    legacy = System_exec("perl -e 'alarm 120; exec @ARGV' -- " + wynjs + " tests/test.js 2>&1")
+    if legacy.contains("217 pass, 0 fail") {
+        print("  ok   legacy assertions (tests/test.js, 217 asserts)")
+        pass = pass + 1
+    } else {
+        print("  FAIL legacy assertions (tests/test.js)")
+        print(legacy)
+        fail = fail + 1
+    }
+
+    print("")
+    print(pass.to_string() + " pass, " + fail.to_string() + " fail")
+    if fail > 0 { return 1 }
+    return 0
 }

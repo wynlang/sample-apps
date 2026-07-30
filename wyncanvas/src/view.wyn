@@ -1,0 +1,220 @@
+// view - the viewport transform: zoom, pan, and the mapping both ways.
+//
+// WHY THIS IS A MODULE AND NOT FOUR VARIABLES IN THE UI.
+//
+// The brush must land under the pointer at any zoom and any pan. That is one
+// coordinate transform, and it is used in two directions - screen->document to
+// decide where to paint, document->screen to decide where to blit. If the two
+// directions live in different files, or are written inline twice, they drift,
+// and the symptom is a brush that paints somewhere the user did not click. Which
+// is exactly the class of bug that is invisible at zoom 100% with no pan, i.e.
+// in every screenshot anybody takes.
+//
+// So both directions are here, next to each other, and
+// tests/test_view.wyn asserts that they are inverses at a spread of
+// zooms and pans. That round-trip property IS the correctness condition; nothing
+// else about the transform matters.
+//
+// THE TRANSFORM.
+//
+// A document pixel (dx, dy) appears on screen at
+//
+//     sx = origin_x + dx * scale
+//     sy = origin_y + dy * scale
+//
+// where `scale` is zoom/100 and `origin` is where the document's top-left corner
+// sits in window coordinates. The origin is derived, not stored: it is the
+// viewport's centre, minus half the scaled document, plus the pan offset. Storing
+// the origin directly would mean recomputing it at every zoom change and
+// re-deriving the centring - and getting that wrong is how a zoom button ends up
+// scrolling the image off the panel.
+//
+// ZOOM IS ABOUT A POINT, not about the middle of the window. Zooming with the
+// pointer over a feature must keep that feature under the pointer, which is what
+// `zoom_at` does by adjusting the pan so the document point under the anchor is
+// unchanged. Anything else makes zooming feel like it is fighting you.
+//
+// Zoom is an INTEGER PERCENTAGE, not a float scale: the status bar shows it, the
+// steps are exact (100, 200, 400), and "zoom 99.9999%" is not a state a UI
+// should be able to reach.
+//
+// CALL CONVENTION: `pub fn`s, so importers call them QUALIFIED (`view.zoom()`).
+
+var v_zoom = 100
+var v_pan_x = 0
+var v_pan_y = 0
+
+// The viewport rectangle in window coordinates, and the document size. Set by
+// the UI whenever either changes; kept here so a caller never has to pass six
+// arguments to ask "where does this pixel go".
+var v_vx = 0
+var v_vy = 0
+var v_vw = 1
+var v_vh = 1
+var v_dw = 0
+var v_dh = 0
+
+pub fn set_viewport(x: int, y: int, w: int, h: int) {
+    v_vx = x
+    v_vy = y
+    if w > 0 { v_vw = w }
+    if h > 0 { v_vh = h }
+}
+
+pub fn set_doc(w: int, h: int) {
+    v_dw = w
+    v_dh = h
+}
+
+pub fn doc_w() -> int { return v_dw }
+pub fn doc_h() -> int { return v_dh }
+
+pub fn zoom() -> int { return v_zoom }
+pub fn pan_x() -> int { return v_pan_x }
+pub fn pan_y() -> int { return v_pan_y }
+
+pub fn scale() -> float {
+    return v_zoom.to_float() / 100.0
+}
+
+// Zoom limits. 6% shows a 4000px document whole in a 250px panel; 3200% is 32
+// screen pixels per document pixel, which is enough to place a single pixel by
+// hand and beyond which the pan arithmetic starts to dominate.
+fn ZOOM_MIN() -> int { return 6 }
+fn ZOOM_MAX() -> int { return 3200 }
+
+pub fn set_zoom(z: int) {
+    var v = z
+    if v < ZOOM_MIN() { v = ZOOM_MIN() }
+    if v > ZOOM_MAX() { v = ZOOM_MAX() }
+    v_zoom = v
+}
+
+// The scaled document size on screen, at least 1px so a heavily zoomed-out
+// document is still visible rather than vanishing.
+pub fn view_doc_w() -> int {
+    var w = v_dw * v_zoom / 100
+    if w < 1 { w = 1 }
+    return w
+}
+
+pub fn view_doc_h() -> int {
+    var h = v_dh * v_zoom / 100
+    if h < 1 { h = 1 }
+    return h
+}
+
+// Window coordinate of the document's top-left corner: centred in the viewport,
+// then displaced by the pan.
+pub fn origin_x() -> int {
+    return v_vx + (v_vw - view_doc_w()) / 2 + v_pan_x
+}
+
+pub fn origin_y() -> int {
+    return v_vy + (v_vh - view_doc_h()) / 2 + v_pan_y
+}
+
+// ---- the two directions ---------------------------------------------------
+
+pub fn doc_to_screen_x(dx: float) -> float {
+    return origin_x().to_float() + dx * scale()
+}
+
+pub fn doc_to_screen_y(dy: float) -> float {
+    return origin_y().to_float() + dy * scale()
+}
+
+// Screen (window) coordinates to document coordinates. Fractional on purpose:
+// at zoom 800% one screen pixel is an eighth of a document pixel, and rounding
+// here would quantise a brush's position to the screen grid and make a slow drag
+// paint a staircase.
+pub fn screen_to_doc_x(sx: float) -> float {
+    return (sx - origin_x().to_float()) / scale()
+}
+
+pub fn screen_to_doc_y(sy: float) -> float {
+    return (sy - origin_y().to_float()) / scale()
+}
+
+// Whether a window point is over the document (not merely over the viewport).
+// A click on the checkerboard beside a zoomed-out image must not paint outside
+// the canvas - the kernel would clip it anyway, but a stroke that begins nowhere
+// still costs two full-canvas clones and one undo entry.
+pub fn hits_doc(sx: int, sy: int) -> bool {
+    if v_dw <= 0 { return false }
+    var dx = screen_to_doc_x(sx.to_float())
+    var dy = screen_to_doc_y(sy.to_float())
+    if dx < 0.0 { return false }
+    if dy < 0.0 { return false }
+    if dx >= v_dw.to_float() { return false }
+    if dy >= v_dh.to_float() { return false }
+    return true
+}
+
+// ---- pan ------------------------------------------------------------------
+
+pub fn pan_by(dx: int, dy: int) {
+    v_pan_x = v_pan_x + dx
+    v_pan_y = v_pan_y + dy
+}
+
+pub fn reset_pan() {
+    v_pan_x = 0
+    v_pan_y = 0
+}
+
+// ---- zoom about a point ---------------------------------------------------
+
+// Changes the zoom to `z` while keeping the document point currently under
+// (ax, ay) under (ax, ay) afterwards.
+//
+// Derivation: with the anchor's document coordinate `d` fixed,
+//   ax = origin(z') + d*s'   and   ax = origin(z) + d*s
+// origin() itself depends on the pan, so solve for the pan that restores the
+// equality. Written as "measure, change, measure, correct" rather than as a
+// closed form, because origin_x() already encapsulates the centring and
+// duplicating it here is how the two would drift apart.
+pub fn zoom_at(z: int, ax: int, ay: int) {
+    var dx = screen_to_doc_x(ax.to_float())
+    var dy = screen_to_doc_y(ay.to_float())
+    set_zoom(z)
+    var nx = doc_to_screen_x(dx)
+    var ny = doc_to_screen_y(dy)
+    // The residual is how far the anchor moved; undo it with the pan.
+    var cx = ax.to_float() - nx
+    var cy = ay.to_float() - ny
+    v_pan_x = v_pan_x + round_i(cx)
+    v_pan_y = v_pan_y + round_i(cy)
+}
+
+fn round_i(v: float) -> int {
+    if v >= 0.0 { return (v + 0.5).to_int() }
+    return 0 - (0.5 - v).to_int()
+}
+
+// Doubling and halving, about the viewport centre when no anchor is given.
+pub fn zoom_in_center() {
+    zoom_at(v_zoom * 2, v_vx + v_vw / 2, v_vy + v_vh / 2)
+}
+
+pub fn zoom_out_center() {
+    zoom_at(v_zoom / 2, v_vx + v_vw / 2, v_vy + v_vh / 2)
+}
+
+// Zoom so the whole document fits, and recentre. Integer percent, rounded DOWN,
+// so "fit" never means "one pixel wider than the panel".
+pub fn zoom_fit() {
+    if v_dw <= 0 { return }
+    if v_dh <= 0 { return }
+    var zx = v_vw * 100 / v_dw
+    var zy = v_vh * 100 / v_dh
+    var z = zx
+    if zy < z { z = zy }
+    reset_pan()
+    set_zoom(z)
+}
+
+pub fn zoom_100() {
+    reset_pan()
+    set_zoom(100)
+}

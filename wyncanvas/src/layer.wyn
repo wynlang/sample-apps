@@ -140,3 +140,128 @@ pub fn set_adjust_amount(id: int, v: float) {
     if valid(id) == false { return }
     l_amount[id] = v
 }
+
+// ---- structural edits ------------------------------------------------------
+//
+// WHY REMOVE SHIFTS INSTEAD OF LEAVING A HOLE.
+//
+// A layer's identity in this store IS its stack position: render.compose walks
+// 0..count() bottom-up and the compositing order is the array order. A tombstone
+// scheme would need every walk to skip holes and would make "move up" mean
+// something different from "swap with the next index". Shifting keeps one
+// invariant - index == depth - at the cost of O(n) on a delete, where n is the
+// layer count (tens), not the pixel count.
+//
+// The CALLER's ids therefore shift too, and that is deliberate rather than
+// hidden: src/ui.wyn rebuilds its widget->layer table after any structural
+// edit, and history records positions, not identities. A stable-id scheme would
+// be better for a 200-layer document; this is honest about being a small one.
+//
+// Buffers are NOT freed here. The buffer handle outlives the row on purpose:
+// undoing a delete must put the same pixels back, so history owns the handle
+// between the delete and its undo. Freeing on remove would make undo restore a
+// dead handle - which, thanks to the generation-tagged handle table, would be a
+// silently blank layer rather than a crash, i.e. the worst kind of bug.
+
+pub fn remove(id: int) -> int {
+    if valid(id) == false { return 0 }
+    var i = id
+    while i < l_count - 1 {
+        l_names[i] = l_names[i + 1]
+        l_bufs[i] = l_bufs[i + 1]
+        l_kinds[i] = l_kinds[i + 1]
+        l_opacity[i] = l_opacity[i + 1]
+        l_blend[i] = l_blend[i + 1]
+        l_visible[i] = l_visible[i + 1]
+        l_masks[i] = l_masks[i + 1]
+        l_amount[i] = l_amount[i + 1]
+        i = i + 1
+    }
+    l_count = l_count - 1
+    return 1
+}
+
+// Inserts at `pos`, shifting everything at and above it up. `pos` is clamped
+// into [0, count()], so an out-of-range position appends rather than being
+// rejected - undo replays a recorded position and must never silently drop a
+// layer because the stack shrank underneath it.
+pub fn insert(pos: int, name: string, buf: int, kind: int) -> int {
+    var p = pos
+    if p < 0 { p = 0 }
+    if p > l_count { p = l_count }
+    // Grow by one at the top, then shift down into the gap.
+    add(name, 0, 0)
+    var i = l_count - 1
+    while i > p {
+        l_names[i] = l_names[i - 1]
+        l_bufs[i] = l_bufs[i - 1]
+        l_kinds[i] = l_kinds[i - 1]
+        l_opacity[i] = l_opacity[i - 1]
+        l_blend[i] = l_blend[i - 1]
+        l_visible[i] = l_visible[i - 1]
+        l_masks[i] = l_masks[i - 1]
+        l_amount[i] = l_amount[i - 1]
+        i = i - 1
+    }
+    l_names[p] = name
+    l_bufs[p] = buf
+    l_kinds[p] = kind
+    l_opacity[p] = 1.0
+    l_blend[p] = 0
+    l_visible[p] = 1
+    l_masks[p] = 0
+    l_amount[p] = 0.0
+    return p
+}
+
+// Swaps two rows. `move up` is swap(i, i+1); reordering is its own operation
+// rather than remove+insert so that undo is a second swap with no allocation
+// and no chance of losing a buffer handle in between.
+pub fn swap(a: int, b: int) -> int {
+    if valid(a) == false { return 0 }
+    if valid(b) == false { return 0 }
+    if a == b { return 1 }
+    var n = l_names[a]
+    var bu = l_bufs[a]
+    var k = l_kinds[a]
+    var o = l_opacity[a]
+    var bl = l_blend[a]
+    var v = l_visible[a]
+    var m = l_masks[a]
+    var am = l_amount[a]
+    l_names[a] = l_names[b]
+    l_bufs[a] = l_bufs[b]
+    l_kinds[a] = l_kinds[b]
+    l_opacity[a] = l_opacity[b]
+    l_blend[a] = l_blend[b]
+    l_visible[a] = l_visible[b]
+    l_masks[a] = l_masks[b]
+    l_amount[a] = l_amount[b]
+    l_names[b] = n
+    l_bufs[b] = bu
+    l_kinds[b] = k
+    l_opacity[b] = o
+    l_blend[b] = bl
+    l_visible[b] = v
+    l_masks[b] = m
+    l_amount[b] = am
+    return 1
+}
+
+pub fn set_name(id: int, s: string) {
+    if valid(id) == false { return }
+    l_names[id] = s
+}
+
+// Replaces a row's buffer handle, returning the previous one so the caller can
+// decide its fate. Used by nothing in the UI today; it exists because "swap the
+// handle" is the wrong way to undo a paint stroke and having the operation named
+// makes that visible - undo copies PIXELS back into the live buffer
+// (wynimg_copy_into), because other holders of the handle (the texture upload,
+// a mask reference) must keep seeing the same buffer.
+pub fn set_buffer(id: int, buf: int) -> int {
+    if valid(id) == false { return 0 }
+    var prev = l_bufs[id]
+    l_bufs[id] = buf
+    return prev
+}

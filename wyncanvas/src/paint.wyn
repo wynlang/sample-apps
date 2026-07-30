@@ -1,0 +1,378 @@
+// paint - tool state and the stroke lifecycle.
+//
+// This module owns WHAT a stroke is, and src/ui.wyn owns where the pointer was.
+// Splitting it that way is what makes the brush testable without a window: the
+// headless tests drive begin/seg/commit directly with document coordinates and
+// then read pixels back, so a failure is either in this file or in the C kernel,
+// never in the mouse plumbing.
+//
+// A STROKE HAS THREE PHASES, and all three are needed for correctness rather
+// than for tidiness:
+//
+//   begin(layer)  clones the layer's pixels (the BASE) and allocates a coverage
+//                 buffer. Nothing is drawn yet.
+//   seg(x0,y0,x1,y1)  accumulates coverage for one segment with max(), then
+//                 rebuilds the layer as base + colour*coverage. So the live
+//                 preview during a drag is produced by the identical code that
+//                 produces the final image - there is no separate "preview"
+//                 renderer that can disagree with the commit.
+//   commit()      records ONE undo entry holding the before and after pixels,
+//                 and releases the coverage buffer.
+//
+// The alternative - composite a dab per mouse position straight into the layer -
+// is what most first attempts do, and it is wrong in a way that is obvious once
+// seen: overlapping dabs composite repeatedly, so a 30%-alpha stroke goes opaque
+// wherever the pointer moved slowly, and undo either restores nothing or needs
+// 400 entries for one gesture.
+//
+// COLOUR LIVES HERE AS sRGB (display) VALUES, because that is what a colour
+// picker shows and what a user means by "0.5 grey". Conversion to linear happens
+// once, at the point the colour reaches a pixel - `stroke_color_linear`. Storing
+// linear and converting for display would be equivalent; storing sRGB and
+// FORGETTING to convert is the bug this arrangement makes hard, because the
+// only path to the kernel runs through the conversion.
+//
+// CALL CONVENTION: `pub fn`s here are called QUALIFIED (`paint.begin(...)`), and
+// this module reaches the C kernel through `wynimg::name(...)` - see the long
+// note in src/render.wyn for why that spelling and no other.
+
+import pixel
+import layer
+import history
+
+// ---- tools ----------------------------------------------------------------
+//
+// The tool changes what a drag DOES, not how it is tracked, so it is one int
+// consulted at seg/commit time rather than four parallel code paths.
+
+pub fn TOOL_BRUSH() -> int { return 0 }
+pub fn TOOL_ERASER() -> int { return 1 }
+pub fn TOOL_FILL() -> int { return 2 }
+pub fn TOOL_PICK() -> int { return 3 }
+
+// Pan is a TOOL rather than a modifier key, because the widget toolkit owns the
+// key queue (Ui_events drains it, and a second reader would see nothing), so a
+// space-bar-to-pan modifier is not reachable from here without changing the
+// toolkit. A tool is also the thing a headless script can select by name, which
+// makes panning verifiable rather than merely present.
+pub fn TOOL_PAN() -> int { return 4 }
+
+var p_tool = 0
+
+pub fn tool() -> int { return p_tool }
+
+pub fn set_tool(t: int) {
+    if t < 0 { return }
+    if t > 4 { return }
+    p_tool = t
+}
+
+pub fn tool_name(t: int) -> string {
+    if t == 0 { return "brush" }
+    if t == 1 { return "eraser" }
+    if t == 2 { return "fill" }
+    if t == 3 { return "pick" }
+    if t == 4 { return "pan" }
+    return "?"
+}
+
+// ---- brush parameters -----------------------------------------------------
+
+var p_radius = 12.0
+var p_hardness = 0.6
+var p_alpha = 1.0
+var p_tol = 0.12
+
+// sRGB (display-encoded) brush colour, plus the HSV it came from. Both are kept
+// because HSV is not recoverable from RGB without losing the hue of a grey: a
+// user who drags value to 0 and back must get their hue back, and round-tripping
+// through RGB would return black-with-no-hue.
+var p_h = 210.0
+var p_s = 0.85
+var p_v = 0.95
+
+pub fn radius() -> float { return p_radius }
+pub fn set_radius(r: float) {
+    var v = r
+    if v < 0.5 { v = 0.5 }
+    if v > 200.0 { v = 200.0 }
+    p_radius = v
+}
+
+pub fn hardness() -> float { return p_hardness }
+pub fn set_hardness(h: float) {
+    var v = h
+    if v < 0.0 { v = 0.0 }
+    if v > 1.0 { v = 1.0 }
+    p_hardness = v
+}
+
+pub fn alpha() -> float { return p_alpha }
+pub fn set_alpha(a: float) {
+    var v = a
+    if v < 0.0 { v = 0.0 }
+    if v > 1.0 { v = 1.0 }
+    p_alpha = v
+}
+
+pub fn tolerance() -> float { return p_tol }
+pub fn set_tolerance(t: float) {
+    var v = t
+    if v < 0.0 { v = 0.0 }
+    if v > 1.0 { v = 1.0 }
+    p_tol = v
+}
+
+pub fn hue() -> float { return p_h }
+pub fn sat() -> float { return p_s }
+pub fn val() -> float { return p_v }
+
+pub fn set_hsv(h: float, s: float, v: float) {
+    var hh = h
+    while hh >= 360.0 { hh = hh - 360.0 }
+    while hh < 0.0 { hh = hh + 360.0 }
+    p_h = hh
+    p_s = s
+    if p_s < 0.0 { p_s = 0.0 }
+    if p_s > 1.0 { p_s = 1.0 }
+    p_v = v
+    if p_v < 0.0 { p_v = 0.0 }
+    if p_v > 1.0 { p_v = 1.0 }
+}
+
+// The brush colour as sRGB display values, 0..1. chan 0=R 1=G 2=B.
+pub fn color_srgb(chan: int) -> float {
+    return pixel.hsv_channel(p_h, p_s, p_v, chan)
+}
+
+// The same colour in LINEAR light - what a pixel actually stores. Every path
+// from the picker to a buffer goes through here, which is why "compositing sRGB
+// by accident" is not reachable.
+pub fn color_linear(chan: int) -> float {
+    return pixel.srgb_to_linear(color_srgb(chan))
+}
+
+// The brush colour as a 0..255 byte, for painting swatches with Win_rect (which
+// takes display-encoded ints, so this must NOT be the linear value).
+pub fn color_byte(chan: int) -> int {
+    var v = color_srgb(chan) * 255.0 + 0.5
+    var i = v.to_int()
+    if i < 0 { i = 0 }
+    if i > 255 { i = 255 }
+    return i
+}
+
+// ---- the stroke -----------------------------------------------------------
+
+var s_active = 0
+var s_layer = -1
+var s_base = 0        // pixels as they were when the stroke began
+var s_cov = 0         // coverage accumulator (R channel)
+var s_lx = 0.0        // last position, so a drag paints capsules not dots
+var s_ly = 0.0
+var s_segs = 0
+
+pub fn stroke_active() -> bool { return s_active == 1 }
+pub fn stroke_segments() -> int { return s_segs }
+
+// Begins a stroke on layer `lid` at document coordinates (x,y).
+// Returns 1 if a stroke started, 0 if it could not (no such layer, no pixels,
+// an adjustment layer, or allocation failure).
+//
+// A click with no drag must still paint, so the initial position is applied
+// immediately as a zero-length segment - which the distance-field kernel handles
+// as a point, giving a symmetric dab.
+pub fn begin(lid: int, x: float, y: float) -> int {
+    if s_active == 1 { cancel() }
+    var buf = layer.buffer(lid)
+    if buf == 0 { return 0 }
+    var w = wynimg::width(buf)
+    var h = wynimg::height(buf)
+    if w == 0 { return 0 }
+
+    s_base = wynimg::clone(buf)
+    if s_base == 0 { return 0 }
+    s_cov = wynimg::new(w, h)
+    if s_cov == 0 {
+        wynimg::free(s_base)
+        s_base = 0
+        return 0
+    }
+    s_active = 1
+    s_layer = lid
+    s_lx = x
+    s_ly = y
+    s_segs = 0
+    seg(x, y)
+    return 1
+}
+
+// Extends the stroke to (x,y). The kernel is given the PREVIOUS position too, so
+// a fast drag paints a continuous capsule rather than a dotted line - which is
+// the whole reason the stroke API is "extend to" rather than "stamp at".
+pub fn seg(x: float, y: float) -> int {
+    if s_active == 0 { return 0 }
+    var buf = layer.buffer(s_layer)
+    if buf == 0 { return 0 }
+
+    var erase = 0
+    if p_tool == TOOL_ERASER() { erase = 1 }
+
+    wynimg::stroke_seg(s_cov, s_lx, s_ly, x, y, p_radius, p_hardness)
+    var ok = wynimg::stroke_apply(buf, s_base, s_cov,
+                                  color_linear(0), color_linear(1),
+                                  color_linear(2), p_alpha, erase)
+    s_lx = x
+    s_ly = y
+    s_segs = s_segs + 1
+    return ok
+}
+
+// Ends the stroke and records it as ONE undo entry.
+//
+// The "after" snapshot is a second clone rather than the live buffer, because
+// history must own pixels that no later stroke can mutate under it. The "before"
+// clone taken in begin() is handed over as-is - history owns it from here.
+pub fn commit() -> int {
+    if s_active == 0 { return 0 }
+    var buf = layer.buffer(s_layer)
+    var after = wynimg::clone(buf)
+    wynimg::free(s_cov)
+    s_cov = 0
+    s_active = 0
+    if after == 0 {
+        // Could not snapshot: drop the record rather than store a half one,
+        // and free the base so the stroke is unrecorded but not leaked.
+        wynimg::free(s_base)
+        s_base = 0
+        return 0
+    }
+    history.record_pixels(s_layer, s_base, after)
+    s_base = 0
+    return 1
+}
+
+// Abandons the stroke and puts the layer back. Used when a drag leaves the
+// canvas or a second begin() arrives without a commit.
+pub fn cancel() -> int {
+    if s_active == 0 { return 0 }
+    var buf = layer.buffer(s_layer)
+    if buf != 0 {
+        if s_base != 0 { wynimg::copy_into(buf, s_base) }
+    }
+    wynimg::free(s_base)
+    wynimg::free(s_cov)
+    s_base = 0
+    s_cov = 0
+    s_active = 0
+    return 1
+}
+
+// ---- bucket fill ----------------------------------------------------------
+//
+// Goes through the SAME coverage buffer and the SAME apply kernel as a brush
+// stroke, so it inherits premultiplied-linear correctness and one-entry undo
+// without a second implementation. Returns the pixel count, 0 if nothing was
+// filled, -1 if refused.
+pub fn fill_at(lid: int, x: int, y: int) -> int {
+    var buf = layer.buffer(lid)
+    if buf == 0 { return -1 }
+    var w = wynimg::width(buf)
+    var h = wynimg::height(buf)
+    if w == 0 { return -1 }
+
+    var before = wynimg::clone(buf)
+    if before == 0 { return -1 }
+    var cov = wynimg::new(w, h)
+    if cov == 0 {
+        wynimg::free(before)
+        return -1
+    }
+
+    var n = wynimg::fill_region(cov, buf, x, y, p_tol)
+    if n <= 0 {
+        wynimg::free(before)
+        wynimg::free(cov)
+        return n
+    }
+
+    var erase = 0
+    if p_tool == TOOL_ERASER() { erase = 1 }
+    wynimg::stroke_apply(buf, before, cov,
+                         color_linear(0), color_linear(1), color_linear(2),
+                         p_alpha, erase)
+    wynimg::free(cov)
+
+    var after = wynimg::clone(buf)
+    if after == 0 {
+        wynimg::free(before)
+        return n
+    }
+    history.record_pixels(lid, before, after)
+    return n
+}
+
+// ---- eyedropper -----------------------------------------------------------
+//
+// Reads a pixel from a COMPOSITED buffer (the caller passes the composite, not a
+// layer) because what the user is pointing at on screen is the composite. The
+// value read is linear and un-premultiplied, so it is converted back to sRGB and
+// then to HSV, which is the form the picker edits.
+pub fn pick_from(buf: int, x: int, y: int) -> int {
+    if buf == 0 { return 0 }
+    var r = pixel.linear_to_srgb(wynimg::pick(buf, x, y, 0))
+    var g = pixel.linear_to_srgb(wynimg::pick(buf, x, y, 1))
+    var b = pixel.linear_to_srgb(wynimg::pick(buf, x, y, 2))
+    set_hsv(rgb_hue(r, g, b), rgb_sat(r, g, b), rgb_val(r, g, b))
+    return 1
+}
+
+// RGB -> HSV, one component per function for the same reason hsv_channel takes a
+// channel index: a pub fn cannot reliably return a tuple across a module
+// boundary here.
+fn max3(a: float, b: float, c: float) -> float {
+    var m = a
+    if b > m { m = b }
+    if c > m { m = c }
+    return m
+}
+
+fn min3(a: float, b: float, c: float) -> float {
+    var m = a
+    if b < m { m = b }
+    if c < m { m = c }
+    return m
+}
+
+pub fn rgb_val(r: float, g: float, b: float) -> float {
+    return max3(r, g, b)
+}
+
+// NB the local names `chi`/`clo`, not the obvious `mx`/`mn`. A local `var mx`
+// holding a FLOAT in an imported module retypes a same-named `var mx = 0` in the
+// importing file, so `mx.to_float()` there fails with "Unknown method 'to_float'
+// for type 'float'" - src/ui.wyn has exactly such an `mx` for the mouse position.
+// Reported upstream with a two-file repro; the rename is the local fix and is no
+// worse to read.
+pub fn rgb_sat(r: float, g: float, b: float) -> float {
+    var chi = max3(r, g, b)
+    if chi <= 0.0 { return 0.0 }
+    return (chi - min3(r, g, b)) / chi
+}
+
+pub fn rgb_hue(r: float, g: float, b: float) -> float {
+    var chi = max3(r, g, b)
+    var clo = min3(r, g, b)
+    var d = chi - clo
+    if d <= 0.0 { return 0.0 }
+    var hv = 0.0
+    if chi == r { hv = (g - b) / d }
+    else {
+        if chi == g { hv = 2.0 + (b - r) / d }
+        else { hv = 4.0 + (r - g) / d }
+    }
+    hv = hv * 60.0
+    while hv < 0.0 { hv = hv + 360.0 }
+    while hv >= 360.0 { hv = hv - 360.0 }
+    return hv
+}

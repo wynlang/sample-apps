@@ -1,0 +1,401 @@
+// test_paint - the brush, the eraser, the fill and the colour model, asserted on
+// PIXELS.
+//
+// Every assertion here reads back an un-premultiplied channel with wynimg_pick
+// and compares it to a value derived from first principles, not from a previous
+// run. That matters for two of them in particular:
+//
+//   * "overlapping segments do not accumulate" is the bug a dab-based brush has
+//     and this one must not: it paints the same place twice at alpha 0.5 and
+//     asserts the result is still 0.5, not 0.75.
+//   * "the brush composites in linear light" checks the actual stored float
+//     against srgb_to_linear of the picked colour, so painting sRGB values
+//     straight into the buffer would fail even though it would look plausible.
+
+import pixel
+import layer
+import history
+import paint
+
+// A fresh single-layer document of transparent pixels, so each test starts from
+// a known state (the layer and history stores are module-level and shared).
+fn doc(w: int, h: int) -> int {
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(w, h)
+    layer.add("paint", b, layer.KIND_RASTER())
+    return b
+}
+
+test "a click paints a dab centred on the click" {
+    var b = doc(64, 64)
+    paint.set_tool(paint.TOOL_BRUSH())
+    paint.set_hsv(0.0, 1.0, 1.0)          // pure red
+    paint.set_radius(8.0)
+    paint.set_hardness(1.0)
+    paint.set_alpha(1.0)
+    paint.begin(0, 32.0, 32.0)
+    paint.commit()
+
+    // Centre is opaque red.
+    assert_true(pixel.approx(wynimg_pick(b, 32, 32, 3), 1.0, 0.01))
+    assert_true(pixel.approx(wynimg_pick(b, 32, 32, 0), 1.0, 0.01))
+    assert_true(pixel.approx(wynimg_pick(b, 32, 32, 1), 0.0, 0.01))
+    // A pixel well outside the radius is untouched.
+    assert_true(pixel.approx(wynimg_pick(b, 32, 50, 3), 0.0, 0.001))
+    // A pixel just inside the radius is painted.
+    assert_true(wynimg_pick(b, 37, 32, 3) > 0.9)
+}
+
+test "the brush stores LINEAR light, not the sRGB value" {
+    var b = doc(32, 32)
+    paint.set_tool(paint.TOOL_BRUSH())
+    // 50% grey in sRGB: v=0.5, s=0 => srgb 0.5 => linear 0.2140
+    paint.set_hsv(0.0, 0.0, 0.5)
+    paint.set_radius(6.0)
+    paint.set_hardness(1.0)
+    paint.set_alpha(1.0)
+    paint.begin(0, 16.0, 16.0)
+    paint.commit()
+
+    var want = pixel.srgb_to_linear(0.5)
+    var got = wynimg_pick(b, 16, 16, 0)
+    // Guard against the test passing for the wrong reason: linear and sRGB must
+    // actually differ here, or this asserts nothing.
+    assert_true(want < 0.4)
+    assert_true(pixel.approx(got, want, 0.002))
+}
+
+test "overlapping segments saturate instead of accumulating" {
+    var b = doc(32, 32)
+    paint.set_tool(paint.TOOL_BRUSH())
+    paint.set_hsv(0.0, 0.0, 1.0)
+    paint.set_radius(6.0)
+    paint.set_hardness(1.0)
+    paint.set_alpha(0.5)
+    paint.begin(0, 16.0, 16.0)
+    // Ten more segments over the identical spot. A dab-compositing brush would
+    // drive alpha to 1 - 0.5^11 = 0.9995 here.
+    var i = 0
+    while i < 10 {
+        paint.seg(16.0, 16.0)
+        i = i + 1
+    }
+    paint.commit()
+
+    var a = wynimg_pick(b, 16, 16, 3)
+    assert_true(pixel.approx(a, 0.5, 0.01))
+}
+
+test "a drag paints a continuous capsule, not dots" {
+    var b = doc(96, 32)
+    paint.set_tool(paint.TOOL_BRUSH())
+    paint.set_hsv(120.0, 1.0, 1.0)
+    paint.set_radius(4.0)
+    paint.set_hardness(1.0)
+    paint.set_alpha(1.0)
+    paint.begin(0, 10.0, 16.0)
+    // ONE segment spanning 70 pixels. If the brush stamped only at endpoints the
+    // middle would be empty.
+    paint.seg(80.0, 16.0)
+    paint.commit()
+
+    var x = 10
+    var gaps = 0
+    while x <= 80 {
+        if wynimg_pick(b, x, 16, 3) < 0.9 { gaps = gaps + 1 }
+        x = x + 1
+    }
+    assert_eq(gaps, 0)
+    // ...and it did not bleed far past the ends.
+    assert_true(wynimg_pick(b, 2, 16, 3) < 0.01)
+    assert_true(wynimg_pick(b, 90, 16, 3) < 0.01)
+}
+
+test "soft edges fall off monotonically" {
+    var b = doc(64, 64)
+    paint.set_tool(paint.TOOL_BRUSH())
+    paint.set_hsv(0.0, 0.0, 1.0)
+    paint.set_radius(20.0)
+    paint.set_hardness(0.0)               // fully soft
+    paint.set_alpha(1.0)
+    paint.begin(0, 32.0, 32.0)
+    paint.commit()
+
+    var prev = 2.0
+    var d = 0
+    var falls = 0
+    while d < 20 {
+        var a = wynimg_pick(b, 32 + d, 32, 3)
+        if a <= prev { falls = falls + 1 }
+        prev = a
+        d = d + 1
+    }
+    assert_eq(falls, 20)
+    // Genuinely soft: the halfway point is neither 0 nor 1.
+    var mid = wynimg_pick(b, 42, 32, 3)
+    assert_true(mid > 0.05)
+    assert_true(mid < 0.95)
+}
+
+test "the eraser removes colour AND alpha together" {
+    var b = doc(32, 32)
+    wynimg_fill(b, 0.8, 0.1, 0.1, 1.0)    // opaque red, premultiplied
+    paint.set_tool(paint.TOOL_ERASER())
+    paint.set_radius(6.0)
+    paint.set_hardness(1.0)
+    paint.set_alpha(1.0)
+    paint.begin(0, 16.0, 16.0)
+    paint.commit()
+
+    // Fully erased: alpha zero. And the RAW stored channel is zero too - an
+    // eraser that zeroed only alpha would leave premultiplied colour behind and
+    // show a red halo the moment anything composited over it.
+    assert_true(pixel.approx(wynimg_pick(b, 16, 16, 3), 0.0, 0.001))
+    assert_true(pixel.approx(wynimg_get(b, pixel.px_index(32, 16, 16, 0)),
+                             0.0, 0.001))
+    // Outside the brush the red survives.
+    assert_true(pixel.approx(wynimg_pick(b, 2, 2, 3), 1.0, 0.001))
+}
+
+test "a stroke is ONE undo entry and undo restores the pixels" {
+    var b = doc(32, 32)
+    wynimg_fill(b, 0.0, 0.0, 0.0, 1.0)    // opaque black
+    paint.set_tool(paint.TOOL_BRUSH())
+    paint.set_hsv(0.0, 0.0, 1.0)          // white
+    paint.set_radius(5.0)
+    paint.set_hardness(1.0)
+    paint.set_alpha(1.0)
+
+    assert_eq(history.depth(), 0)
+    paint.begin(0, 16.0, 16.0)
+    var i = 0
+    while i < 40 {
+        paint.seg(16.0 + i.to_float() * 0.2, 16.0)
+        i = i + 1
+    }
+    paint.commit()
+
+    // 41 applications of the brush; exactly one history entry.
+    assert_eq(history.depth(), 1)
+    assert_eq(history.undo_label(), "paint")
+    assert_true(wynimg_pick(b, 16, 16, 0) > 0.9)
+
+    history.undo_any()
+    assert_true(pixel.approx(wynimg_pick(b, 16, 16, 0), 0.0, 0.001))
+    assert_true(pixel.approx(wynimg_pick(b, 16, 16, 3), 1.0, 0.001))
+
+    history.redo_any()
+    assert_true(wynimg_pick(b, 16, 16, 0) > 0.9)
+}
+
+test "undo writes back into the SAME buffer handle" {
+    // The layer's handle is also held by the texture-upload path, so undo must
+    // move contents, not swap handles. If it swapped, the handle recorded here
+    // would still show the painted pixels after an undo.
+    var b = doc(32, 32)
+    wynimg_fill(b, 0.0, 0.0, 0.0, 1.0)
+    paint.set_tool(paint.TOOL_BRUSH())
+    paint.set_hsv(0.0, 0.0, 1.0)
+    paint.set_radius(5.0)
+    paint.set_hardness(1.0)
+    paint.set_alpha(1.0)
+    paint.begin(0, 16.0, 16.0)
+    paint.commit()
+    history.undo_any()
+
+    assert_eq(layer.buffer(0), b)
+    assert_true(pixel.approx(wynimg_pick(b, 16, 16, 0), 0.0, 0.001))
+}
+
+test "cancel puts the layer back and records nothing" {
+    var b = doc(32, 32)
+    wynimg_fill(b, 0.2, 0.2, 0.2, 1.0)
+    paint.set_tool(paint.TOOL_BRUSH())
+    paint.set_hsv(0.0, 0.0, 1.0)
+    paint.set_radius(6.0)
+    paint.set_hardness(1.0)
+    paint.set_alpha(1.0)
+    paint.begin(0, 16.0, 16.0)
+    assert_true(wynimg_pick(b, 16, 16, 0) > 0.9)
+    paint.cancel()
+    assert_eq(history.depth(), 0)
+    assert_true(pixel.approx(wynimg_pick(b, 16, 16, 0), 0.2, 0.01))
+}
+
+test "bucket fill floods a bounded region and stops at the border" {
+    var b = doc(40, 40)
+    wynimg_fill(b, 0.0, 0.0, 0.0, 1.0)                 // black field
+    wynimg_rect(b, 10, 10, 20, 20, 1.0, 1.0, 1.0, 1.0) // white box, unpremul in
+    paint.set_tool(paint.TOOL_FILL())
+    paint.set_hsv(0.0, 1.0, 1.0)                       // fill with red
+    paint.set_alpha(1.0)
+    paint.set_tolerance(0.05)
+
+    var n = paint.fill_at(0, 20, 20)
+    assert_eq(n, 400)                                  // exactly the 20x20 box
+
+    // Inside: red. Just outside: still black.
+    assert_true(wynimg_pick(b, 20, 20, 0) > 0.9)
+    assert_true(pixel.approx(wynimg_pick(b, 20, 20, 1), 0.0, 0.01))
+    assert_true(pixel.approx(wynimg_pick(b, 5, 5, 0), 0.0, 0.01))
+    // The border pixels of the box are filled, the ones outside are not.
+    assert_true(wynimg_pick(b, 10, 10, 0) > 0.9)
+    assert_true(pixel.approx(wynimg_pick(b, 9, 10, 0), 0.0, 0.01))
+}
+
+test "a fill is one undoable entry" {
+    var b = doc(20, 20)
+    wynimg_fill(b, 0.0, 0.0, 0.0, 1.0)
+    paint.set_tool(paint.TOOL_FILL())
+    paint.set_hsv(60.0, 1.0, 1.0)
+    paint.set_alpha(1.0)
+    paint.set_tolerance(0.05)
+    paint.fill_at(0, 10, 10)
+    assert_eq(history.depth(), 1)
+    assert_true(wynimg_pick(b, 0, 0, 0) > 0.9)
+    history.undo_any()
+    assert_true(pixel.approx(wynimg_pick(b, 0, 0, 0), 0.0, 0.01))
+}
+
+test "HSV to RGB hits the primaries exactly" {
+    assert_true(pixel.approx(pixel.hsv_channel(0.0, 1.0, 1.0, 0), 1.0, 0.001))
+    assert_true(pixel.approx(pixel.hsv_channel(0.0, 1.0, 1.0, 1), 0.0, 0.001))
+    assert_true(pixel.approx(pixel.hsv_channel(120.0, 1.0, 1.0, 1), 1.0, 0.001))
+    assert_true(pixel.approx(pixel.hsv_channel(120.0, 1.0, 1.0, 0), 0.0, 0.001))
+    assert_true(pixel.approx(pixel.hsv_channel(240.0, 1.0, 1.0, 2), 1.0, 0.001))
+    // Cyan: no red, full green and blue.
+    assert_true(pixel.approx(pixel.hsv_channel(180.0, 1.0, 1.0, 0), 0.0, 0.001))
+    assert_true(pixel.approx(pixel.hsv_channel(180.0, 1.0, 1.0, 1), 1.0, 0.001))
+    assert_true(pixel.approx(pixel.hsv_channel(180.0, 1.0, 1.0, 2), 1.0, 0.001))
+    // Zero saturation is grey at every hue.
+    assert_true(pixel.approx(pixel.hsv_channel(37.0, 0.0, 0.6, 0), 0.6, 0.001))
+    assert_true(pixel.approx(pixel.hsv_channel(37.0, 0.0, 0.6, 2), 0.6, 0.001))
+}
+
+test "RGB to HSV round-trips through HSV to RGB" {
+    var h = 0.0
+    while h < 360.0 {
+        var r = pixel.hsv_channel(h, 0.8, 0.7, 0)
+        var g = pixel.hsv_channel(h, 0.8, 0.7, 1)
+        var b = pixel.hsv_channel(h, 0.8, 0.7, 2)
+        assert_true(pixel.approx(paint.rgb_hue(r, g, b), h, 0.5))
+        assert_true(pixel.approx(paint.rgb_sat(r, g, b), 0.8, 0.005))
+        assert_true(pixel.approx(paint.rgb_val(r, g, b), 0.7, 0.005))
+        h = h + 15.0
+    }
+}
+
+test "the eyedropper reads a painted pixel back as the same colour" {
+    var b = doc(32, 32)
+    paint.set_tool(paint.TOOL_BRUSH())
+    paint.set_hsv(280.0, 0.7, 0.9)
+    paint.set_radius(8.0)
+    paint.set_hardness(1.0)
+    paint.set_alpha(1.0)
+    paint.begin(0, 16.0, 16.0)
+    paint.commit()
+
+    // Move the picker somewhere else entirely, then pick the painted pixel.
+    paint.set_hsv(0.0, 0.0, 0.0)
+    paint.pick_from(b, 16, 16)
+    assert_true(pixel.approx(paint.hue(), 280.0, 1.0))
+    assert_true(pixel.approx(paint.sat(), 0.7, 0.01))
+    assert_true(pixel.approx(paint.val(), 0.9, 0.01))
+}
+
+test "brush parameters clamp instead of accepting nonsense" {
+    paint.set_radius(0.0 - 5.0)
+    assert_true(paint.radius() >= 0.5)
+    paint.set_radius(9999.0)
+    assert_true(paint.radius() <= 200.0)
+    paint.set_alpha(4.0)
+    assert_true(pixel.approx(paint.alpha(), 1.0, 0.001))
+    paint.set_hardness(0.0 - 1.0)
+    assert_true(pixel.approx(paint.hardness(), 0.0, 0.001))
+    paint.set_hsv(720.0 + 30.0, 2.0, 0.0 - 1.0)
+    assert_true(pixel.approx(paint.hue(), 30.0, 0.001))
+    assert_true(pixel.approx(paint.sat(), 1.0, 0.001))
+    assert_true(pixel.approx(paint.val(), 0.0, 0.001))
+    paint.set_tool(99)
+    assert_true(paint.tool() <= 3)
+}
+
+test "painting an adjustment layer is refused, not crashed" {
+    layer.store_new()
+    history.history_new()
+    layer.add("brighten", 0, layer.KIND_ADJUST_BRIGHTNESS())
+    assert_eq(paint.begin(0, 1.0, 1.0), 0)
+    assert_false(paint.stroke_active())
+    assert_eq(paint.fill_at(0, 1, 1), 0 - 1)
+    assert_eq(history.depth(), 0)
+}
+
+test "a stroke on a layer with a mask still lands in the layer's own pixels" {
+    // Painting writes the layer buffer directly; the mask affects COMPOSITING,
+    // not the brush. A brush that consulted the mask would make masks
+    // destructive, which is the opposite of the point.
+    var b = doc(32, 32)
+    var m = wynimg_new(32, 32)
+    wynimg_fill(m, 0.0, 0.0, 0.0, 1.0)     // mask fully hides the layer
+    layer.set_mask(0, m)
+    paint.set_tool(paint.TOOL_BRUSH())
+    paint.set_hsv(0.0, 0.0, 1.0)
+    paint.set_radius(5.0)
+    paint.set_hardness(1.0)
+    paint.set_alpha(1.0)
+    paint.begin(0, 16.0, 16.0)
+    paint.commit()
+    assert_true(wynimg_pick(b, 16, 16, 3) > 0.9)
+}
+
+test "the C picker ramps agree with the Wyn HSV conversion" {
+    // csrc/wynimg_paint.c has its own hsv_rgb, because the ramps are built in C
+    // for speed. Two implementations of one formula drift; this is the guard.
+    // The ramp stores LINEAR values, so the comparison converts.
+    var sv = wynimg_new(101, 101)
+    assert_eq(wynimg_sv_square(sv, 210.0), 1)
+    // x=0 is s=0, x=100 is s=1; y=0 is v=1, y=100 is v=0.
+    var si = 0
+    while si <= 100 {
+        var vi = 0
+        while vi <= 100 {
+            var want_s = si.to_float() / 100.0
+            var want_v = 1.0 - vi.to_float() / 100.0
+            var ci = 0
+            while ci < 3 {
+                var want = pixel.srgb_to_linear(
+                    pixel.hsv_channel(210.0, want_s, want_v, ci))
+                assert_true(pixel.approx(wynimg_pick(sv, si, vi, ci), want, 0.002))
+                ci = ci + 1
+            }
+            vi = vi + 25
+        }
+        si = si + 25
+    }
+    wynimg_free(sv)
+
+    var hs = wynimg_new(4, 360)
+    assert_eq(wynimg_hue_strip(hs), 1)
+    var yy = 0
+    while yy < 360 {
+        var want_h = 360.0 * yy.to_float() / 360.0
+        var c2 = 0
+        while c2 < 3 {
+            var w2 = pixel.srgb_to_linear(pixel.hsv_channel(want_h, 1.0, 1.0, c2))
+            assert_true(pixel.approx(wynimg_pick(hs, 2, yy, c2), w2, 0.002))
+            c2 = c2 + 1
+        }
+        yy = yy + 30
+    }
+    wynimg_free(hs)
+}
+
+test "the ramps refuse a degenerate buffer instead of dividing by zero" {
+    var one = wynimg_new(1, 1)
+    assert_eq(wynimg_sv_square(one, 0.0), 0)
+    assert_eq(wynimg_hue_strip(one), 0)
+    assert_eq(wynimg_sv_square(0, 0.0), 0)
+    assert_eq(wynimg_hue_strip(0), 0)
+    wynimg_free(one)
+}

@@ -1,0 +1,384 @@
+// test_layerops - the structural layer commands and their undo records.
+//
+// The invariant under test is "index == depth": render.compose walks 0..count()
+// bottom-up, so a layer's array position IS its stacking order. Every assertion
+// below is about that ordering surviving a remove, an insert, a swap and their
+// undos - because a reorder that silently drops a layer, or an undo that
+// restores it at the wrong depth, is a data-loss bug that no pixel test on a
+// single-layer document would notice.
+//
+// The composite is checked too, not just the array: ordering is only meaningful
+// if the compositor sees it.
+
+import pixel
+import layer
+import history
+import render
+
+fn solid(w: int, h: int, r: float, g: float, b: float) -> int {
+    var buf = wynimg_new(w, h)
+    wynimg_fill(buf, r, g, b, 1.0)
+    return buf
+}
+
+test "remove shifts the layers above it down" {
+    layer.store_new()
+    layer.add("a", solid(4, 4, 1.0, 0.0, 0.0), layer.KIND_RASTER())
+    layer.add("b", solid(4, 4, 0.0, 1.0, 0.0), layer.KIND_RASTER())
+    layer.add("c", solid(4, 4, 0.0, 0.0, 1.0), layer.KIND_RASTER())
+    assert_eq(layer.count(), 3)
+
+    assert_eq(layer.remove(1), 1)
+    assert_eq(layer.count(), 2)
+    assert_eq(layer.name(0), "a")
+    assert_eq(layer.name(1), "c")
+}
+
+test "remove refuses an out-of-range index" {
+    layer.store_new()
+    layer.add("a", solid(2, 2, 1.0, 1.0, 1.0), layer.KIND_RASTER())
+    assert_eq(layer.remove(7), 0)
+    assert_eq(layer.remove(0 - 1), 0)
+    assert_eq(layer.count(), 1)
+}
+
+test "remove does NOT free the buffer" {
+    // History owns the handle between a delete and its undo. Freeing here would
+    // make undo restore a dead handle - which, thanks to the generation-tagged
+    // handle table, is a silently blank layer rather than a crash.
+    layer.store_new()
+    var b = solid(4, 4, 0.5, 0.5, 0.5)
+    layer.add("a", b, layer.KIND_RASTER())
+    layer.remove(0)
+    assert_eq(wynimg_alive(b), 1)
+    assert_eq(wynimg_width(b), 4)
+}
+
+test "insert places a layer at a given depth and preserves the rest" {
+    layer.store_new()
+    layer.add("bottom", solid(4, 4, 1.0, 0.0, 0.0), layer.KIND_RASTER())
+    layer.add("top", solid(4, 4, 0.0, 0.0, 1.0), layer.KIND_RASTER())
+    var mid = solid(4, 4, 0.0, 1.0, 0.0)
+    assert_eq(layer.insert(1, "mid", mid, layer.KIND_RASTER()), 1)
+
+    assert_eq(layer.count(), 3)
+    assert_eq(layer.name(0), "bottom")
+    assert_eq(layer.name(1), "mid")
+    assert_eq(layer.name(2), "top")
+    assert_eq(layer.buffer(1), mid)
+    // Fresh defaults, not the displaced layer's.
+    assert_true(pixel.approx(layer.opacity(1), 1.0, 0.001))
+    assert_eq(layer.blend_mode(1), 0)
+    assert_true(layer.visible(1))
+    assert_eq(layer.mask(1), 0)
+}
+
+test "insert clamps an out-of-range position instead of dropping the layer" {
+    layer.store_new()
+    layer.add("a", solid(2, 2, 1.0, 1.0, 1.0), layer.KIND_RASTER())
+    assert_eq(layer.insert(99, "high", solid(2, 2, 0.0, 0.0, 0.0),
+                           layer.KIND_RASTER()), 1)
+    assert_eq(layer.insert(0 - 4, "low", solid(2, 2, 0.0, 0.0, 0.0),
+                           layer.KIND_RASTER()), 0)
+    assert_eq(layer.count(), 3)
+    assert_eq(layer.name(0), "low")
+    assert_eq(layer.name(2), "high")
+}
+
+test "swap exchanges two rows completely" {
+    layer.store_new()
+    var ba = solid(4, 4, 1.0, 0.0, 0.0)
+    var bb = solid(4, 4, 0.0, 0.0, 1.0)
+    layer.add("a", ba, layer.KIND_RASTER())
+    layer.add("b", bb, layer.KIND_RASTER())
+    layer.set_opacity(0, 0.25)
+    layer.set_blend_mode(1, 5)
+    layer.set_visible(1, false)
+
+    assert_eq(layer.swap(0, 1), 1)
+    assert_eq(layer.name(0), "b")
+    assert_eq(layer.name(1), "a")
+    assert_eq(layer.buffer(0), bb)
+    assert_eq(layer.buffer(1), ba)
+    assert_eq(layer.blend_mode(0), 5)
+    assert_false(layer.visible(0))
+    assert_true(pixel.approx(layer.opacity(1), 0.25, 0.001))
+}
+
+test "swap is its own inverse and refuses bad indices" {
+    layer.store_new()
+    layer.add("a", solid(2, 2, 1.0, 0.0, 0.0), layer.KIND_RASTER())
+    layer.add("b", solid(2, 2, 0.0, 1.0, 0.0), layer.KIND_RASTER())
+    layer.swap(0, 1)
+    layer.swap(0, 1)
+    assert_eq(layer.name(0), "a")
+    assert_eq(layer.swap(0, 9), 0)
+    assert_eq(layer.swap(0, 0), 1)
+    assert_eq(layer.name(0), "a")
+}
+
+test "reordering changes what the compositor produces" {
+    // The point of ordering: the top layer wins. Swapping must change pixels.
+    layer.store_new()
+    layer.add("red", solid(4, 4, 1.0, 0.0, 0.0), layer.KIND_RASTER())
+    layer.add("blue", solid(4, 4, 0.0, 0.0, 1.0), layer.KIND_RASTER())
+
+    var c1 = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_pick(c1, 0, 0, 2), 1.0, 0.001))
+    assert_true(pixel.approx(wynimg_pick(c1, 0, 0, 0), 0.0, 0.001))
+    wynimg_free(c1)
+
+    layer.swap(0, 1)
+    var c2 = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_pick(c2, 0, 0, 0), 1.0, 0.001))
+    assert_true(pixel.approx(wynimg_pick(c2, 0, 0, 2), 0.0, 0.001))
+    wynimg_free(c2)
+}
+
+test "add-layer is undoable and redoable" {
+    layer.store_new()
+    history.history_new()
+    layer.add("base", solid(4, 4, 1.0, 0.0, 0.0), layer.KIND_RASTER())
+
+    var nb = solid(4, 4, 0.0, 0.0, 1.0)
+    var pos = layer.insert(1, "new", nb, layer.KIND_RASTER())
+    history.record_add_layer(pos, "new", nb, layer.KIND_RASTER())
+    assert_eq(layer.count(), 2)
+    assert_eq(history.undo_label(), "add layer")
+
+    history.undo_any()
+    assert_eq(layer.count(), 1)
+    assert_eq(layer.name(0), "base")
+
+    history.redo_any()
+    assert_eq(layer.count(), 2)
+    assert_eq(layer.name(1), "new")
+    assert_eq(layer.buffer(1), nb)
+}
+
+test "delete-layer undo restores the SAME pixels at the SAME depth" {
+    layer.store_new()
+    history.history_new()
+    layer.add("bottom", solid(4, 4, 1.0, 0.0, 0.0), layer.KIND_RASTER())
+    var mid = solid(4, 4, 0.0, 1.0, 0.0)
+    layer.add("mid", mid, layer.KIND_RASTER())
+    layer.add("top", solid(4, 4, 0.0, 0.0, 1.0), layer.KIND_RASTER())
+
+    history.record_del_layer(1, "mid", mid, layer.KIND_RASTER())
+    layer.remove(1)
+    assert_eq(layer.count(), 2)
+    assert_eq(layer.name(1), "top")
+
+    history.undo_any()
+    assert_eq(layer.count(), 3)
+    assert_eq(layer.name(1), "mid")
+    assert_eq(layer.buffer(1), mid)
+    assert_eq(wynimg_alive(mid), 1)
+    // Its pixels really are the originals.
+    assert_true(pixel.approx(wynimg_pick(layer.buffer(1), 0, 0, 1), 1.0, 0.001))
+
+    history.redo_any()
+    assert_eq(layer.count(), 2)
+    assert_eq(layer.name(1), "top")
+}
+
+test "reorder undo is a second swap" {
+    layer.store_new()
+    history.history_new()
+    layer.add("a", solid(2, 2, 1.0, 0.0, 0.0), layer.KIND_RASTER())
+    layer.add("b", solid(2, 2, 0.0, 1.0, 0.0), layer.KIND_RASTER())
+
+    layer.swap(0, 1)
+    history.record_swap(0, 1)
+    assert_eq(layer.name(0), "b")
+    assert_eq(history.undo_label(), "reorder")
+
+    history.undo_any()
+    assert_eq(layer.name(0), "a")
+    history.redo_any()
+    assert_eq(layer.name(0), "b")
+}
+
+test "rename undo/redo survives being renamed twice" {
+    layer.store_new()
+    history.history_new()
+    layer.add("one", solid(2, 2, 1.0, 1.0, 1.0), layer.KIND_RASTER())
+
+    history.record_name(0, "one", "two")
+    layer.set_name(0, "two")
+    history.record_name(0, "two", "three")
+    layer.set_name(0, "three")
+
+    history.undo_any()
+    assert_eq(layer.name(0), "two")
+    history.undo_any()
+    assert_eq(layer.name(0), "one")
+    history.redo_any()
+    assert_eq(layer.name(0), "two")
+    history.redo_any()
+    assert_eq(layer.name(0), "three")
+}
+
+test "the scalar ops still work through undo_any" {
+    // undo_any must fall through to the original scalar `apply` for the three
+    // ops that predate it, or wiring the UI to undo_any would silently break
+    // opacity, blend and visibility undo.
+    layer.store_new()
+    history.history_new()
+    layer.add("a", solid(2, 2, 1.0, 1.0, 1.0), layer.KIND_RASTER())
+
+    history.record_opacity(0, 1.0, 0.4)
+    layer.set_opacity(0, 0.4)
+    history.record_blend(0, 0, 6)
+    layer.set_blend_mode(0, 6)
+    var was = layer.visible(0)
+    var now = not was
+    history.record_visible(0, was, now)
+    layer.set_visible(0, now)
+
+    assert_eq(history.undo_label(), "visibility")
+    history.undo_any()
+    assert_true(layer.visible(0))
+    history.undo_any()
+    assert_eq(layer.blend_mode(0), 0)
+    history.undo_any()
+    assert_true(pixel.approx(layer.opacity(0), 1.0, 0.001))
+
+    history.redo_any()
+    assert_true(pixel.approx(layer.opacity(0), 0.4, 0.001))
+    history.redo_any()
+    assert_eq(layer.blend_mode(0), 6)
+    history.redo_any()
+    assert_false(layer.visible(0))
+}
+
+test "a mixed undo stack unwinds in order" {
+    layer.store_new()
+    history.history_new()
+    var b = solid(8, 8, 0.0, 0.0, 0.0)
+    layer.add("base", b, layer.KIND_RASTER())
+
+    // opacity, then a structural add, then a rename.
+    history.record_opacity(0, 1.0, 0.5)
+    layer.set_opacity(0, 0.5)
+    var nb = solid(8, 8, 1.0, 1.0, 1.0)
+    layer.insert(1, "over", nb, layer.KIND_RASTER())
+    history.record_add_layer(1, "over", nb, layer.KIND_RASTER())
+    history.record_name(0, "base", "floor")
+    layer.set_name(0, "floor")
+
+    assert_eq(history.depth(), 3)
+    history.undo_any()
+    assert_eq(layer.name(0), "base")
+    history.undo_any()
+    assert_eq(layer.count(), 1)
+    history.undo_any()
+    assert_true(pixel.approx(layer.opacity(0), 1.0, 0.001))
+    assert_false(history.can_undo())
+}
+
+test "recording after an undo discards the redo branch" {
+    layer.store_new()
+    history.history_new()
+    layer.add("a", solid(2, 2, 1.0, 1.0, 1.0), layer.KIND_RASTER())
+
+    history.record_opacity(0, 1.0, 0.5)
+    layer.set_opacity(0, 0.5)
+    history.record_opacity(0, 0.5, 0.25)
+    layer.set_opacity(0, 0.25)
+    assert_eq(history.depth(), 2)
+
+    history.undo_any()
+    assert_true(history.can_redo())
+    history.record_name(0, "a", "b")
+    layer.set_name(0, "b")
+    assert_false(history.can_redo())
+    assert_eq(history.depth(), 2)
+    assert_eq(history.undo_label(), "rename")
+}
+
+test "set_buffer returns the previous handle" {
+    layer.store_new()
+    var b1 = solid(2, 2, 1.0, 0.0, 0.0)
+    var b2 = solid(2, 2, 0.0, 1.0, 0.0)
+    layer.add("a", b1, layer.KIND_RASTER())
+    assert_eq(layer.set_buffer(0, b2), b1)
+    assert_eq(layer.buffer(0), b2)
+    assert_eq(layer.set_buffer(9, b1), 0)
+}
+
+test "scalar records keep the extended columns in step" {
+    // REGRESSION. The entry columns were extended with h_a/h_b/h_s/h_k for the
+    // pixel and structural commands, and while the three scalar records had
+    // their own writer that appended to only the first six, the arrays reached
+    // DIFFERENT LENGTHS. Measured symptom: after six scalar records a structural
+    // undo panicked with "array index out of bounds: index 5, length 2".
+    //
+    // Six scalar records - more than the initial column capacity - then one
+    // structural record, then unwind the whole stack. Any column length
+    // mismatch is an out-of-bounds read here, not a wrong value.
+    layer.store_new()
+    history.history_new()
+    layer.add("a", solid(4, 4, 1.0, 0.0, 0.0), layer.KIND_RASTER())
+
+    var i = 0
+    while i < 6 {
+        var was = layer.blend_mode(0)
+        var now = was + 1
+        history.record_blend(0, was, now)
+        layer.set_blend_mode(0, now)
+        i = i + 1
+    }
+    assert_eq(history.depth(), 6)
+
+    var nb = solid(4, 4, 0.0, 0.0, 1.0)
+    layer.insert(1, "over", nb, layer.KIND_RASTER())
+    history.record_add_layer(1, "over", nb, layer.KIND_RASTER())
+    assert_eq(history.depth(), 7)
+
+    var j = 0
+    while j < 7 {
+        history.undo_any()
+        j = j + 1
+    }
+    assert_false(history.can_undo())
+    assert_eq(layer.count(), 1)
+    assert_eq(layer.blend_mode(0), 0)
+
+    // And back up again.
+    var k = 0
+    while k < 7 {
+        history.redo_any()
+        k = k + 1
+    }
+    assert_eq(layer.count(), 2)
+    assert_eq(layer.blend_mode(0), 6)
+    assert_eq(layer.name(1), "over")
+}
+
+test "deleting a layer captures its properties, not just its pixels" {
+    // REGRESSION. Measured: deleting a layer that was `overlay` at 60% opacity
+    // and hidden, then undoing, restored it as `normal` at 100% and visible. The
+    // buffer came back so the image looked nearly right and the row read
+    // plausibly - silent data loss, which is the worst shape a bug can take.
+    layer.store_new()
+    history.history_new()
+    layer.add("bottom", solid(4, 4, 1.0, 0.0, 0.0), layer.KIND_RASTER())
+    var mid = solid(4, 4, 0.0, 1.0, 0.0)
+    layer.add("mid", mid, layer.KIND_RASTER())
+    layer.set_blend_mode(1, 3)              // overlay
+    layer.set_opacity(1, 0.6)
+    layer.set_visible(1, false)
+
+    history.record_del_layer(1, layer.name(1), layer.buffer(1), layer.kind(1))
+    layer.remove(1)
+    assert_eq(layer.count(), 1)
+
+    history.undo_any()
+    assert_eq(layer.count(), 2)
+    assert_eq(layer.name(1), "mid")
+    assert_eq(layer.buffer(1), mid)
+    assert_eq(layer.blend_mode(1), 3)
+    assert_true(pixel.approx(layer.opacity(1), 0.6, 0.001))
+    assert_false(layer.visible(1))
+}

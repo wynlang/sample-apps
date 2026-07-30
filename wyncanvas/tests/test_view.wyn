@@ -1,0 +1,192 @@
+// test_view - the viewport transform.
+//
+// The property that matters is that screen->document and document->screen are
+// inverses at every zoom and pan. If they are, the brush lands under the pointer
+// by construction; if they are not, no amount of care in the UI can save it. So
+// the round trip is asserted over a spread of zooms and pans rather than at the
+// one configuration a screenshot happens to be taken in (100%, no pan), which is
+// precisely where an inverse bug hides.
+
+import pixel
+import view
+
+fn setup() -> int {
+    view.set_viewport(0, 46, 790, 588)
+    view.set_doc(256, 256)
+    view.zoom_100()
+    return 0
+}
+
+test "at 100% with no pan the document is centred in the viewport" {
+    setup()
+    // viewport x 0..790, doc 256 wide => origin (790-256)/2 = 267
+    assert_eq(view.origin_x(), 267)
+    // viewport y 46, height 588, doc 256 => 46 + (588-256)/2 = 46+166 = 212
+    assert_eq(view.origin_y(), 212)
+    assert_eq(view.view_doc_w(), 256)
+    assert_eq(view.view_doc_h(), 256)
+}
+
+test "screen and document coordinates are inverses at every zoom" {
+    setup()
+    var zooms = [6, 25, 50, 100, 150, 200, 400, 800, 3200]
+    var i = 0
+    while i < zooms.len() {
+        view.zoom_100()
+        view.set_zoom(zooms[i])
+        var d = 0.0
+        while d < 256.0 {
+            var sx = view.doc_to_screen_x(d)
+            var back = view.screen_to_doc_x(sx)
+            assert_true(pixel.approx(back, d, 0.001))
+            var sy = view.doc_to_screen_y(d)
+            var backy = view.screen_to_doc_y(sy)
+            assert_true(pixel.approx(backy, d, 0.001))
+            d = d + 37.0
+        }
+        i = i + 1
+    }
+}
+
+test "screen and document coordinates are inverses under pan" {
+    setup()
+    view.set_zoom(250)
+    var pans = [0, 13, 0 - 47, 300, 0 - 512]
+    var i = 0
+    while i < pans.len() {
+        view.reset_pan()
+        view.pan_by(pans[i], pans[i] / 2)
+        var d = 0.5
+        while d < 256.0 {
+            var back = view.screen_to_doc_x(view.doc_to_screen_x(d))
+            assert_true(pixel.approx(back, d, 0.001))
+            var backy = view.screen_to_doc_y(view.doc_to_screen_y(d))
+            assert_true(pixel.approx(backy, d, 0.001))
+            d = d + 51.0
+        }
+        i = i + 1
+    }
+}
+
+test "a pan moves the document by exactly that many screen pixels" {
+    setup()
+    var before = view.doc_to_screen_x(0.0)
+    view.pan_by(40, 0 - 25)
+    assert_true(pixel.approx(view.doc_to_screen_x(0.0), before + 40.0, 0.001))
+    assert_eq(view.pan_x(), 40)
+    assert_eq(view.pan_y(), 0 - 25)
+}
+
+test "zoom keeps the point under the anchor fixed" {
+    // The whole reason zoom_at exists. Zooming with the pointer over a feature
+    // must leave that feature under the pointer.
+    setup()
+    var ax = 300
+    var ay = 250
+    var d_before_x = view.screen_to_doc_x(ax.to_float())
+    var d_before_y = view.screen_to_doc_y(ay.to_float())
+
+    view.zoom_at(400, ax, ay)
+    var d_after_x = view.screen_to_doc_x(ax.to_float())
+    var d_after_y = view.screen_to_doc_y(ay.to_float())
+
+    // Within a rounding step: the pan is an integer, so at 400% one pan unit is
+    // a quarter of a document pixel.
+    assert_true(pixel.approx(d_after_x, d_before_x, 0.30))
+    assert_true(pixel.approx(d_after_y, d_before_y, 0.30))
+    assert_eq(view.zoom(), 400)
+}
+
+test "zooming in then out about the same anchor returns to the start" {
+    setup()
+    var ax = 410
+    var ay = 300
+    var d0 = view.screen_to_doc_x(ax.to_float())
+    view.zoom_at(200, ax, ay)
+    view.zoom_at(400, ax, ay)
+    view.zoom_at(200, ax, ay)
+    view.zoom_at(100, ax, ay)
+    assert_eq(view.zoom(), 100)
+    assert_true(pixel.approx(view.screen_to_doc_x(ax.to_float()), d0, 0.6))
+}
+
+test "zoom clamps at both ends" {
+    setup()
+    var i = 0
+    while i < 20 {
+        view.zoom_in_center()
+        i = i + 1
+    }
+    assert_eq(view.zoom(), 3200)
+    var j = 0
+    while j < 40 {
+        view.zoom_out_center()
+        j = j + 1
+    }
+    assert_eq(view.zoom(), 6)
+    view.set_zoom(0 - 100)
+    assert_eq(view.zoom(), 6)
+    view.set_zoom(999999)
+    assert_eq(view.zoom(), 3200)
+}
+
+test "zoom_fit makes the document fit inside the viewport" {
+    view.set_viewport(0, 46, 790, 588)
+    view.set_doc(4000, 3000)
+    view.zoom_fit()
+    assert_true(view.view_doc_w() <= 790)
+    assert_true(view.view_doc_h() <= 588)
+    // ...and is not needlessly small: one step up would overflow.
+    view.set_zoom(view.zoom() + 1)
+    var over = 0
+    if view.view_doc_w() > 790 { over = 1 }
+    if view.view_doc_h() > 588 { over = 1 }
+    assert_eq(over, 1)
+}
+
+test "zoom_fit on a small document scales it up" {
+    view.set_viewport(0, 0, 800, 600)
+    view.set_doc(100, 100)
+    view.zoom_fit()
+    assert_eq(view.zoom(), 600)
+    assert_eq(view.view_doc_w(), 600)
+}
+
+test "hits_doc is true inside the image and false beside it" {
+    setup()
+    // Centre of the viewport is inside a centred document.
+    assert_true(view.hits_doc(395, 340))
+    // origin is (267, 212), doc is 256x256 => 267..522, 212..467
+    assert_true(view.hits_doc(267, 212))
+    assert_true(view.hits_doc(522, 467))
+    assert_false(view.hits_doc(266, 340))
+    assert_false(view.hits_doc(523, 340))
+    assert_false(view.hits_doc(395, 211))
+    assert_false(view.hits_doc(395, 468))
+}
+
+test "hits_doc is false when there is no document" {
+    view.set_viewport(0, 0, 800, 600)
+    view.set_doc(0, 0)
+    assert_false(view.hits_doc(400, 300))
+}
+
+test "a screen pixel maps to the expected document pixel at 400%" {
+    setup()
+    view.set_zoom(400)
+    view.reset_pan()
+    // 256*4 = 1024 wide, viewport 790 => origin (790-1024)/2 = -117
+    assert_eq(view.origin_x(), 0 - 117)
+    // Document pixel 100 is at -117 + 400 = 283.
+    assert_true(pixel.approx(view.doc_to_screen_x(100.0), 283.0, 0.001))
+    // And a screen x of 285 is a quarter-pixel into document pixel 100.
+    assert_true(pixel.approx(view.screen_to_doc_x(285.0), 100.5, 0.001))
+}
+
+test "a zoomed-out document still occupies at least one pixel" {
+    view.set_viewport(0, 0, 800, 600)
+    view.set_doc(8, 8)
+    view.set_zoom(6)
+    assert_true(view.view_doc_w() >= 1)
+    assert_true(view.view_doc_h() >= 1)
+}

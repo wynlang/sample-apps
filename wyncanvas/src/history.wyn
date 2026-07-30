@@ -44,27 +44,21 @@ pub fn depth() -> int { return h_len }
 pub fn can_undo() -> bool { return h_pos > 0 }
 pub fn can_redo() -> bool { return h_pos < h_len }
 
+// EVERY record goes through push_ex, including the three scalar ones. That is
+// not indirection for its own sake: the entry columns were later extended with
+// h_a/h_b/h_s/h_k for the pixel and structural commands, and a second writer that
+// appended to only the first six left the arrays at DIFFERENT LENGTHS.
+//
+// The failure was measured, not theorised: a script that clicked `b>` twice,
+// `o-` twice, `dn`, `-L` and then Undo panicked with
+// "array index out of bounds: index 5, length 2" - six scalar records had
+// advanced h_len to 6 while h_a still held 2, so the first structural undo read
+// off the end. A scalar-only session never touches h_a and never notices.
+//
+// One writer makes the ten columns the same length by construction, which is the
+// only version of this invariant that cannot rot.
 fn push(op: int, lid: int, of: float, nf: float, oi: int, ni: int) -> int {
-    // A new action invalidates any redo branch.
-    h_len = h_pos
-    if h_len < h_op.len() {
-        h_op[h_len] = op
-        h_layer[h_len] = lid
-        h_old_f[h_len] = of
-        h_new_f[h_len] = nf
-        h_old_i[h_len] = oi
-        h_new_i[h_len] = ni
-    } else {
-        h_op.push(op)
-        h_layer.push(lid)
-        h_old_f.push(of)
-        h_new_f.push(nf)
-        h_old_i.push(oi)
-        h_new_i.push(ni)
-    }
-    h_len = h_len + 1
-    h_pos = h_len
-    return h_len
+    return push_ex(op, lid, of, nf, oi, ni, 0, 0, "", 0)
 }
 
 pub fn record_opacity(layer_id: int, old_v: float, new_v: float) -> int {
@@ -125,4 +119,247 @@ pub fn label(i: int) -> string {
     if op == OP_BLEND() { return "blend mode" }
     if op == OP_VISIBLE() { return "visibility" }
     return "change"
+}
+
+// ---- pixel and structural commands ----------------------------------------
+//
+// WHY A PAINT STROKE IS TWO SNAPSHOTS AND NOT A PARAMETER PAIR.
+//
+// Everything above records a scalar old/new pair, which is why "recording is
+// O(1) in canvas size" holds. A brush stroke has no such representation: the
+// operation IS pixels. So OP_PIXELS stores two buffer HANDLES - the layer as it
+// was before the stroke and as it is after - and undo/redo copies one of them
+// back into the live buffer with wynimg_copy_into.
+//
+// COPY, NOT SWAP. The layer's buffer handle is also held by the texture
+// upload path and can be referenced as another layer's mask, so replacing the
+// handle would leave those pointing at the pre-undo pixels. Copying keeps one
+// buffer identity for the life of the layer and moves only the contents.
+//
+// THE COST IS NAMED, NOT HIDDEN. Two float32 RGBA snapshots per stroke is
+// 32 bytes per pixel per undo step - 8MB per step on a 256K-pixel document,
+// 400MB on a 12MP one. That is the price of pixel undo without tiling; a real
+// editor stores only the stroke's dirty rectangle, which is exactly what
+// WYNIMG_TILE is reserved for. What is NOT acceptable is leaking them, so
+// truncating the redo branch frees the snapshots it discards (see `discard`).
+//
+// STRUCTURAL COMMANDS carry a name and a buffer handle so that undoing a delete
+// restores the same pixels, not an empty layer. That is why layer.remove does
+// not free the buffer: between the delete and its undo, history owns it.
+
+import pixel
+
+fn OP_PIXELS() -> int { return 3 }
+fn OP_ADD_LAYER() -> int { return 4 }
+fn OP_DEL_LAYER() -> int { return 5 }
+fn OP_SWAP() -> int { return 6 }
+fn OP_NAME() -> int { return 7 }
+
+// Extra columns. Parallel arrays again, one per field: `h_a`/`h_b` are buffer
+// handles for OP_PIXELS and OP_DEL_LAYER/OP_ADD_LAYER, `h_s` is the layer name,
+// `h_k` the layer kind.
+var h_a = [0]
+var h_b = [0]
+var h_s = [""]
+var h_k = [0]
+
+fn push_ex(op: int, lid: int, of: float, nf: float, oi: int, ni: int,
+           a: int, b: int, s: string, k: int) -> int {
+    // Free any snapshot the discarded redo branch owned. Without this every
+    // "paint, undo, paint again" leaks a full-canvas float buffer.
+    discard_above(h_pos)
+    h_len = h_pos
+    if h_len < h_op.len() {
+        h_op[h_len] = op
+        h_layer[h_len] = lid
+        h_old_f[h_len] = of
+        h_new_f[h_len] = nf
+        h_old_i[h_len] = oi
+        h_new_i[h_len] = ni
+    } else {
+        h_op.push(op)
+        h_layer.push(lid)
+        h_old_f.push(of)
+        h_new_f.push(nf)
+        h_old_i.push(oi)
+        h_new_i.push(ni)
+    }
+    if h_len < h_a.len() {
+        h_a[h_len] = a
+        h_b[h_len] = b
+        h_s[h_len] = s
+        h_k[h_len] = k
+    } else {
+        h_a.push(a)
+        h_b.push(b)
+        h_s.push(s)
+        h_k.push(k)
+    }
+    h_len = h_len + 1
+    h_pos = h_len
+    return h_len
+}
+
+// Frees the snapshot buffers owned by entries at or above `from`, which are
+// about to become unreachable. Only OP_PIXELS owns buffers outright; a
+// structural entry's handle is either live in the layer store (add) or is the
+// only surviving reference to a deleted layer's pixels (delete), and freeing
+// either would be wrong - so this frees snapshots and nothing else.
+fn discard_above(start: int) -> int {
+    var i = start
+    var n = 0
+    while i < h_len {
+        if h_op[i] == OP_PIXELS() {
+            if i < h_a.len() {
+                wynimg::free(h_a[i])
+                wynimg::free(h_b[i])
+                h_a[i] = 0
+                h_b[i] = 0
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// `before` and `after` must be clones (wynimg_clone) of the layer buffer taken
+// either side of the stroke. History takes ownership of both.
+pub fn record_pixels(layer_id: int, before: int, after: int) -> int {
+    return push_ex(OP_PIXELS(), layer_id, 0.0, 0.0, 0, 0, before, after, "", 0)
+}
+
+pub fn record_add_layer(pos: int, name: string, buf: int, kind: int) -> int {
+    return push_ex(OP_ADD_LAYER(), pos, 0.0, 0.0, 0, 0, buf, 0, name, kind)
+}
+
+// A DELETE MUST CAPTURE THE LAYER'S PROPERTIES, NOT JUST ITS PIXELS.
+//
+// Measured: deleting a layer that was `overlay` at 60% opacity and then undoing
+// restored it as `normal` at 100%. The buffer came back, so the image looked
+// nearly right and the layer row read plausibly - which is precisely why it is
+// worth a record rather than a comment. Real, silent data loss.
+//
+// The properties ride in the columns the scalar ops use and this op does not:
+// h_new_f is the opacity, h_new_i the blend mode, h_old_i the visibility. Undo of
+// a delete is an insert followed by restoring those three.
+//
+// `mask` is deliberately NOT captured. A mask is another buffer handle and there
+// is no column left for it; recording it in h_b - which OP_PIXELS uses for its
+// "after" snapshot - would make discard_above free a live mask. So a delete
+// currently loses the mask, and that is a stated limitation rather than a
+// forgotten case; fixing it needs an eleventh column, not a cleverer encoding.
+pub fn record_del_layer(pos: int, name: string, buf: int, kind: int) -> int {
+    var vis = 0
+    if layer.visible(pos) { vis = 1 }
+    return push_ex(OP_DEL_LAYER(), pos, 0.0, layer.opacity(pos),
+                   vis, layer.blend_mode(pos), buf, 0, name, kind)
+}
+
+pub fn record_swap(a: int, b: int) -> int {
+    return push_ex(OP_SWAP(), a, 0.0, 0.0, a, b, 0, 0, "", 0)
+}
+
+// A rename needs TWO strings but there is one string column, so both ride in it
+// as "old\nnew". The alternative - store only the old name and read the new one
+// off the layer at undo time - breaks the second redo of a twice-renamed layer,
+// because by then the layer holds the undone name. A newline cannot occur in a
+// name typed into a single-line entry field, so the split is unambiguous.
+pub fn record_name(layer_id: int, old_s: string, new_s: string) -> int {
+    return push_ex(OP_NAME(), layer_id, 0.0, 0.0, 0, 0, 0, 0,
+                   old_s + "\n" + new_s, 0)
+}
+
+// Applies the non-scalar ops. Returns 1 if it handled `i`, 0 if not (in which
+// case the scalar `apply` above owns it).
+fn apply_ex(i: int, use_new: bool) -> int {
+    var op = h_op[i]
+    var lid = h_layer[i]
+    if op == OP_PIXELS() {
+        var live = layer.buffer(lid)
+        if live == 0 { return 1 }
+        var snap = h_a[i]
+        if use_new { snap = h_b[i] }
+        wynimg::copy_into(live, snap)
+        return 1
+    }
+    if op == OP_ADD_LAYER() {
+        if use_new {
+            layer.insert(lid, h_s[i], h_a[i], h_k[i])
+        } else {
+            layer.remove(lid)
+        }
+        return 1
+    }
+    if op == OP_DEL_LAYER() {
+        if use_new {
+            layer.remove(lid)
+        } else {
+            // Insert, then restore the properties the delete captured. Without
+            // the second half, undoing the delete of an `overlay` layer at 60%
+            // brought it back as `normal` at 100% - measured, and near-invisible
+            // because the pixels were right.
+            layer.insert(lid, h_s[i], h_a[i], h_k[i])
+            layer.set_opacity(lid, h_new_f[i])
+            layer.set_blend_mode(lid, h_new_i[i])
+            layer.set_visible(lid, h_old_i[i] == 1)
+        }
+        return 1
+    }
+    if op == OP_SWAP() {
+        // Symmetric: undo and redo are the same swap.
+        layer.swap(h_old_i[i], h_new_i[i])
+        return 1
+    }
+    if op == OP_NAME() {
+        var parts = h_s[i].split("\n")
+        if parts.len() < 2 { return 1 }
+        if use_new { layer.set_name(lid, parts[1]) }
+        else { layer.set_name(lid, parts[0]) }
+        return 1
+    }
+    return 0
+}
+
+// Undo/redo that also handle the non-scalar ops. The originals are left intact
+// - tests/test_history.wyn asserts their exact behaviour - and these are what
+// the UI calls.
+pub fn undo_any() -> int {
+    if can_undo() == false { return 0 }
+    h_pos = h_pos - 1
+    if apply_ex(h_pos, false) == 1 { return 1 }
+    return apply(h_pos, false)
+}
+
+pub fn redo_any() -> int {
+    if can_redo() == false { return 0 }
+    var r = 0
+    if apply_ex(h_pos, true) == 1 { r = 1 }
+    else { r = apply(h_pos, true) }
+    h_pos = h_pos + 1
+    return r
+}
+
+pub fn label_any(i: int) -> string {
+    if i < 0 or i >= h_len { return "" }
+    var op = h_op[i]
+    if op == OP_PIXELS() { return "paint" }
+    if op == OP_ADD_LAYER() { return "add layer" }
+    if op == OP_DEL_LAYER() { return "delete layer" }
+    if op == OP_SWAP() { return "reorder" }
+    if op == OP_NAME() { return "rename" }
+    return label(i)
+}
+
+// Label of the entry Undo would revert, and of the one Redo would reapply.
+// A status bar that says "undo" tells you nothing; one that says "undo paint"
+// tells you whether the last stroke was recorded at all.
+pub fn undo_label() -> string {
+    if can_undo() == false { return "" }
+    return label_any(h_pos - 1)
+}
+
+pub fn redo_label() -> string {
+    if can_redo() == false { return "" }
+    return label_any(h_pos)
 }

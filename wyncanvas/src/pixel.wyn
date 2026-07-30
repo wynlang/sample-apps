@@ -200,3 +200,91 @@ extern fn wynimg_open_wr(path: string) -> int;
 extern fn wynimg_close_fd(fd: int) -> int;
 extern fn wynimg_file_size(path: string) -> int;
 extern fn wynimg_file_byte(path: string, off: int) -> int;
+
+// ---- painting kernels (csrc/wynimg_paint.c) --------------------------------
+//
+// A STROKE IS TWO BUFFERS AND ONE COMPOSITE, not a sequence of dabs.
+//
+// wynimg_stroke_seg accumulates COVERAGE with max(), so where the pointer moved
+// slowly and consecutive segments overlap, coverage saturates at 1.0 instead of
+// accumulating. Dab-compositing instead - "just composite a soft disc at each
+// mouse position" - makes a 30%-alpha stroke opaque wherever the pointer
+// dawdled, which is the single most common brush bug there is.
+//
+// wynimg_stroke_apply then rebuilds the layer as base + colour*coverage from a
+// snapshot taken when the stroke began. Three consequences, all needed:
+// the live preview is byte-identical to the committed result; the whole stroke
+// is ONE undoable operation rather than 400; and stroke alpha means what it
+// says.
+//
+// Called BARE by importers (see the CALL CONVENTION note at the top).
+extern fn wynimg_clone(p: int) -> int;
+extern fn wynimg_copy_into(dst: int, src: int) -> int;
+extern fn wynimg_clear(p: int) -> int;
+extern fn wynimg_stroke_seg(stroke: int, x0: float, y0: float, x1: float, y1: float,
+                            radius: float, hardness: float) -> int;
+extern fn wynimg_stroke_apply(dst: int, base: int, stroke: int,
+                              r: float, g: float, b: float, a: float,
+                              erase: int) -> int;
+
+// Un-premultiplied read of one channel. The eyedropper and every pixel
+// assertion needs this: the stored pixel is colour*alpha, so reading a
+// half-transparent red back as 0.5 and calling it "the colour" is wrong.
+extern fn wynimg_pick(p: int, x: int, y: int, chan: int) -> float;
+
+// 4-connected flood fill. Writes coverage into a stroke buffer rather than
+// pixels, so a bucket fill goes through the same compositing and the same undo
+// record as a brush stroke. Returns the pixel count, or -1 if refused.
+extern fn wynimg_fill_region(stroke: int, src: int, sx: int, sy: int, tol: float) -> int;
+
+extern fn wynimg_rect(p: int, x: int, y: int, w: int, h: int,
+                      r: float, g: float, b: float, a: float) -> int;
+
+// ---- HSV -> RGB, for the colour picker ------------------------------------
+//
+// Returns ONE channel because a Wyn pub fn cannot return a tuple or a struct
+// across a module boundary reliably. h in [0,360), s and v in [0,1]. The result
+// is sRGB-ENCODED (display) values - the picker paints them, and the brush runs
+// them through srgb_to_linear before they reach a pixel.
+pub fn hsv_channel(h: float, s: float, v: float, chan: int) -> float {
+    var hh = h
+    while hh >= 360.0 { hh = hh - 360.0 }
+    while hh < 0.0 { hh = hh + 360.0 }
+    var ss = clamp01(s)
+    var vv = clamp01(v)
+    var c = vv * ss
+    var sector = hh / 60.0
+    var seg = sector.to_int()
+    var f = sector - seg.to_float()
+    var x = c * (1.0 - f)
+    var y = c * f
+    var m = vv - c
+    // r,g,b as offsets above the achromatic floor `m`.
+    var r = 0.0
+    var g = 0.0
+    var b = 0.0
+    if seg == 0 { r = c  g = y  b = 0.0 }
+    if seg == 1 { r = x  g = c  b = 0.0 }
+    if seg == 2 { r = 0.0  g = c  b = y }
+    if seg == 3 { r = 0.0  g = x  b = c }
+    if seg == 4 { r = y  g = 0.0  b = c }
+    if seg >= 5 { r = c  g = 0.0  b = x }
+    if chan == 0 { return m + r }
+    if chan == 1 { return m + g }
+    if chan == 2 { return m + b }
+    return 1.0
+}
+
+// ---- colour-picker ramps ---------------------------------------------------
+//
+// An SV square is a per-pixel gradient, so it is a wynimg buffer uploaded as a
+// texture and blitted once - exactly like the document. Drawing it with the
+// window backend's rectangle primitive would be 16,384 calls per frame for a
+// 128px widget, and drawing it coarsely to save calls is what makes a picker look
+// like a chessboard.
+//
+// Both write LINEAR PREMULTIPLIED values, so the existing upload path converts
+// them for display and the swatch a user clicks is the colour the brush paints.
+// Called BARE by importers (see the CALL CONVENTION note at the top).
+extern fn wynimg_sv_square(p: int, hue: float) -> int;
+extern fn wynimg_hue_strip(p: int) -> int;

@@ -27,42 +27,53 @@
 // one Win_rect per pixel. A 1024x768 view is 786,432 calls per frame. That is not
 // a slow version of this, it is a non-working version.
 //
-// NOTHING HERE KNOWS HOW TO COMPOSITE, BLEND, LOAD OR SAVE.
+// NOTHING HERE KNOWS HOW TO COMPOSITE, BLEND, PAINT, LOAD OR SAVE.
 //
 // Every imaging operation is a call into the existing modules - render.compose,
-// render.compose_to_png, wynimg_load_png, layer.*, history.undo/redo. This file
-// is layout, paint and dispatch. If a blend mode is wrong, it is wrong in
-// csrc/, and no edit here could hide that.
+// render.compose_to_png, paint.begin/seg/commit, view.screen_to_doc_*, layer.*,
+// history.undo_any/redo_any. This file is layout, paint and dispatch. If a blend
+// mode is wrong, it is wrong in csrc/, and no edit here could hide that.
 //
 // ---------------------------------------------------------------------------
-// WHY THE PAINT IS HAND-WRITTEN WHILE THE WIDGET MODEL IS NOT
+// THE THREE THINGS THIS FILE OWNS, AND WHY THEY ARE HERE AND NOT ELSEWHERE
 //
-// The `widgets` toolkit is reused for what is genuinely hard: the retained
-// widget list, hit-testing, and press/release dispatch (a click is only a click
-// if it is RELEASED over the control it began on). What is NOT used is
-// `Ui_draw`/`Ui_frame`, and that is a correctness requirement, not a preference.
+// 1. WHERE THE POINTER IS. `view` owns the transform and `paint` owns what a
+//    stroke is; only this file knows the window's event stream. That split is
+//    what makes the brush testable without a window: tests/test_paint.wyn drives
+//    begin/seg/commit in DOCUMENT coordinates, tests/test_view.wyn asserts the
+//    transform is invertible, and the only thing left is the composition of the
+//    two - which the screenshot script below exercises by pushing real events and
+//    reading pixels back.
 //
-// Ui_draw is a complete frame: it clears, paints the widgets, and presents. An
-// editor frame is viewport + layer list + widgets, so calling Ui_draw would
-// force either drawing the viewport BEFORE the clear that erases it, or AFTER
-// the present that ends the frame. The second appears to work - measured: a rect
-// drawn after Win_present is still in the next screenshot on this backend - but
-// it is relying on undefined behaviour. SDL's contract is that the backbuffer is
-// invalidated by SDL_RenderPresent; a double-buffered driver would show the
-// viewport flickering on alternate frames, and that is precisely the class of
-// bug that is invisible on the machine it was written on.
+// 2. THE CANVAS DRAG, which the widget toolkit deliberately does not model. The
+//    toolkit's contract is "a click is a press and a release over the same
+//    control"; a paint stroke is a press, an unbounded number of moves, and a
+//    release, and its intermediate positions matter. So the canvas is NOT a
+//    widget: `Ui_events` drains the queue and this file reads the resulting
+//    pointer state each frame, which is enough because a stroke only needs to
+//    know where the pointer is and whether the button is down.
 //
-// So this file owns the frame: one Win_clear, all painting, one Win_present.
-// `Ui_events` still owns the event queue - it must, because it drains the queue
-// and a second reader would see nothing.
+//    THIS IS NOT A WORKAROUND but the correct division: making the canvas a
+//    widget would mean teaching the toolkit about drag gestures for the benefit
+//    of exactly one control.
+//
+// 3. THE FRAME. One Win_clear, all painting, one Win_present. `Ui_draw` is not
+//    used, and that is a correctness requirement rather than a preference:
+//    Ui_draw is a complete frame (it clears, paints and presents), so calling it
+//    would force drawing the viewport either BEFORE the clear that erases it or
+//    AFTER the present that ends the frame. The second appears to work - measured:
+//    a rect drawn after Win_present is still in the next screenshot on this
+//    backend - but SDL's contract is that the backbuffer is invalidated by
+//    SDL_RenderPresent, so a double-buffered driver would flicker. That is
+//    exactly the class of bug that is invisible on the machine it was written on.
 //
 // ---------------------------------------------------------------------------
 // WHY HANDLERS SET FLAGS INSTEAD OF DOING THE WORK
 //
 // A Wyn closure cannot capture a mutable reference to surrounding state, so a
 // handler receives only the widget id that was clicked and can reach only
-// module-level state. For Undo, Redo and a layer toggle that is enough: they
-// need the id and the modules, both of which are in scope.
+// module-level state. For Undo, Redo, a tool change and a layer toggle that is
+// enough: they need the id and the modules, both of which are in scope.
 //
 // Open and Save additionally need the path the user typed, which lives in the
 // Ui - unreachable from a handler. Those two therefore record a REQUEST
@@ -77,6 +88,8 @@ import layer
 import history
 import render
 import server
+import paint
+import view
 
 // Bridge from a wynimg buffer handle to a GPU texture. Implemented in
 // csrc/wynimg_tex.c, because resolving a handle to its `float*` requires
@@ -93,20 +106,32 @@ extern fn wynimg_upload_tex(tex: int, p: int) -> int;
 // Functions rather than constants so the arithmetic is written once. Every
 // number below is a pixel in window space.
 
-fn WIN_W() -> int { return 1000 }
-fn WIN_H() -> int { return 660 }
+fn WIN_W() -> int { return 1180 }
+fn WIN_H() -> int { return 760 }
 
 fn TOOLBAR_H() -> int { return 46 }
 fn STATUS_H() -> int { return 26 }
-fn PANEL_W() -> int { return 210 }
+fn PANEL_W() -> int { return 250 }
+fn TOOLS_W() -> int { return 54 }
 
-fn VIEW_X() -> int { return 0 }
+fn VIEW_X() -> int { return TOOLS_W() }
 fn VIEW_Y() -> int { return TOOLBAR_H() }
-fn VIEW_W() -> int { return WIN_W() - PANEL_W() }
+fn VIEW_W() -> int { return WIN_W() - PANEL_W() - TOOLS_W() }
 fn VIEW_H() -> int { return WIN_H() - TOOLBAR_H() - STATUS_H() }
 
 fn PANEL_X() -> int { return WIN_W() - PANEL_W() }
-fn ROW_H() -> int { return 26 }
+fn ROW_H() -> int { return 24 }
+
+// Colour picker geometry, inside the right panel.
+fn SV_X() -> int { return PANEL_X() + 12 }
+fn SV_Y() -> int { return VIEW_Y() + 12 }
+fn SV_SIZE() -> int { return 150 }
+fn HUE_X() -> int { return SV_X() + SV_SIZE() + 10 }
+fn HUE_Y() -> int { return SV_Y() }
+fn HUE_W() -> int { return 22 }
+
+// The layer list starts below the picker, its swatch, and the layer buttons.
+fn LAYERS_Y() -> int { return SV_Y() + SV_SIZE() + 92 }
 
 // ---- state ----------------------------------------------------------------
 //
@@ -118,7 +143,6 @@ var g_font = -1
 
 var g_doc_w = 0
 var g_doc_h = 0
-var g_zoom = 100
 
 // The composited document, on the GPU. Recreated only when the document's
 // dimensions change - a texture cannot be resized under its handle.
@@ -126,9 +150,24 @@ var g_tex = -1
 var g_tex_w = 0
 var g_tex_h = 0
 
+// The colour picker's two ramps, also as textures. The SV square depends only on
+// the hue, so it is rebuilt when the hue changes and not per frame; the hue strip
+// never changes at all.
+var g_sv_buf = 0
+var g_sv_tex = -1
+var g_sv_hue = -1.0
+var g_hue_buf = 0
+var g_hue_tex = -1
+
+// The last composite, retained. The eyedropper reads the COMPOSITE (that is what
+// the user is pointing at), and re-compositing inside a click handler would
+// double the cost of whichever frame the click lands in. Freed and replaced,
+// never accumulated.
+var g_last_comp = 0
+
 // Set whenever anything that affects the pixels changes: a visibility toggle,
-// an undo, a load. The composite is the expensive operation in the frame, so it
-// runs when the document changed and not once per frame.
+// an undo, a load, a brush stroke. The composite is the expensive operation in
+// the frame, so it runs when the document changed and not once per frame.
 var g_dirty = 1
 
 // Deferred requests from Open/Save, serviced by the frame loop (see the header).
@@ -141,6 +180,10 @@ var g_req = 0
 // nothing when a file cannot be read is indistinguishable from a broken one.
 var g_msg = "ready"
 
+// The active layer: what the brush paints into and what the layer buttons act
+// on. -1 when the document is empty.
+var g_active = 0
+
 // widget id -> layer index, for the per-row click targets. A handler is given
 // the id and nothing else, so this table is how it learns which layer was hit.
 var g_row_ids = [0]
@@ -150,13 +193,38 @@ var g_row_count = 0
 // The path entry's widget id, so the frame loop can read what was typed.
 var g_path_id = -1
 
+// ---- canvas drag state ----------------------------------------------------
+//
+// A drag is a press, N moves and a release; the toolkit models a CLICK. So the
+// canvas tracks its own gesture here (see note 2 in the header).
+var DRAG_NONE = 0
+var DRAG_STROKE = 1
+var DRAG_PAN = 2
+var DRAG_SV = 3
+var DRAG_HUE = 4
+var g_drag = 0
+var g_drag_px = 0        // last pointer position, for the pan delta
+var g_drag_py = 0
+
+// Pointer state as of the last frame, so a transition (down this frame, up last
+// frame) can be detected. The toolkit consumes the EVENTS; this reads the
+// resulting polled state, which is sufficient for a gesture that only needs
+// position and button-down-ness.
+var g_was_down = 0
+
+// Live document coordinates of the pointer, shown in the status bar. A brush
+// that paints in the wrong place is diagnosable in one glance if the readout is
+// there, and guesswork if it is not.
+var g_cur_dx = 0
+var g_cur_dy = 0
+
 fn layer_of_widget(id: int) -> int {
     var i = 0
     while i < g_row_count {
         if g_row_ids[i] == id { return g_row_layer[i] }
         i = i + 1
     }
-    return -1
+    return 0 - 1
 }
 
 fn remember_row(id: int, li: int) {
@@ -170,21 +238,54 @@ fn remember_row(id: int, li: int) {
     g_row_count = g_row_count + 1
 }
 
+fn clamp_active() {
+    if layer.count() == 0 {
+        g_active = 0 - 1
+        return
+    }
+    if g_active < 0 { g_active = 0 }
+    if g_active >= layer.count() { g_active = layer.count() - 1 }
+}
+
+// One decimal place, without a format function: the runtime has none, and
+// "radius 12.000000" in a status bar is worse than no readout.
+fn rounded(v: float) -> string {
+    var scaled = (v * 10.0 + 0.5).to_int()
+    var whole = scaled / 10
+    var frac = scaled % 10
+    return whole.to_string() + "." + frac.to_string()
+}
+
+// Three decimals, hand-rolled for the same reason: a pixel value printed as
+// "0.3" is not a proof of anything.
+fn rounded3(v: float) -> string {
+    var scaled = (v * 1000.0 + 0.5).to_int()
+    if scaled < 0 { scaled = 0 }
+    var whole = scaled / 1000
+    var frac = scaled % 1000
+    var fs = frac.to_string()
+    while fs.len() < 3 { fs = "0" + fs }
+    return whole.to_string() + "." + fs
+}
+
 // ---- handlers -------------------------------------------------------------
 
 fn on_open(id: int) { g_req = REQ_OPEN }
 fn on_save(id: int) { g_req = REQ_SAVE }
 
-// Undo and Redo call the history module and nothing else. History records
-// parameter changes, not pixels, so replaying one only needs the composite
-// re-run - which is what g_dirty asks for.
+// Undo and Redo go through undo_any/redo_any, which handle the pixel and
+// structural commands as well as the three scalar ones. Wiring them to the
+// original undo()/redo() would silently skip every paint stroke - the buttons
+// would look wired and do nothing for the most common operation there is.
 fn on_undo(id: int) {
     if history.can_undo() == false {
         g_msg = "nothing to undo"
         return
     }
-    history.undo()
-    g_msg = "undo"
+    var what = history.undo_label()
+    history.undo_any()
+    clamp_active()
+    g_msg = "undo " + what
     g_dirty = 1
 }
 
@@ -193,39 +294,242 @@ fn on_redo(id: int) {
         g_msg = "nothing to redo"
         return
     }
-    history.redo()
-    g_msg = "redo"
+    var what = history.redo_label()
+    history.redo_any()
+    clamp_active()
+    g_msg = "redo " + what
     g_dirty = 1
 }
 
+// Zoom about the viewport centre. A button has no pointer position of its own
+// that means anything, so the anchored form is reserved for the pointer.
 fn on_zoom_in(id: int) {
-    if g_zoom < 800 { g_zoom = g_zoom * 2 }
-    g_msg = "zoom " + g_zoom.to_string() + "%"
+    view.zoom_in_center()
+    g_msg = "zoom " + view.zoom().to_string() + "%"
 }
 
 fn on_zoom_out(id: int) {
-    if g_zoom > 12 { g_zoom = g_zoom / 2 }
-    g_msg = "zoom " + g_zoom.to_string() + "%"
+    view.zoom_out_center()
+    g_msg = "zoom " + view.zoom().to_string() + "%"
 }
 
-// A layer row toggles visibility THROUGH history, so the toggle is undoable
-// like every other document change. Writing layer.set_visible without the
-// record would make Undo silently skip it, which is worse than not having the
-// button.
+fn on_zoom_fit(id: int) {
+    view.zoom_fit()
+    g_msg = "fit " + view.zoom().to_string() + "%"
+}
+
+fn on_zoom_100(id: int) {
+    view.zoom_100()
+    g_msg = "zoom 100%"
+}
+
+// ---- tool selection -------------------------------------------------------
+//
+// One handler per tool rather than one handler reading a table, because a
+// handler receives only a widget id and mapping id->tool would need a second
+// lookup table for no gain: there are five tools and they are not data.
+
+fn on_tool_brush(id: int) {
+    paint.set_tool(paint.TOOL_BRUSH())
+    g_msg = "brush"
+}
+
+fn on_tool_eraser(id: int) {
+    paint.set_tool(paint.TOOL_ERASER())
+    g_msg = "eraser"
+}
+
+fn on_tool_fill(id: int) {
+    paint.set_tool(paint.TOOL_FILL())
+    g_msg = "fill"
+}
+
+fn on_tool_pick(id: int) {
+    paint.set_tool(paint.TOOL_PICK())
+    g_msg = "eyedropper"
+}
+
+fn on_tool_pan(id: int) {
+    paint.set_tool(paint.TOOL_PAN())
+    g_msg = "pan"
+}
+
+// ---- brush parameter buttons ----------------------------------------------
+//
+// Steppers rather than sliders: the toolkit has no slider widget, and the two
+// controls that genuinely need continuous input - hue, and saturation/value -
+// are the picker, which is a custom drag on a texture. A radius that steps by
+// x1.5 is also more usable than a 150px slider covering 0.5..200.
+
+fn on_radius_up(id: int) {
+    paint.set_radius(paint.radius() * 1.5)
+    g_msg = "radius " + rounded(paint.radius())
+}
+
+fn on_radius_down(id: int) {
+    paint.set_radius(paint.radius() / 1.5)
+    g_msg = "radius " + rounded(paint.radius())
+}
+
+fn on_hard_up(id: int) {
+    paint.set_hardness(paint.hardness() + 0.2)
+    g_msg = "hardness " + rounded(paint.hardness())
+}
+
+fn on_hard_down(id: int) {
+    paint.set_hardness(paint.hardness() - 0.2)
+    g_msg = "hardness " + rounded(paint.hardness())
+}
+
+fn on_alpha_up(id: int) {
+    paint.set_alpha(paint.alpha() + 0.1)
+    g_msg = "alpha " + rounded(paint.alpha())
+}
+
+fn on_alpha_down(id: int) {
+    paint.set_alpha(paint.alpha() - 0.1)
+    g_msg = "alpha " + rounded(paint.alpha())
+}
+
+// ---- layer commands -------------------------------------------------------
+//
+// Each records BEFORE mutating, and each records exactly one entry, so Undo
+// reverses one user gesture. Writing layer.* without the record would make Undo
+// silently skip the operation, which is worse than not having the button.
+
+fn on_layer_add(id: int) {
+    if g_doc_w <= 0 {
+        g_msg = "no document"
+        return
+    }
+    var buf = wynimg_new(g_doc_w, g_doc_h)
+    if buf == 0 {
+        g_msg = "out of memory"
+        return
+    }
+    var pos = layer.count()
+    if g_active >= 0 { pos = g_active + 1 }
+    var name = "layer " + layer.count().to_string()
+    layer.insert(pos, name, buf, layer.KIND_RASTER())
+    history.record_add_layer(pos, name, buf, layer.KIND_RASTER())
+    g_active = pos
+    g_msg = "added " + name
+    g_dirty = 1
+}
+
+fn on_layer_del(id: int) {
+    if layer.count() <= 1 {
+        g_msg = "cannot delete the last layer"
+        return
+    }
+    if g_active < 0 { return }
+    // Record FIRST: the record holds the buffer handle, and layer.remove
+    // deliberately does not free it so undo can put the same pixels back.
+    history.record_del_layer(g_active, layer.name(g_active),
+                             layer.buffer(g_active), layer.kind(g_active))
+    var gone = layer.name(g_active)
+    layer.remove(g_active)
+    clamp_active()
+    g_msg = "deleted " + gone
+    g_dirty = 1
+}
+
+fn on_layer_up(id: int) {
+    if g_active < 0 { return }
+    if g_active >= layer.count() - 1 {
+        g_msg = "already at the top"
+        return
+    }
+    layer.swap(g_active, g_active + 1)
+    history.record_swap(g_active, g_active + 1)
+    g_active = g_active + 1
+    g_msg = "raised"
+    g_dirty = 1
+}
+
+fn on_layer_down(id: int) {
+    if g_active <= 0 {
+        g_msg = "already at the bottom"
+        return
+    }
+    layer.swap(g_active, g_active - 1)
+    history.record_swap(g_active, g_active - 1)
+    g_active = g_active - 1
+    g_msg = "lowered"
+    g_dirty = 1
+}
+
+fn on_opacity_up(id: int) {
+    if g_active < 0 { return }
+    var was = layer.opacity(g_active)
+    var now = was + 0.1
+    if now > 1.0 { now = 1.0 }
+    history.record_opacity(g_active, was, now)
+    layer.set_opacity(g_active, now)
+    g_msg = "opacity " + rounded(now)
+    g_dirty = 1
+}
+
+fn on_opacity_down(id: int) {
+    if g_active < 0 { return }
+    var was = layer.opacity(g_active)
+    var now = was - 0.1
+    if now < 0.0 { now = 0.0 }
+    history.record_opacity(g_active, was, now)
+    layer.set_opacity(g_active, now)
+    g_msg = "opacity " + rounded(now)
+    g_dirty = 1
+}
+
+// Blend mode steps through the existing 27. A dropdown is not available in the
+// toolkit and 27 buttons is not a UI, so two buttons step and the current mode's
+// NAME is painted in the layer row - a stepper with no readout is unusable.
+fn on_blend_next(id: int) {
+    if g_active < 0 { return }
+    var was = layer.blend_mode(g_active)
+    var now = was + 1
+    if now >= pixel.blend_count() { now = 0 }
+    history.record_blend(g_active, was, now)
+    layer.set_blend_mode(g_active, now)
+    g_msg = "blend " + pixel.blend_name(now)
+    g_dirty = 1
+}
+
+fn on_blend_prev(id: int) {
+    if g_active < 0 { return }
+    var was = layer.blend_mode(g_active)
+    var now = was - 1
+    if now < 0 { now = pixel.blend_count() - 1 }
+    history.record_blend(g_active, was, now)
+    layer.set_blend_mode(g_active, now)
+    g_msg = "blend " + pixel.blend_name(now)
+    g_dirty = 1
+}
+
+// A layer row does two things depending on WHERE it was clicked: the visibility
+// box toggles (through history, so it is undoable), and the rest of the row
+// selects the layer. Splitting geometrically rather than with two widgets keeps
+// the row's hit area contiguous and gives the painter one rectangle to draw.
 fn on_layer_row(id: int) {
     var li = layer_of_widget(id)
     if li < 0 { return }
-    var was = layer.visible(li)
-    // Hoisted, not written inline as `record_visible(li, was, was == false)`.
-    // A comparison passed DIRECTLY as a `bool` argument is typed `int` and the
-    // checker rejects it ("Expected: bool, Got: int"); bound to a `var` first it
-    // is a bool, as is `not was`. Reported. Same reason `now` exists rather than
-    // three copies of the expression.
-    var now = not was
-    history.record_visible(li, was, now)
-    layer.set_visible(li, now)
-    g_msg = layer.name(li) + " " + vis_word(now)
-    g_dirty = 1
+    var mx = gui.Win_mouse_x()
+    if mx < PANEL_X() + 28 {
+        var was = layer.visible(li)
+        // Hoisted, not written inline as `record_visible(li, was, was == false)`.
+        // A comparison passed DIRECTLY as a `bool` argument is typed `int` and
+        // the checker rejects it ("Expected: bool, Got: int"); bound to a `var`
+        // first it is a bool, as is `not was`. Reported. Same reason `now` exists
+        // rather than three copies of the expression.
+        var now = not was
+        history.record_visible(li, was, now)
+        layer.set_visible(li, now)
+        g_msg = layer.name(li) + " " + vis_word(now)
+        g_dirty = 1
+        return
+    }
+    g_active = li
+    g_msg = "active: " + layer.name(li)
 }
 
 fn vis_word(on: bool) -> string {
@@ -236,10 +540,6 @@ fn vis_word(on: bool) -> string {
 // ---- document -------------------------------------------------------------
 
 // (Re)create the texture to match the document, then composite and upload.
-//
-// The composite buffer is freed immediately: it is a full float32 RGBA image
-// (16 bytes a pixel) and holding one per frame would leak the document's size
-// every 16ms.
 fn refresh(id: int) {
     if g_doc_w <= 0 { return }
     if g_doc_h <= 0 { return }
@@ -258,7 +558,11 @@ fn refresh(id: int) {
         return
     }
     if wynimg_upload_tex(g_tex, out) == 0 { g_msg = "texture upload failed" }
-    wynimg_free(out)
+    // The previous composite is freed here rather than never: a full float32
+    // RGBA image is 16 bytes a pixel, so holding one per frame would leak the
+    // document's size every 16ms.
+    if g_last_comp != 0 { wynimg_free(g_last_comp) }
+    g_last_comp = out
     g_dirty = 0
 }
 
@@ -280,6 +584,9 @@ fn open_png(path: string) {
     layer.add(path, buf, layer.KIND_RASTER())
     g_doc_w = wynimg_width(buf)
     g_doc_h = wynimg_height(buf)
+    g_active = 0
+    view.set_doc(g_doc_w, g_doc_h)
+    view.zoom_fit()
     g_msg = "opened " + path
     g_dirty = 1
 }
@@ -296,6 +603,155 @@ fn save_png(path: string) {
     g_msg = "cannot write " + path
 }
 
+// ---- canvas gesture -------------------------------------------------------
+//
+// Called from the frame loop with the pointer's WINDOW position and button
+// state. This is the ONE place that turns window coordinates into document
+// coordinates, and it does so through `view`, which is unit-tested as an
+// invertible transform. A brush that lands in the wrong place is therefore
+// either a bug in view (which tests/test_view.wyn would catch) or in these
+// ~70 lines.
+
+fn in_viewport(mx: int, my: int) -> bool {
+    if mx < VIEW_X() { return false }
+    if my < VIEW_Y() { return false }
+    if mx >= VIEW_X() + VIEW_W() { return false }
+    if my >= VIEW_Y() + VIEW_H() { return false }
+    return true
+}
+
+fn in_sv(mx: int, my: int) -> bool {
+    if mx < SV_X() { return false }
+    if my < SV_Y() { return false }
+    if mx >= SV_X() + SV_SIZE() { return false }
+    if my >= SV_Y() + SV_SIZE() { return false }
+    return true
+}
+
+fn in_hue(mx: int, my: int) -> bool {
+    if mx < HUE_X() { return false }
+    if my < HUE_Y() { return false }
+    if mx >= HUE_X() + HUE_W() { return false }
+    if my >= HUE_Y() + SV_SIZE() { return false }
+    return true
+}
+
+// The SV square: saturation across, value down. Matches wynimg_sv_square's
+// mapping exactly, and tests/test_paint.wyn asserts that ramp against the Wyn
+// HSV conversion - so a disagreement between what is painted and what is picked
+// would fail a test rather than merely look odd.
+fn pick_sv(mx: int, my: int) {
+    var s = (mx - SV_X()).to_float() / (SV_SIZE() - 1).to_float()
+    var vv = 1.0 - (my - SV_Y()).to_float() / (SV_SIZE() - 1).to_float()
+    paint.set_hsv(paint.hue(), s, vv)
+    g_msg = "sat " + rounded(paint.sat()) + " val " + rounded(paint.val())
+}
+
+fn pick_hue(my: int) {
+    var h = 360.0 * (my - HUE_Y()).to_float() / SV_SIZE().to_float()
+    paint.set_hsv(h, paint.sat(), paint.val())
+    g_msg = "hue " + rounded(paint.hue())
+}
+
+fn canvas_press(mx: int, my: int) {
+    var t = paint.tool()
+
+    // The picker first: it is inside the panel, not the viewport, so it can
+    // never be confused with a canvas click.
+    if in_sv(mx, my) {
+        g_drag = DRAG_SV
+        pick_sv(mx, my)
+        return
+    }
+    if in_hue(mx, my) {
+        g_drag = DRAG_HUE
+        pick_hue(my)
+        return
+    }
+
+    if in_viewport(mx, my) == false { return }
+
+    if t == paint.TOOL_PAN() {
+        g_drag = DRAG_PAN
+        g_drag_px = mx
+        g_drag_py = my
+        return
+    }
+
+    if view.hits_doc(mx, my) == false {
+        g_msg = "outside the canvas"
+        return
+    }
+
+    var dx = view.screen_to_doc_x(mx.to_float())
+    var dy = view.screen_to_doc_y(my.to_float())
+
+    if t == paint.TOOL_PICK() {
+        if g_last_comp == 0 { refresh(0) }
+        paint.pick_from(g_last_comp, dx.to_int(), dy.to_int())
+        g_msg = "picked hue " + rounded(paint.hue())
+        return
+    }
+
+    if t == paint.TOOL_FILL() {
+        if g_active < 0 { return }
+        var n = paint.fill_at(g_active, dx.to_int(), dy.to_int())
+        if n < 0 {
+            g_msg = "cannot fill that layer"
+        } else {
+            g_msg = "filled " + n.to_string() + " px"
+        }
+        g_dirty = 1
+        return
+    }
+
+    // Brush or eraser.
+    if g_active < 0 {
+        g_msg = "no active layer"
+        return
+    }
+    if paint.begin(g_active, dx, dy) == 0 {
+        g_msg = "cannot paint that layer"
+        return
+    }
+    g_drag = DRAG_STROKE
+    g_dirty = 1
+}
+
+fn canvas_drag(mx: int, my: int) {
+    if g_drag == DRAG_STROKE {
+        var dx = view.screen_to_doc_x(mx.to_float())
+        var dy = view.screen_to_doc_y(my.to_float())
+        paint.seg(dx, dy)
+        g_dirty = 1
+        return
+    }
+    if g_drag == DRAG_PAN {
+        view.pan_by(mx - g_drag_px, my - g_drag_py)
+        g_drag_px = mx
+        g_drag_py = my
+        return
+    }
+    if g_drag == DRAG_SV {
+        pick_sv(mx, my)
+        return
+    }
+    if g_drag == DRAG_HUE {
+        pick_hue(my)
+        return
+    }
+}
+
+fn canvas_release(mx: int, my: int) {
+    if g_drag == DRAG_STROKE {
+        paint.commit()
+        g_msg = paint.tool_name(paint.tool()) + " stroke, "
+                + paint.stroke_segments().to_string() + " segs"
+        g_dirty = 1
+    }
+    g_drag = DRAG_NONE
+}
+
 // ---- paint ----------------------------------------------------------------
 //
 // One Win_clear, everything, one Win_present. See the header for why Ui_draw is
@@ -310,7 +766,7 @@ fn save_png(path: string) {
 //
 // The historical defect - indexing a struct-array field of a type that came from
 // an imported module lost the element type, giving "Unknown method 'x' for type
-// 'int'" - DOES NOT REPRODUCE on this compiler (v1.20.0-dev). Four shapes were
+// 'int'" - DOES NOT REPRODUCE on this compiler (v1.20.0-dev). Five shapes were
 // built and run against the real `widgets` module: a constant index, a
 // loop-variable index, a local bound to the element, a write through the index
 // (`ui.widgets[0].x = 99`), and a non-main fn taking `ui: Ui` as a parameter.
@@ -320,19 +776,38 @@ fn save_png(path: string) {
 // Ui_x_at/Ui_label_at cannot be broken by a field rename inside widgets.wyn,
 // which reaching into `ui.widgets[i]` from another repository could be.
 
-// Chrome for one toolbar control, painted from the toolkit's own data (label and
-// rect) and its interaction state, so hover and press feedback still come from
-// the toolkit rather than being reinvented.
+fn is_selected_tool(label: string) -> bool {
+    if label == "Brush" { return paint.tool() == paint.TOOL_BRUSH() }
+    if label == "Erase" { return paint.tool() == paint.TOOL_ERASER() }
+    if label == "Fill" { return paint.tool() == paint.TOOL_FILL() }
+    if label == "Pick" { return paint.tool() == paint.TOOL_PICK() }
+    if label == "Pan" { return paint.tool() == paint.TOOL_PAN() }
+    return false
+}
+
+// Chrome for one control, painted from the toolkit's own data (label and rect)
+// and its interaction state, so hover and press feedback still come from the
+// toolkit rather than being reinvented.
 fn paint_button(ui: Ui, i: int) {
     var x = widgets.Ui_x_at(ui, i)
     var y = widgets.Ui_y_at(ui, i)
     var w = widgets.Ui_w_at(ui, i)
     var h = widgets.Ui_h_at(ui, i)
     var id = widgets.Ui_id_at(ui, i)
+    var label = widgets.Ui_label_at(ui, i)
 
     var r = 52
     var g = 52
     var b = 62
+    // A tool button is highlighted when its tool is SELECTED, read from the
+    // paint module rather than from a cached flag: after a script action or a
+    // future keyboard shortcut the module is the truth, and a cached flag would
+    // silently disagree with what the next click will do.
+    if is_selected_tool(label) {
+        r = 36
+        g = 104
+        b = 86
+    }
     if id == widgets.Ui_active(ui) {
         r = 50
         g = 90
@@ -347,7 +822,6 @@ fn paint_button(ui: Ui, i: int) {
     gui.Win_rect(g_win, x, y, w, h, r, g, b)
     gui.Win_rect_outline(g_win, x, y, w, h, 120, 120, 140)
 
-    var label = widgets.Ui_label_at(ui, i)
     var tw = gui.Win_text_width(g_font, label)
     var th = gui.Win_font_height(g_font)
     gui.Win_text(g_win, g_font, label, x + (w - tw) / 2, y + (h - th) / 2,
@@ -385,20 +859,23 @@ fn paint_entry(ui: Ui, i: int) {
     gui.Win_clip(g_win, 0, 0, 0, 0)
 }
 
-// The document. Centred in the viewport at the current zoom, clipped to it, on
-// a checkerboard so that transparency is visible as transparency rather than as
-// whatever colour the panel happens to be.
+// The document. Positioned by `view` at the current zoom and pan, clipped to the
+// viewport, on a checkerboard so that transparency is visible as transparency
+// rather than as whatever colour the panel happens to be.
+//
+// Every coordinate comes from `view`, never recomputed here - that is what makes
+// "the brush lands under the pointer" true by construction rather than by
+// coincidence: the same origin_x/scale that place this blit are the ones
+// screen_to_doc_x inverts.
 fn paint_viewport(ui: Ui) {
     gui.Win_rect(g_win, VIEW_X(), VIEW_Y(), VIEW_W(), VIEW_H(), 24, 24, 28)
     gui.Win_clip(g_win, VIEW_X(), VIEW_Y(), VIEW_W(), VIEW_H())
 
     if g_tex >= 0 and g_doc_w > 0 {
-        var dw = g_doc_w * g_zoom / 100
-        var dh = g_doc_h * g_zoom / 100
-        if dw < 1 { dw = 1 }
-        if dh < 1 { dh = 1 }
-        var dx = VIEW_X() + (VIEW_W() - dw) / 2
-        var dy = VIEW_Y() + (VIEW_H() - dh) / 2
+        var dw = view.view_doc_w()
+        var dh = view.view_doc_h()
+        var dx = view.origin_x()
+        var dy = view.origin_y()
 
         // Checkerboard, exactly under the image.
         var cy = 0
@@ -429,6 +906,25 @@ fn paint_viewport(ui: Ui) {
         // The whole point of this file: one blit.
         gui.Win_blit(g_win, g_tex, dx, dy, dw, dh)
         gui.Win_rect_outline(g_win, dx - 1, dy - 1, dw + 2, dh + 2, 90, 90, 105)
+
+        // Brush cursor: a ring at the pointer, its radius scaled by the zoom, so
+        // "how big is the brush" is answered by looking rather than by reading a
+        // number. Only for the tools that actually paint - a ring under Pan
+        // would be a lie.
+        var t = paint.tool()
+        var paints = 0
+        if t == paint.TOOL_BRUSH() { paints = 1 }
+        if t == paint.TOOL_ERASER() { paints = 1 }
+        if paints == 1 {
+            var mx = gui.Win_mouse_x()
+            var my = gui.Win_mouse_y()
+            if in_viewport(mx, my) {
+                var rr = (paint.radius() * view.scale()).to_int()
+                if rr < 2 { rr = 2 }
+                gui.Win_rect_outline(g_win, mx - rr, my - rr, rr * 2, rr * 2,
+                                     240, 240, 250)
+            }
+        }
     } else {
         gui.Win_text(g_win, g_font, "no document - type a path and press Open",
                      VIEW_X() + 20, VIEW_Y() + 20, 150, 150, 165)
@@ -437,87 +933,169 @@ fn paint_viewport(ui: Ui) {
     gui.Win_clip(g_win, 0, 0, 0, 0)
 }
 
+// The colour picker: an SV square and a hue strip, each a texture blitted once
+// (see the note in csrc/wynimg_paint.c on why they are not drawn with
+// rectangles), plus crosshairs showing the current selection.
+fn paint_picker(ui: Ui) {
+    // Rebuild the SV square only when the hue changed. Comparing floats with a
+    // tolerance rather than for equality because the hue arrives from a drag and
+    // from the eyedropper, and "did it change" must not be answered by bit
+    // patterns.
+    if g_sv_tex >= 0 {
+        if pixel.approx(g_sv_hue, paint.hue(), 0.0001) == false {
+            wynimg_sv_square(g_sv_buf, paint.hue())
+            wynimg_upload_tex(g_sv_tex, g_sv_buf)
+            g_sv_hue = paint.hue()
+        }
+        gui.Win_blit(g_win, g_sv_tex, SV_X(), SV_Y(), SV_SIZE(), SV_SIZE())
+    }
+    gui.Win_rect_outline(g_win, SV_X() - 1, SV_Y() - 1, SV_SIZE() + 2,
+                         SV_SIZE() + 2, 100, 100, 118)
+
+    if g_hue_tex >= 0 {
+        gui.Win_blit(g_win, g_hue_tex, HUE_X(), HUE_Y(), HUE_W(), SV_SIZE())
+    }
+    gui.Win_rect_outline(g_win, HUE_X() - 1, HUE_Y() - 1, HUE_W() + 2,
+                         SV_SIZE() + 2, 100, 100, 118)
+
+    // Crosshair on the SV square: double-outlined so it is visible against both
+    // a white and a black corner.
+    var cx = SV_X() + (paint.sat() * (SV_SIZE() - 1).to_float()).to_int()
+    var cy = SV_Y() + ((1.0 - paint.val()) * (SV_SIZE() - 1).to_float()).to_int()
+    gui.Win_rect_outline(g_win, cx - 4, cy - 4, 9, 9, 255, 255, 255)
+    gui.Win_rect_outline(g_win, cx - 5, cy - 5, 11, 11, 20, 20, 20)
+
+    // Marker on the hue strip.
+    var hy = HUE_Y() + (paint.hue() / 360.0 * SV_SIZE().to_float()).to_int()
+    gui.Win_rect_outline(g_win, HUE_X() - 2, hy - 2, HUE_W() + 4, 5,
+                         255, 255, 255)
+
+    // The resulting colour, as a swatch. Painted with the sRGB bytes, because
+    // Win_rect takes display values - using the linear ones would show a
+    // markedly darker colour than the brush actually paints.
+    var sw_y = SV_Y() + SV_SIZE() + 8
+    gui.Win_rect(g_win, SV_X(), sw_y, 56, 22,
+                 paint.color_byte(0), paint.color_byte(1), paint.color_byte(2))
+    gui.Win_rect_outline(g_win, SV_X(), sw_y, 56, 22, 120, 120, 140)
+    gui.Win_text(g_win, g_font, paint.tool_name(paint.tool())
+                 + " r" + rounded(paint.radius())
+                 + " a" + rounded(paint.alpha()),
+                 SV_X() + 64, sw_y + 4, 190, 190, 205)
+}
+
 // The layer list. Drawn TOP-DOWN in stacking order, i.e. the topmost layer
 // first, because that is what the compositor's last-blended layer is and
 // showing a stack upside down is a real usability bug rather than a cosmetic
 // one. layer.count()-1 is the top of the stack.
 //
-// Visibility is painted from layer.visible(), never from a cached copy in a
-// widget: after an Undo the layer module is the truth, and a widget-held flag
-// would silently disagree with the pixels on screen.
+// Visibility, opacity and blend mode are painted from the layer module, never
+// from a cached copy in a widget: after an Undo the layer module is the truth,
+// and a widget-held flag would silently disagree with the pixels on screen.
 fn paint_layers(ui: Ui) {
-    gui.Win_rect(g_win, PANEL_X(), VIEW_Y(), PANEL_W(), VIEW_H(), 34, 34, 41)
-    gui.Win_line(g_win, PANEL_X(), VIEW_Y(), PANEL_X(), VIEW_Y() + VIEW_H(),
-                 60, 60, 72)
-    gui.Win_text(g_win, g_font, "Layers", PANEL_X() + 10, VIEW_Y() + 8,
+    gui.Win_text(g_win, g_font, "Layers", PANEL_X() + 12, LAYERS_Y() - 18,
                  235, 235, 240)
 
     var n = layer.count()
     var k = 0
+    var stop = 0
     while k < n {
-        var li = n - 1 - k                 // top of the stack first
-        var y = VIEW_Y() + 30 + k * ROW_H()
-        var id = -1
-        var j = 0
-        while j < g_row_count {
-            if g_row_layer[j] == li { id = g_row_ids[j] }
-            j = j + 1
-        }
+        if stop == 1 {
+            k = n
+        } else {
+            var li = n - 1 - k                 // top of the stack first
+            var y = LAYERS_Y() + k * ROW_H()
+            if y + ROW_H() > VIEW_Y() + VIEW_H() {
+                stop = 1
+            } else {
+                var id = 0 - 1
+                var j = 0
+                while j < g_row_count {
+                    if g_row_layer[j] == li { id = g_row_ids[j] }
+                    j = j + 1
+                }
 
-        var rr = 40
-        var rg = 40
-        var rb = 48
-        if id == widgets.Ui_hot(ui) {
-            rr = 56
-            rg = 62
-            rb = 78
-        }
-        gui.Win_rect(g_win, PANEL_X() + 6, y, PANEL_W() - 12, ROW_H() - 3,
-                     rr, rg, rb)
+                var rr = 40
+                var rg = 40
+                var rb = 48
+                if li == g_active {
+                    rr = 52
+                    rg = 74
+                    rb = 96
+                }
+                if id == widgets.Ui_hot(ui) {
+                    rr = rr + 14
+                    rg = rg + 14
+                    rb = rb + 14
+                }
+                gui.Win_rect(g_win, PANEL_X() + 6, y, PANEL_W() - 12,
+                             ROW_H() - 3, rr, rg, rb)
+                if li == g_active {
+                    gui.Win_rect_outline(g_win, PANEL_X() + 6, y,
+                                         PANEL_W() - 12, ROW_H() - 3,
+                                         110, 160, 210)
+                }
 
-        // Visibility box, from the layer module.
-        gui.Win_rect_outline(g_win, PANEL_X() + 12, y + 5, 13, 13,
-                             130, 130, 150)
-        if layer.visible(li) {
-            gui.Win_rect(g_win, PANEL_X() + 15, y + 8, 7, 7, 120, 200, 130)
-        }
+                // Visibility box, from the layer module.
+                gui.Win_rect_outline(g_win, PANEL_X() + 11, y + 4, 13, 13,
+                                     130, 130, 150)
+                if layer.visible(li) {
+                    gui.Win_rect(g_win, PANEL_X() + 14, y + 7, 7, 7,
+                                 120, 200, 130)
+                }
 
-        var fr = 232
-        var fg = 232
-        var fb = 238
-        if layer.visible(li) == false {
-            fr = 130
-            fg = 130
-            fb = 142
+                var fr = 232
+                var fg = 232
+                var fb = 238
+                if layer.visible(li) == false {
+                    fr = 130
+                    fg = 130
+                    fb = 142
+                }
+                // Name, then the blend mode and opacity on the right.
+                var pct = (layer.opacity(li) * 100.0 + 0.5).to_int()
+                var meta = pixel.blend_name(layer.blend_mode(li)) + " "
+                           + pct.to_string() + "%"
+                var mw = gui.Win_text_width(g_font, meta)
+                gui.Win_clip(g_win, PANEL_X() + 30, y,
+                             PANEL_W() - 44 - mw, ROW_H() - 3)
+                gui.Win_text(g_win, g_font, layer.name(li), PANEL_X() + 31,
+                             y + 3, fr, fg, fb)
+                gui.Win_clip(g_win, 0, 0, 0, 0)
+                gui.Win_text(g_win, g_font, meta,
+                             PANEL_X() + PANEL_W() - 10 - mw, y + 3,
+                             150, 160, 175)
+                k = k + 1
+            }
         }
-        gui.Win_clip(g_win, PANEL_X() + 32, y, PANEL_W() - 44, ROW_H() - 3)
-        gui.Win_text(g_win, g_font, layer.name(li), PANEL_X() + 34, y + 4,
-                     fr, fg, fb)
-        gui.Win_clip(g_win, 0, 0, 0, 0)
-
-        k = k + 1
     }
 
     if n == 0 {
-        gui.Win_text(g_win, g_font, "(empty)", PANEL_X() + 12, VIEW_Y() + 34,
+        gui.Win_text(g_win, g_font, "(empty)", PANEL_X() + 12, LAYERS_Y() + 4,
                      140, 140, 152)
     }
 }
 
-// Dimensions, layer count, zoom - plus the history position, because the two
-// buttons that move it are useless without a visible effect, and the last
-// message.
+// Dimensions, layer count, zoom, tool, brush parameters, the pointer position in
+// DOCUMENT coordinates, the history depth and the last message.
+//
+// The pointer readout is not decoration: it is the one thing that makes a
+// mis-mapped brush diagnosable at a glance instead of by bisecting the transform.
 fn paint_status(ui: Ui) {
     var y = WIN_H() - STATUS_H()
     gui.Win_rect(g_win, 0, y, WIN_W(), STATUS_H(), 20, 20, 25)
     gui.Win_line(g_win, 0, y, WIN_W(), y, 60, 60, 72)
 
     var s = g_doc_w.to_string() + "x" + g_doc_h.to_string()
-    s = s + "   " + layer.count().to_string() + " layers"
-    s = s + "   zoom " + g_zoom.to_string() + "%"
-    s = s + "   history " + history.depth().to_string()
-    s = s + "   " + g_msg
-    gui.Win_text(g_win, g_font, s, 10, y + 5, 200, 200, 212)
+    s = s + "  " + layer.count().to_string() + "L"
+    s = s + "  z" + view.zoom().to_string() + "%"
+    s = s + "  " + paint.tool_name(paint.tool())
+    s = s + " r" + rounded(paint.radius())
+    s = s + " h" + rounded(paint.hardness())
+    s = s + " a" + rounded(paint.alpha())
+    s = s + "  @" + g_cur_dx.to_string() + "," + g_cur_dy.to_string()
+    s = s + "  hist " + history.depth().to_string()
+    s = s + "  " + g_msg
+    gui.Win_text(g_win, g_font, s, 8, y + 5, 200, 200, 212)
 }
 
 fn paint(ui: Ui) {
@@ -526,7 +1104,18 @@ fn paint(ui: Ui) {
     gui.Win_rect(g_win, 0, 0, WIN_W(), TOOLBAR_H(), 38, 38, 46)
     gui.Win_line(g_win, 0, TOOLBAR_H(), WIN_W(), TOOLBAR_H(), 60, 60, 72)
 
+    // Tool strip background.
+    gui.Win_rect(g_win, 0, VIEW_Y(), TOOLS_W(), VIEW_H(), 34, 34, 41)
+    gui.Win_line(g_win, TOOLS_W(), VIEW_Y(), TOOLS_W(), VIEW_Y() + VIEW_H(),
+                 60, 60, 72)
+
     paint_viewport(ui)
+
+    // Right panel background, then its contents.
+    gui.Win_rect(g_win, PANEL_X(), VIEW_Y(), PANEL_W(), VIEW_H(), 34, 34, 41)
+    gui.Win_line(g_win, PANEL_X(), VIEW_Y(), PANEL_X(), VIEW_Y() + VIEW_H(),
+                 60, 60, 72)
+    paint_picker(ui)
     paint_layers(ui)
 
     // Widgets last, so a control can never be painted over by the viewport.
@@ -535,7 +1124,7 @@ fn paint(ui: Ui) {
         var kind = widgets.Ui_kind_at(ui, i)
         if kind == 1 {
             // A layer row's click target has no chrome of its own: the row is
-            // already painted by paint_layers. Only toolbar buttons are drawn.
+            // already painted by paint_layers. Only real buttons are drawn.
             if layer_of_widget(widgets.Ui_id_at(ui, i)) < 0 {
                 paint_button(ui, i)
             }
@@ -562,21 +1151,54 @@ fn paint(ui: Ui) {
 fn build_form(win: int, font: int) -> Ui {
     var ui = widgets.Ui_new(win, font)
 
-    ui = widgets.Ui_button(ui, "Open", 10, 9, 74, 28, on_open)
-    ui = widgets.Ui_button(ui, "Save", 90, 9, 74, 28, on_save)
-    ui = widgets.Ui_button(ui, "Undo", 176, 9, 74, 28, on_undo)
-    ui = widgets.Ui_button(ui, "Redo", 256, 9, 74, 28, on_redo)
-    ui = widgets.Ui_button(ui, "-", 342, 9, 30, 28, on_zoom_out)
-    ui = widgets.Ui_button(ui, "+", 376, 9, 30, 28, on_zoom_in)
+    ui = widgets.Ui_button(ui, "Open", 8, 9, 60, 28, on_open)
+    ui = widgets.Ui_button(ui, "Save", 72, 9, 60, 28, on_save)
+    ui = widgets.Ui_button(ui, "Undo", 142, 9, 60, 28, on_undo)
+    ui = widgets.Ui_button(ui, "Redo", 206, 9, 60, 28, on_redo)
 
-    ui = widgets.Ui_entry(ui, "/tmp/wyncanvas-out.png", 420, 9, 300, 28)
+    ui = widgets.Ui_button(ui, "-", 276, 9, 26, 28, on_zoom_out)
+    ui = widgets.Ui_button(ui, "+", 304, 9, 26, 28, on_zoom_in)
+    ui = widgets.Ui_button(ui, "Fit", 332, 9, 38, 28, on_zoom_fit)
+    ui = widgets.Ui_button(ui, "1:1", 372, 9, 38, 28, on_zoom_100)
+
+    // Brush parameter steppers.
+    ui = widgets.Ui_button(ui, "r-", 424, 9, 26, 28, on_radius_down)
+    ui = widgets.Ui_button(ui, "r+", 452, 9, 26, 28, on_radius_up)
+    ui = widgets.Ui_button(ui, "h-", 484, 9, 26, 28, on_hard_down)
+    ui = widgets.Ui_button(ui, "h+", 512, 9, 26, 28, on_hard_up)
+    ui = widgets.Ui_button(ui, "a-", 544, 9, 26, 28, on_alpha_down)
+    ui = widgets.Ui_button(ui, "a+", 572, 9, 26, 28, on_alpha_up)
+
+    ui = widgets.Ui_entry(ui, "/tmp/wyncanvas-out.png", 610, 9, 300, 28)
     g_path_id = widgets.Ui_last_id(ui)
 
-    ui = widgets.Ui_label(ui, "Esc to quit", 740, 15)
+    ui = widgets.Ui_label(ui, "Esc quits", 926, 15)
+
+    // Tool palette, down the left edge.
+    var ty = VIEW_Y() + 8
+    ui = widgets.Ui_button(ui, "Brush", 5, ty, 44, 30, on_tool_brush)
+    ui = widgets.Ui_button(ui, "Erase", 5, ty + 34, 44, 30, on_tool_eraser)
+    ui = widgets.Ui_button(ui, "Fill", 5, ty + 68, 44, 30, on_tool_fill)
+    ui = widgets.Ui_button(ui, "Pick", 5, ty + 102, 44, 30, on_tool_pick)
+    ui = widgets.Ui_button(ui, "Pan", 5, ty + 136, 44, 30, on_tool_pan)
+
+    // Layer commands, above the layer list.
+    var ly = LAYERS_Y() - 48
+    ui = widgets.Ui_button(ui, "+L", PANEL_X() + 8, ly, 32, 22, on_layer_add)
+    ui = widgets.Ui_button(ui, "-L", PANEL_X() + 42, ly, 32, 22, on_layer_del)
+    ui = widgets.Ui_button(ui, "up", PANEL_X() + 76, ly, 32, 22, on_layer_up)
+    ui = widgets.Ui_button(ui, "dn", PANEL_X() + 110, ly, 32, 22, on_layer_down)
+    ui = widgets.Ui_button(ui, "o-", PANEL_X() + 148, ly, 28, 22,
+                           on_opacity_down)
+    ui = widgets.Ui_button(ui, "o+", PANEL_X() + 178, ly, 28, 22, on_opacity_up)
+    ui = widgets.Ui_button(ui, "<b", PANEL_X() + 8, ly + 24, 32, 22,
+                           on_blend_prev)
+    ui = widgets.Ui_button(ui, "b>", PANEL_X() + 42, ly + 24, 32, 22,
+                           on_blend_next)
 
     var i = 0
     while i < layer.count() {
-        var y = VIEW_Y() + 30 + (layer.count() - 1 - i) * ROW_H()
+        var y = LAYERS_Y() + (layer.count() - 1 - i) * ROW_H()
         ui = widgets.Ui_button(ui, layer.name(i), PANEL_X() + 6, y,
                                PANEL_W() - 12, ROW_H() - 3, on_layer_row)
         remember_row(widgets.Ui_last_id(ui), i)
@@ -586,30 +1208,46 @@ fn build_form(win: int, font: int) -> Ui {
     return ui
 }
 
+// Rebuilds the form whenever the layer stack changed shape. Called from the two
+// places that can change it (the script runner and the frame loop) so a stale
+// widget->layer table cannot dispatch a click to a layer that no longer exists.
+fn rebuild_rows(ui: Ui) -> Ui {
+    g_row_count = 0
+    return build_form(g_win, g_font)
+}
+
 // ---- headless verification seam -------------------------------------------
 //
 // WHY THIS IS NOT TEST-ONLY SCAFFOLDING BOLTED ON.
 //
-// The claim "Undo is wired to the history module" is not provable by looking at
-// a screenshot, and it is not provable by a unit test either: a test can call
-// history.undo() directly and pass while the BUTTON is wired to nothing. What
-// has to be exercised is the path from the widget's handler through to the
-// module - and a handler takes a widget id, so something has to supply one.
+// The claim "the brush is wired to the active layer through the view transform"
+// is not provable by looking at a screenshot, and it is not provable by a unit
+// test either: tests/test_paint.wyn can paint at document (16,16) and pass while
+// the WINDOW maps a click there to somewhere else entirely. What has to be
+// exercised is the whole path - window coordinates, view transform, tool
+// dispatch, stroke, composite, upload - and the only way to do that headlessly is
+// to push real events and then read pixels back.
 //
-// WYNCANVAS_SCRIPT is a comma-separated list of actions run against the real
-// widget ids, through the real handlers, before the frame loop. It prints what
-// it observes, so `undo` moving history's position and a toggle changing
-// layer.visible() are visible facts rather than assertions about the source.
+// So WYNCANVAS_SCRIPT is a comma-separated list of actions run against the real
+// widget ids and the real event queue, and it PRINTS what it observes: pixel
+// values out of the COMPOSITE, the history depth, the mapped pointer position. A
+// claim in this file's comments that a stroke landed is worth nothing; a printed
+// `px(128,128)=1.000,0.271,0.000` is a fact.
 //
-// The `click:Label` action is the STRONGEST of these, and the others exist only
-// because they can reach state a click cannot address by name. A click pushes a
-// real press and a real release onto the PLATFORM event queue with
-// Win_push_mouse_down/up, then lets widgets.Ui_events drain it. So it exercises
-// hit-testing, the press/release-over-the-same-control rule and handler dispatch
-// - the shipping path, byte for byte, with the only synthetic part being who
-// moved the mouse. Calling on_undo(0) directly cannot fail the way a real
-// button can: it would still pass if the button were wired to the wrong
-// handler, or to no handler, or laid out off-screen.
+// The `click:Label` action is the strongest of the widget ones. It pushes a real
+// press and a real release onto the PLATFORM event queue with
+// Win_push_mouse_down/up, then lets widgets.Ui_events drain it - so it exercises
+// hit-testing, the press/release-over-the-same-control rule and handler dispatch,
+// the shipping path byte for byte, with the only synthetic part being who moved
+// the mouse. Calling on_undo(0) directly cannot fail the way a real button can:
+// it would still pass if the button were wired to the wrong handler, or to no
+// handler, or laid out off-screen.
+//
+// `stroke:x0:y0:x1:y1` is the strongest of all, because it goes through
+// canvas_press/canvas_drag/canvas_release with WINDOW coordinates derived from
+// document ones through `view` - the same three functions and the same transform
+// the frame loop uses. At zoom 400% with a pan applied, a stroke that still lands
+// on the named document pixel proves the mapping, not just the brush.
 
 // Presses and releases the centre of the widget labelled `label`, then drains
 // the queue through the toolkit. Returns the Ui, because dispatch mutates it
@@ -633,10 +1271,63 @@ fn click_label(ui: Ui, label: string) -> Ui {
     return ui
 }
 
+// Window coordinates of the CENTRE of document pixel (dx, dy), through the same
+// transform the blit uses. This is what makes a scripted stroke a test of the
+// mapping rather than of a hard-coded number.
+// NB the parameter names `docx`/`docy`, not the obvious `dx`/`dy`. A local
+// `var dx` holding a FLOAT inside an imported module (src/view.wyn's zoom_at has
+// one) retypes an INT named `dx` here, and `dx.to_float()` then silently yields
+// 0 - measured: a two-file repro where `g(3)` returned 0.5 instead of 3.5,
+// alongside a non-fatal "Unknown method 'to_float' for type 'float'". That is
+// worse than a compile error, and it would have put every scripted stroke at
+// window (0,0). Reported upstream. Renaming is the local fix.
+fn win_x_of_doc(docx: int) -> int {
+    return view.doc_to_screen_x(docx.to_float() + 0.5).to_int()
+}
+
+fn win_y_of_doc(docy: int) -> int {
+    return view.doc_to_screen_y(docy.to_float() + 0.5).to_int()
+}
+
+// Prints one document pixel, un-premultiplied, from the COMPOSITE - so what is
+// printed is what the viewport shows, not what one layer happens to hold.
+fn print_px(x: int, y: int) {
+    if g_dirty == 1 { refresh(0) }
+    if g_last_comp == 0 {
+        println("  no composite")
+        return
+    }
+    println("  px(" + x.to_string() + "," + y.to_string() + ")="
+            + rounded3(wynimg_pick(g_last_comp, x, y, 0)) + ","
+            + rounded3(wynimg_pick(g_last_comp, x, y, 1)) + ","
+            + rounded3(wynimg_pick(g_last_comp, x, y, 2)) + " a="
+            + rounded3(wynimg_pick(g_last_comp, x, y, 3)))
+}
+
+// A scripted stroke in DOCUMENT coordinates, driven through the WINDOW path.
+// Split into 8 intermediate moves so segment accumulation and coverage
+// saturation are both exercised rather than assumed.
+fn do_stroke(dx0: int, dy0: int, dx1: int, dy1: int) {
+    var ax = win_x_of_doc(dx0)
+    var ay = win_y_of_doc(dy0)
+    var bx = win_x_of_doc(dx1)
+    var by = win_y_of_doc(dy1)
+    canvas_press(ax, ay)
+    var i = 1
+    while i <= 8 {
+        var t = i.to_float() / 8.0
+        var mx = ax + ((bx - ax).to_float() * t).to_int()
+        var my = ay + ((by - ay).to_float() * t).to_int()
+        canvas_drag(mx, my)
+        i = i + 1
+    }
+    canvas_release(bx, by)
+}
+
 // Returns the Ui rather than a status, because a real click mutates it and
 // structs are by value - discarding the return would discard the dispatch.
 fn run_action(ui: Ui, act: string) -> Ui {
-    // click:Undo, click:Redo, click:Open, ... - a real event-queue click.
+    // click:Undo, click:Brush, click:+L, ... - a real event-queue click.
     if act.starts_with("click:") {
         var label = act.substring(6, act.len())
         var u = click_label(ui, label)
@@ -646,11 +1337,227 @@ fn run_action(ui: Ui, act: string) -> Ui {
         // proof that the save happened is the file, one frame later.
         println("  click:" + label + " -> msg=" + g_msg
                 + " req=" + g_req.to_string()
-                + " can_undo=" + history.can_undo().to_string()
-                + " can_redo=" + history.can_redo().to_string()
-                + " zoom=" + g_zoom.to_string() + "%")
+                + " tool=" + paint.tool_name(paint.tool())
+                + " layers=" + layer.count().to_string()
+                + " active=" + g_active.to_string()
+                + " hist=" + history.depth().to_string()
+                + " zoom=" + view.zoom().to_string() + "%")
         return u
     }
+
+    // stroke:x0:y0:x1:y1 in DOCUMENT coordinates, through the window path.
+    if act.starts_with("stroke:") {
+        var parts = act.substring(7, act.len()).split(":")
+        if parts.len() < 4 {
+            println("  stroke needs x0:y0:x1:y1")
+            return ui
+        }
+        do_stroke(parts[0].to_int(), parts[1].to_int(),
+                  parts[2].to_int(), parts[3].to_int())
+        println("  " + act + " -> " + g_msg
+                + " hist=" + history.depth().to_string())
+        return ui
+    }
+
+    // screen:docx:docy - paint one frame, then read the WINDOW's framebuffer at
+    // the place that document pixel maps to.
+    //
+    // This is the last link in the chain and the only one the other actions
+    // cannot reach. `px:` proves the compositor holds the right value; this
+    // proves the value reached the screen at the right coordinates - i.e. that
+    // the texture upload, the blit rectangle and the view transform all agree.
+    // A channel-order bug (red where blue belongs) or a blit at the wrong origin
+    // is invisible to every assertion that stops at the composite.
+    //
+    // Win_pixel_at returns display-encoded bytes, so the expected value is the
+    // sRGB one, not the linear one.
+    if act.starts_with("screen:") {
+        var sp = act.substring(7, act.len()).split(":")
+        if sp.len() < 2 {
+            println("  screen needs docx:docy")
+            return ui
+        }
+        if g_dirty == 1 { refresh(0) }
+        paint(ui)
+        var wx2 = win_x_of_doc(sp[0].to_int())
+        var wy2 = win_y_of_doc(sp[1].to_int())
+        println("  screen doc(" + sp[0] + "," + sp[1] + ") -> win("
+                + wx2.to_string() + "," + wy2.to_string() + ") rgb="
+                + gui.Win_pixel_at(g_win, wx2, wy2, 0).to_string() + ","
+                + gui.Win_pixel_at(g_win, wx2, wy2, 1).to_string() + ","
+                + gui.Win_pixel_at(g_win, wx2, wy2, 2).to_string())
+        return ui
+    }
+
+    // px:x:y - print a composited document pixel.
+    if act.starts_with("px:") {
+        var pp = act.substring(3, act.len()).split(":")
+        if pp.len() < 2 {
+            println("  px needs x:y")
+            return ui
+        }
+        print_px(pp[0].to_int(), pp[1].to_int())
+        return ui
+    }
+
+    // hsv:h:s:v - set the brush colour directly. Dragging the picker to an exact
+    // value would be a test of arithmetic; this tests colour.
+    if act.starts_with("hsv:") {
+        var hp = act.substring(4, act.len()).split(":")
+        if hp.len() < 3 {
+            println("  hsv needs h:s:v")
+            return ui
+        }
+        paint.set_hsv(hp[0].to_float(), hp[1].to_float(), hp[2].to_float())
+        println("  hsv -> " + rounded(paint.hue()) + "," + rounded(paint.sat())
+                + "," + rounded(paint.val())
+                + " srgb=" + rounded3(paint.color_srgb(0)) + ","
+                + rounded3(paint.color_srgb(1)) + ","
+                + rounded3(paint.color_srgb(2))
+                + " linear=" + rounded3(paint.color_linear(0)) + ","
+                + rounded3(paint.color_linear(1)) + ","
+                + rounded3(paint.color_linear(2)))
+        return ui
+    }
+
+    // pickat:x:y - drag the picker widget itself, in WINDOW coordinates relative
+    // to the SV square's top-left, so the picker's own hit-testing is exercised.
+    if act.starts_with("pickat:") {
+        var qp = act.substring(7, act.len()).split(":")
+        if qp.len() < 2 {
+            println("  pickat needs sx:sy")
+            return ui
+        }
+        canvas_press(SV_X() + qp[0].to_int(), SV_Y() + qp[1].to_int())
+        canvas_release(SV_X() + qp[0].to_int(), SV_Y() + qp[1].to_int())
+        println("  " + act + " -> hsv=" + rounded(paint.hue()) + ","
+                + rounded(paint.sat()) + "," + rounded(paint.val()))
+        return ui
+    }
+
+    // huedrag:y - drag the hue strip, y relative to its top.
+    if act.starts_with("huedrag:") {
+        var yp = act.substring(8, act.len()).to_int()
+        canvas_press(HUE_X() + HUE_W() / 2, HUE_Y() + yp)
+        canvas_release(HUE_X() + HUE_W() / 2, HUE_Y() + yp)
+        println("  " + act + " -> hue=" + rounded(paint.hue()))
+        return ui
+    }
+
+    // brush:radius:hardness:alpha
+    if act.starts_with("brush:") {
+        var bp = act.substring(6, act.len()).split(":")
+        if bp.len() < 3 {
+            println("  brush needs radius:hardness:alpha")
+            return ui
+        }
+        paint.set_radius(bp[0].to_float())
+        paint.set_hardness(bp[1].to_float())
+        paint.set_alpha(bp[2].to_float())
+        println("  brush -> r=" + rounded(paint.radius()) + " h="
+                + rounded(paint.hardness()) + " a=" + rounded(paint.alpha()))
+        return ui
+    }
+
+    // tool:name
+    if act.starts_with("tool:") {
+        var tn = act.substring(5, act.len())
+        if tn == "brush" { paint.set_tool(paint.TOOL_BRUSH()) }
+        if tn == "eraser" { paint.set_tool(paint.TOOL_ERASER()) }
+        if tn == "fill" { paint.set_tool(paint.TOOL_FILL()) }
+        if tn == "pick" { paint.set_tool(paint.TOOL_PICK()) }
+        if tn == "pan" { paint.set_tool(paint.TOOL_PAN()) }
+        println("  tool -> " + paint.tool_name(paint.tool()))
+        return ui
+    }
+
+    // zoom:percent - an exact scale, so a script can test one.
+    if act.starts_with("zoom:") {
+        view.set_zoom(act.substring(5, act.len()).to_int())
+        println("  zoom -> " + view.zoom().to_string() + "% origin="
+                + view.origin_x().to_string() + ","
+                + view.origin_y().to_string())
+        return ui
+    }
+
+    // pan:dx:dy in window pixels, through the PAN TOOL and a real drag - so this
+    // exercises canvas_press/drag/release, not just view.pan_by.
+    if act.starts_with("pan:") {
+        var np = act.substring(4, act.len()).split(":")
+        if np.len() < 2 {
+            println("  pan needs dx:dy")
+            return ui
+        }
+        var keep = paint.tool()
+        paint.set_tool(paint.TOOL_PAN())
+        var cx = VIEW_X() + VIEW_W() / 2
+        var cy = VIEW_Y() + VIEW_H() / 2
+        canvas_press(cx, cy)
+        canvas_drag(cx + np[0].to_int(), cy + np[1].to_int())
+        canvas_release(cx + np[0].to_int(), cy + np[1].to_int())
+        paint.set_tool(keep)
+        println("  pan -> " + view.pan_x().to_string() + ","
+                + view.pan_y().to_string() + " origin="
+                + view.origin_x().to_string() + ","
+                + view.origin_y().to_string())
+        return ui
+    }
+
+    // map:x:y - what document pixel is window (x,y)? The mapping, printed.
+    if act.starts_with("map:") {
+        var mp = act.substring(4, act.len()).split(":")
+        if mp.len() < 2 {
+            println("  map needs x:y")
+            return ui
+        }
+        var wx = mp[0].to_int()
+        var wy = mp[1].to_int()
+        println("  map win(" + wx.to_string() + "," + wy.to_string()
+                + ") -> doc(" + rounded3(view.screen_to_doc_x(wx.to_float()))
+                + "," + rounded3(view.screen_to_doc_y(wy.to_float()))
+                + ") hits=" + view.hits_doc(wx, wy).to_string())
+        return ui
+    }
+
+    // eyedrop:x:y in DOCUMENT coordinates, through canvas_press with Pick.
+    if act.starts_with("eyedrop:") {
+        var kp = act.substring(8, act.len()).split(":")
+        if kp.len() < 2 {
+            println("  eyedrop needs x:y")
+            return ui
+        }
+        paint.set_tool(paint.TOOL_PICK())
+        canvas_press(win_x_of_doc(kp[0].to_int()), win_y_of_doc(kp[1].to_int()))
+        println("  " + act + " -> hsv=" + rounded(paint.hue()) + ","
+                + rounded(paint.sat()) + "," + rounded(paint.val())
+                + "  " + g_msg)
+        return ui
+    }
+
+    // fill:x:y in DOCUMENT coordinates, through canvas_press with Fill.
+    if act.starts_with("fill:") {
+        var fp = act.substring(5, act.len()).split(":")
+        if fp.len() < 2 {
+            println("  fill needs x:y")
+            return ui
+        }
+        paint.set_tool(paint.TOOL_FILL())
+        canvas_press(win_x_of_doc(fp[0].to_int()), win_y_of_doc(fp[1].to_int()))
+        println("  " + act + " -> " + g_msg + " hist="
+                + history.depth().to_string())
+        return ui
+    }
+
+    // active:n - select a layer without a click, for scripts that need an exact
+    // target regardless of layout.
+    if act.starts_with("active:") {
+        g_active = act.substring(7, act.len()).to_int()
+        clamp_active()
+        println("  active -> " + g_active.to_string() + " ("
+                + layer.name(g_active) + ")")
+        return ui
+    }
+
     if act == "toggle_top" {
         // The topmost layer's row, dispatched by widget id exactly as a click
         // would - which is the point: this goes through on_layer_row.
@@ -669,6 +1576,7 @@ fn run_action(ui: Ui, act: string) -> Ui {
         on_undo(0)
         println("  undo -> can_undo=" + history.can_undo().to_string()
                 + " can_redo=" + history.can_redo().to_string()
+                + " layers=" + layer.count().to_string()
                 + " msg=" + g_msg)
         return ui
     }
@@ -676,17 +1584,23 @@ fn run_action(ui: Ui, act: string) -> Ui {
         on_redo(0)
         println("  redo -> can_undo=" + history.can_undo().to_string()
                 + " can_redo=" + history.can_redo().to_string()
+                + " layers=" + layer.count().to_string()
                 + " msg=" + g_msg)
         return ui
     }
     if act == "zoom_in" {
         on_zoom_in(0)
-        println("  zoom_in -> " + g_zoom.to_string() + "%")
+        println("  zoom_in -> " + view.zoom().to_string() + "%")
         return ui
     }
     if act == "zoom_out" {
         on_zoom_out(0)
-        println("  zoom_out -> " + g_zoom.to_string() + "%")
+        println("  zoom_out -> " + view.zoom().to_string() + "%")
+        return ui
+    }
+    if act == "fit" {
+        on_zoom_fit(0)
+        println("  fit -> " + view.zoom().to_string() + "%")
         return ui
     }
     if act == "save" {
@@ -697,7 +1611,22 @@ fn run_action(ui: Ui, act: string) -> Ui {
     if act == "open" {
         open_png(System.env("WYNCANVAS_OPEN"))
         println("  open -> " + g_msg + " doc=" + g_doc_w.to_string() + "x"
-                + g_doc_h.to_string() + " layers=" + layer.count().to_string())
+                + g_doc_h.to_string() + " layers=" + layer.count().to_string()
+                + " zoom=" + view.zoom().to_string() + "%")
+        return ui
+    }
+    if act == "layers" {
+        // The whole stack, bottom-up, as the compositor sees it.
+        var i = 0
+        while i < layer.count() {
+            println("  L" + i.to_string() + " " + layer.name(i)
+                    + " vis=" + layer.visible(i).to_string()
+                    + " mode=" + pixel.blend_name(layer.blend_mode(i))
+                    + " op=" + rounded(layer.opacity(i))
+                    + " buf=" + layer.buffer(i).to_string())
+            i = i + 1
+        }
+        println("  active=" + g_active.to_string())
         return ui
     }
     println("  unknown action: " + act)
@@ -718,6 +1647,7 @@ fn main() -> int {
     server.demo_scene()
     g_doc_w = 256
     g_doc_h = 256
+    g_active = layer.count() - 1
 
     g_win = gui.Win_window("WynCanvas", WIN_W(), WIN_H())
     if g_win < 0 {
@@ -738,6 +1668,23 @@ fn main() -> int {
     // extern, so `Win_event_text` inside widgets.wyn is called bare there too.
     println("backend: " + Win_backend_name())
 
+    // The view transform needs the viewport rectangle and the document size
+    // before anything can be mapped through it.
+    view.set_viewport(VIEW_X(), VIEW_Y(), VIEW_W(), VIEW_H())
+    view.set_doc(g_doc_w, g_doc_h)
+    view.zoom_100()
+
+    // The picker's ramps. Built once; the SV square is re-filled when the hue
+    // changes (paint_picker), the hue strip never changes.
+    g_sv_buf = wynimg_new(SV_SIZE(), SV_SIZE())
+    g_sv_tex = gui.Win_texture(g_win, SV_SIZE(), SV_SIZE())
+    g_hue_buf = wynimg_new(HUE_W(), SV_SIZE())
+    g_hue_tex = gui.Win_texture(g_win, HUE_W(), SV_SIZE())
+    if g_hue_buf != 0 {
+        wynimg_hue_strip(g_hue_buf)
+        if g_hue_tex >= 0 { wynimg_upload_tex(g_hue_tex, g_hue_buf) }
+    }
+
     var ui = build_form(g_win, g_font)
 
     // Headless verification seam. With WYNCANVAS_FRAMES set the loop runs that
@@ -757,11 +1704,10 @@ fn main() -> int {
         var s = 0
         while s < acts.len() {
             ui = run_action(ui, acts[s])
-            // Opening replaces the stack, so the rows must be rebuilt - the
-            // same rebuild the frame loop does.
+            // A structural change replaces the stack, so the rows must be
+            // rebuilt - the same rebuild the frame loop does.
             if layer.count() != g_row_count {
-                g_row_count = 0
-                ui = build_form(g_win, g_font)
+                ui = rebuild_rows(ui)
             }
             s = s + 1
         }
@@ -778,12 +1724,34 @@ fn main() -> int {
             if g_req == REQ_OPEN { open_png(path) }
             if g_req == REQ_SAVE { save_png(path) }
             g_req = REQ_NONE
-            // Opening replaces the layer stack, so the rows must be rebuilt.
             if layer.count() != g_row_count {
-                g_row_count = 0
-                ui = build_form(g_win, g_font)
+                ui = rebuild_rows(ui)
             }
         }
+
+        // The canvas gesture, read AFTER Ui_events so the toolkit has already
+        // consumed the press that belongs to a button. `Ui_hit_test` reports the
+        // topmost widget of any kind under the point, so a press over any control
+        // - including the layer rows - is excluded from the canvas.
+        var mx = gui.Win_mouse_x()
+        var my = gui.Win_mouse_y()
+        var down = gui.Win_mouse_pressed()
+        if g_doc_w > 0 {
+            g_cur_dx = view.screen_to_doc_x(mx.to_float()).to_int()
+            g_cur_dy = view.screen_to_doc_y(my.to_float()).to_int()
+        }
+        if down == 1 {
+            if g_was_down == 0 {
+                if widgets.Ui_hit_test(ui, mx, my) == 0 - 1 {
+                    canvas_press(mx, my)
+                }
+            } else {
+                canvas_drag(mx, my)
+            }
+        } else {
+            if g_was_down == 1 { canvas_release(mx, my) }
+        }
+        g_was_down = down
 
         if g_dirty == 1 { refresh(0) }
 
@@ -793,7 +1761,7 @@ fn main() -> int {
         if limit > 0 {
             if n >= limit {
                 if shot != "" { gui.Win_screenshot(g_win, shot) }
-                ui = widgets.Ui_set_focus(ui, -1)
+                ui = widgets.Ui_set_focus(ui, 0 - 1)
                 break
             }
         }
@@ -803,6 +1771,13 @@ fn main() -> int {
         gui.Win_delay(16)
     }
 
+    // An unfinished stroke at exit would leak its two full-canvas buffers.
+    if paint.stroke_active() { paint.cancel() }
+    if g_last_comp != 0 { wynimg_free(g_last_comp) }
+    if g_sv_tex >= 0 { gui.Win_texture_free(g_sv_tex) }
+    if g_hue_tex >= 0 { gui.Win_texture_free(g_hue_tex) }
+    if g_sv_buf != 0 { wynimg_free(g_sv_buf) }
+    if g_hue_buf != 0 { wynimg_free(g_hue_buf) }
     if g_tex >= 0 { gui.Win_texture_free(g_tex) }
     gui.Win_font_free(g_font)
     gui.Win_close(g_win)
