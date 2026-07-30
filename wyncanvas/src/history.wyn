@@ -1,0 +1,128 @@
+// history - undo/redo as command records.
+//
+// Each entry stores the operation, the target layer, and both the old and new
+// value. Full-canvas snapshots would cost ~768MB per step for a 12MP document,
+// so nothing here copies pixels.
+//
+// `h_pos` is the number of applied entries. Undo decrements it and reapplies
+// the old value; redo increments and reapplies the new one. Recording a fresh
+// action truncates anything above `h_pos`, discarding the redo branch.
+//
+// Parallel arrays, like src/layer.wyn: one column per field, so no accessor
+// ever returns a struct across a module boundary (known v1.20.0 miscompile).
+// A record is 6 scalars regardless of canvas size -- that invariant is the
+// whole point, and "recording is O(1) in canvas size" in tests/test_history.wyn
+// guards it.
+//
+// CALL CONVENTION: every function here is a `pub fn` or a module-private `fn`,
+// so importers call them QUALIFIED (`history.undo()`). See src/pixel.wyn.
+// This file is also symlinked at the project root as ./history.wyn, because
+// `import history` from tests/ does not search src/. See WYN_FINDINGS.md.
+
+import layer
+
+var h_op = [0]
+var h_layer = [0]
+var h_old_f = [0.0]
+var h_new_f = [0.0]
+var h_old_i = [0]
+var h_new_i = [0]
+var h_len = 0
+var h_pos = 0
+
+fn OP_OPACITY() -> int { return 0 }
+fn OP_BLEND() -> int { return 1 }
+fn OP_VISIBLE() -> int { return 2 }
+
+pub fn history_new() -> int {
+    h_len = 0
+    h_pos = 0
+    return 0
+}
+
+pub fn depth() -> int { return h_len }
+pub fn can_undo() -> bool { return h_pos > 0 }
+pub fn can_redo() -> bool { return h_pos < h_len }
+
+fn push(op: int, lid: int, of: float, nf: float, oi: int, ni: int) -> int {
+    // A new action invalidates any redo branch.
+    h_len = h_pos
+    if h_len < h_op.len() {
+        h_op[h_len] = op
+        h_layer[h_len] = lid
+        h_old_f[h_len] = of
+        h_new_f[h_len] = nf
+        h_old_i[h_len] = oi
+        h_new_i[h_len] = ni
+    } else {
+        h_op.push(op)
+        h_layer.push(lid)
+        h_old_f.push(of)
+        h_new_f.push(nf)
+        h_old_i.push(oi)
+        h_new_i.push(ni)
+    }
+    h_len = h_len + 1
+    h_pos = h_len
+    return h_len
+}
+
+pub fn record_opacity(layer_id: int, old_v: float, new_v: float) -> int {
+    return push(OP_OPACITY(), layer_id, old_v, new_v, 0, 0)
+}
+
+pub fn record_blend(layer_id: int, old_m: int, new_m: int) -> int {
+    return push(OP_BLEND(), layer_id, 0.0, 0.0, old_m, new_m)
+}
+
+pub fn record_visible(layer_id: int, old_v: bool, new_v: bool) -> int {
+    var oi = 0
+    var ni = 0
+    if old_v { oi = 1 }
+    if new_v { ni = 1 }
+    return push(OP_VISIBLE(), layer_id, 0.0, 0.0, oi, ni)
+}
+
+fn apply(i: int, use_new: bool) -> int {
+    var op = h_op[i]
+    var lid = h_layer[i]
+    if op == OP_OPACITY() {
+        if use_new { layer.set_opacity(lid, h_new_f[i]) }
+        else { layer.set_opacity(lid, h_old_f[i]) }
+        return 1
+    }
+    if op == OP_BLEND() {
+        if use_new { layer.set_blend_mode(lid, h_new_i[i]) }
+        else { layer.set_blend_mode(lid, h_old_i[i]) }
+        return 1
+    }
+    if op == OP_VISIBLE() {
+        var v = h_old_i[i]
+        if use_new { v = h_new_i[i] }
+        layer.set_visible(lid, v == 1)
+        return 1
+    }
+    return 0
+}
+
+pub fn undo() -> int {
+    if can_undo() == false { return 0 }
+    h_pos = h_pos - 1
+    return apply(h_pos, false)
+}
+
+pub fn redo() -> int {
+    if can_redo() == false { return 0 }
+    var r = apply(h_pos, true)
+    h_pos = h_pos + 1
+    return r
+}
+
+pub fn label(i: int) -> string {
+    if i < 0 or i >= h_len { return "" }
+    var op = h_op[i]
+    if op == OP_OPACITY() { return "opacity" }
+    if op == OP_BLEND() { return "blend mode" }
+    if op == OP_VISIBLE() { return "visibility" }
+    return "change"
+}

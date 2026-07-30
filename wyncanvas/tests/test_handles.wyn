@@ -1,0 +1,94 @@
+import pixel
+import layer
+import render
+
+// Handle lifetime tests.
+//
+// The layer store keeps buffer/mask handles that Wyn code may already have
+// freed: `set_mask`/`add` never invalidate, and `wynimg_free(p)` cannot null
+// the caller's copy of `p`. With raw pointers that made
+// `layer.set_mask(t, m); wynimg_free(m); render.compose(...)` a
+// heap-use-after-free READ inside wynimg_composite -- confirmed under ASan,
+// while the equivalent Wyn program returned success with returncode 0, which is
+// what made it dangerous: it corrupted quietly rather than crashing.
+//
+// wynimg_new now returns a generation-tagged handle, so a stale handle resolves
+// to NULL in C and takes the same path as a null argument.
+//
+// Call convention (v1.20.0 codegen constraint, see WYN_FINDINGS.md):
+//   extern fns   -> called BARE          (wynimg_new)
+//   pub fn Wyn   -> called QUALIFIED     (pixel.approx, render.compose)
+
+test "freeing a buffer invalidates its handle" {
+    var b = wynimg_new(8, 8)
+    assert_eq(wynimg_alive(b), 1)
+    wynimg_free(b)
+    assert_eq(wynimg_alive(b), 0)
+    assert_eq(wynimg_width(b), 0)
+    assert_eq(wynimg_height(b), 0)
+    assert_true(pixel.approx(wynimg_get(b, 0), 0.0, 0.00001))
+}
+
+test "a double free is a safe no-op" {
+    var b = wynimg_new(8, 8)
+    wynimg_free(b)
+    wynimg_free(b)
+    wynimg_free(b)
+    assert_eq(wynimg_alive(b), 0)
+}
+
+test "compositing through a freed mask does not use freed memory" {
+    // This is the exact sequence src/render.wyn performs when a mask has been
+    // freed but layer.set_mask still holds its handle. Under ASan with raw
+    // pointers this was a heap-use-after-free READ in wynimg_composite.
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var top = wynimg_new(4, 4)
+    var msk = wynimg_new(4, 4)
+    wynimg_fill(bot, 1.0, 0.0, 0.0, 1.0)
+    wynimg_fill(top, 0.0, 0.0, 1.0, 1.0)
+    wynimg_fill(msk, 1.0, 0.0, 0.0, 1.0)
+
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var t = layer.add("top", top, layer.KIND_RASTER())
+    layer.set_mask(t, msk)
+    wynimg_free(msk)                 // store now holds a stale handle
+
+    var out = render.compose(4, 4)
+    // The stale mask resolves to null, so the layer composites unmasked.
+    assert_eq(wynimg_width(out), 4)
+    assert_true(pixel.approx(wynimg_get(out, 2), 1.0, 0.001))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(top)
+}
+
+test "a freed layer buffer does not corrupt a compose" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var top = wynimg_new(4, 4)
+    wynimg_fill(bot, 1.0, 0.0, 0.0, 1.0)
+    wynimg_fill(top, 0.0, 1.0, 0.0, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    layer.add("top", top, layer.KIND_RASTER())
+    wynimg_free(top)                 // stale buffer handle in the store
+
+    var out = render.compose(4, 4)
+    // The stale top layer is skipped; the bottom still renders.
+    assert_true(pixel.approx(wynimg_get(out, 0), 1.0, 0.001))
+    assert_true(pixel.approx(wynimg_get(out, 1), 0.0, 0.001))
+    wynimg_free(out)
+    wynimg_free(bot)
+}
+
+test "handles are not reused while still referenced" {
+    // A fresh allocation must never collide with an outstanding freed handle,
+    // or a stale handle would silently address a different buffer.
+    var a = wynimg_new(4, 4)
+    wynimg_free(a)
+    var b = wynimg_new(4, 4)
+    assert_true(b != a)
+    assert_eq(wynimg_alive(a), 0)
+    assert_eq(wynimg_alive(b), 1)
+    wynimg_free(b)
+}

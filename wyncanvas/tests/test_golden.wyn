@@ -1,0 +1,327 @@
+import pixel
+import layer
+import render
+
+// Golden tests render a known scene and compare against a committed PNG.
+// They catch what unit tests cannot: seams, channel swaps, premultiply
+// errors, and off-by-one geometry.
+//
+// Tolerance is 1.5/255 to absorb 8-bit quantization on save/load.
+//
+// Call convention (v1.20.0, see WYN_FINDINGS.md):
+//   extern fns -> BARE (wynimg_new), pub fn -> QUALIFIED (pixel.approx).
+//
+// NOTE ON PREMULTIPLIED VALUES: every pixel written here has alpha 1.0, and
+// at alpha 1.0 premultiplied and unpremultiplied colour are identical, so the
+// literal channel values below are already valid premultiplied pixels. That is
+// a property of this scene, not a general licence to write raw colour.
+
+fn build_scene() -> int {
+    layer.store_new()
+    var bot = wynimg_new(64, 64)
+    var top = wynimg_new(64, 64)
+    var msk = wynimg_new(64, 64)
+
+    // Bottom: horizontal red-to-green ramp.
+    var y = 0
+    while y < 64 {
+        var x = 0
+        while x < 64 {
+            var t = x / 63.0
+            wynimg_set(bot, pixel.px_index(64, x, y, 0), 1.0 - t)
+            wynimg_set(bot, pixel.px_index(64, x, y, 1), t)
+            wynimg_set(bot, pixel.px_index(64, x, y, 2), 0.0)
+            wynimg_set(bot, pixel.px_index(64, x, y, 3), 1.0)
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    // Top: solid blue, multiplied at 75%, masked to the left half.
+    wynimg_fill(top, 0.2, 0.3, 0.9, 1.0)
+    var y2 = 0
+    while y2 < 64 {
+        var x2 = 0
+        while x2 < 64 {
+            var v = 0.0
+            if x2 < 32 { v = 1.0 }
+            wynimg_set(msk, pixel.px_index(64, x2, y2, 0), v)
+            wynimg_set(msk, pixel.px_index(64, x2, y2, 3), 1.0)
+            x2 = x2 + 1
+        }
+        y2 = y2 + 1
+    }
+
+    layer.add("ramp", bot, layer.KIND_RASTER())
+    var t = layer.add("blue", top, layer.KIND_RASTER())
+    layer.set_blend_mode(t, 1)
+    layer.set_opacity(t, 0.75)
+    layer.set_mask(t, msk)
+    return 0
+}
+
+test "the reference scene matches its golden image" {
+    build_scene()
+    var out = render.compose(64, 64)
+    assert_eq(wynimg_save_png(out, "/tmp/wyncanvas_scene_actual.png"), 1)
+
+    var golden = wynimg_load_png("tests/golden/scene.png")
+    // A missing golden file must fail loudly, not silently pass.
+    assert_eq(wynimg_width(golden), 64)
+    assert_eq(wynimg_height(golden), 64)
+
+    var diff = wynimg_max_diff(out, golden)
+    assert_true(diff < 0.006)
+
+    wynimg_free(out)
+    wynimg_free(golden)
+}
+
+test "compose_to_png writes a loadable file" {
+    build_scene()
+    assert_eq(render.compose_to_png(64, 64, "/tmp/wyncanvas_c2p.png"), 1)
+    var back = wynimg_load_png("/tmp/wyncanvas_c2p.png")
+    assert_eq(wynimg_width(back), 64)
+    assert_eq(wynimg_height(back), 64)
+    wynimg_free(back)
+}
+
+// ---------------------------------------------------------------------------
+// The comparison helper itself. `wynimg_max_diff` is the thing every golden
+// assertion depends on, so if it were broken -- returning 0.0 for everything,
+// say -- the golden test would pass no matter what was rendered. These verify
+// it separately from the scene.
+// ---------------------------------------------------------------------------
+
+test "max_diff is zero for identical buffers and finds the worst channel" {
+    var a = wynimg_new(4, 4)
+    var b = wynimg_new(4, 4)
+    wynimg_fill(a, 0.5, 0.5, 0.5, 1.0)
+    wynimg_fill(b, 0.5, 0.5, 0.5, 1.0)
+    assert_true(pixel.approx(wynimg_max_diff(a, b), 0.0, 0.000001))
+
+    // A single channel of a single pixel differs by 0.25 - the maximum must
+    // find it, not average it away.
+    wynimg_set(b, pixel.px_index(4, 2, 3, 1), 0.75)
+    assert_true(pixel.approx(wynimg_max_diff(a, b), 0.25, 0.0001))
+
+    // Sign must not matter.
+    wynimg_set(b, pixel.px_index(4, 2, 3, 1), 0.25)
+    assert_true(pixel.approx(wynimg_max_diff(a, b), 0.25, 0.0001))
+    wynimg_free(a)
+    wynimg_free(b)
+}
+
+// This is the guard that stops a resized render from silently passing: 2.0 is
+// impossible for real [0,1] data, so it can never sit under any tolerance.
+test "max_diff returns an impossible 2.0 when buffers are incomparable" {
+    var a = wynimg_new(4, 4)
+    var wrong_w = wynimg_new(8, 4)
+    var wrong_h = wynimg_new(4, 8)
+    assert_true(pixel.approx(wynimg_max_diff(a, wrong_w), 2.0, 0.000001))
+    assert_true(pixel.approx(wynimg_max_diff(a, wrong_h), 2.0, 0.000001))
+    assert_true(pixel.approx(wynimg_max_diff(a, 0), 2.0, 0.000001))
+    assert_true(pixel.approx(wynimg_max_diff(0, a), 2.0, 0.000001))
+    assert_true(pixel.approx(wynimg_max_diff(0, 0), 2.0, 0.000001))
+    // 2.0 exceeds the golden tolerance by more than 300x.
+    assert_false(wynimg_max_diff(a, wrong_w) < 0.006)
+    wynimg_free(a)
+    wynimg_free(wrong_w)
+    wynimg_free(wrong_h)
+}
+
+// A wrong-sized golden must FAIL the same assertion the real test uses,
+// exercising the 2.0 sentinel end to end rather than just at the C boundary.
+test "a golden of the wrong size cannot pass the comparison" {
+    build_scene()
+    var out = render.compose(64, 64)
+    var wrong = wynimg_new(32, 32)
+    assert_false(wynimg_max_diff(out, wrong) < 0.006)
+    wynimg_free(out)
+    wynimg_free(wrong)
+}
+
+// ---------------------------------------------------------------------------
+// Scene geometry and colour, asserted numerically as well as by image compare.
+// The golden PNG proves "unchanged"; these prove "correct", so a wrong golden
+// committed by mistake would still be caught here.
+//
+// Expected values, hand-derived (all at alpha 1, linear light):
+//   ramp at x: R = 1 - x/63, G = x/63, B = 0
+//   LEFT half (mask 1, opacity 0.75, multiply against blue 0.2/0.3/0.9):
+//     blended = ramp * blue, then source-over at alpha 0.75:
+//     out = ramp*blue*0.75 + ramp*0.25
+//   RIGHT half (mask 0): out = ramp, untouched.
+// ---------------------------------------------------------------------------
+
+// THE BLUE CHANNEL STAYS ZERO ON BOTH SIDES, and that is correct, not a bug.
+// The scene is often described as "blue-tinted on the left", but multiply
+// PRESERVES ZEROS: blend(0, 0.9) = 0 * 0.9 = 0. The ramp has no blue anywhere,
+// so no amount of multiplying by a blue layer can add any. The visible effect
+// of the top layer is DARKENING (and a hue shift toward olive, because R is
+// attenuated by 0.2 while G is attenuated by only 0.3).
+//
+// This test asserts that explicitly, because the intuitive-but-wrong reading
+// ("the left half should have some blue in it") is exactly the kind of thing
+// someone might later "fix" by changing the compositor.
+test "the multiply cannot add blue the ramp does not have" {
+    build_scene()
+    var out = render.compose(64, 64)
+    var x = 0
+    while x < 64 {
+        assert_true(pixel.approx(wynimg_get(out, pixel.px_index(64, x, 10, 2)),
+                                 0.0, 0.0001))
+        x = x + 1
+    }
+    wynimg_free(out)
+}
+
+test "the scene has a hard vertical edge exactly at x=32" {
+    build_scene()
+    var out = render.compose(64, 64)
+
+    // x=31 is the last masked (darkened) column; x=32 the first untouched one.
+    // Ramp R at x=31 is 1-31/63 = 0.507937.
+    // left  R = 0.507937*0.2*0.75 + 0.507937*0.25 = 0.203175
+    var r31 = wynimg_get(out, pixel.px_index(64, 31, 10, 0))
+    assert_true(pixel.approx(r31, 0.203175, 0.001))
+    // right R at x=32 is untouched: 1 - 32/63 = 0.492063
+    var r32 = wynimg_get(out, pixel.px_index(64, 32, 10, 0))
+    assert_true(pixel.approx(r32, 0.492063, 0.001))
+
+    // The edge is HARD: the step across x=31->32 is ~0.2889, while the step
+    // between adjacent columns within either half is <=0.016. So the jump is
+    // more than 18x any neighbouring gradient step - it is a discontinuity,
+    // not a steep ramp. A one-column-off mask, or a soft/feathered edge,
+    // breaks this ratio.
+    var jump = r32 - r31
+    assert_true(jump > 0.28)
+
+    var step_left = wynimg_get(out, pixel.px_index(64, 30, 10, 0)) - r31
+    if step_left < 0.0 { step_left = 0.0 - step_left }
+    var step_right = r32 - wynimg_get(out, pixel.px_index(64, 33, 10, 0))
+    if step_right < 0.0 { step_right = 0.0 - step_right }
+    assert_true(step_left < 0.02)
+    assert_true(step_right < 0.02)
+    assert_true(jump > step_left * 10.0)
+    assert_true(jump > step_right * 10.0)
+    wynimg_free(out)
+}
+
+test "the masked half is darkened by the multiply" {
+    build_scene()
+    var out = render.compose(64, 64)
+
+    // At x=0 the ramp is pure red (1,0,0).
+    //   R = 1*0.2*0.75 + 1*0.25 = 0.4    (darkened from 1.0)
+    //   G = 0                            (ramp G is 0, multiply keeps it 0)
+    //   B = 0                            (ramp B is 0 -> multiply cannot add)
+    assert_true(pixel.approx(wynimg_get(out, pixel.px_index(64, 0, 5, 0)),
+                             0.4, 0.001))
+    assert_true(pixel.approx(wynimg_get(out, pixel.px_index(64, 0, 5, 1)),
+                             0.0, 0.001))
+
+    // At x=20 the ramp is (0.68254, 0.31746, 0). G is attenuated by the blue
+    // layer's 0.3 while R is attenuated by 0.2, which is the hue shift.
+    //   R = 0.68254*0.2*0.75 + 0.68254*0.25 = 0.273016
+    //   G = 0.31746*0.3*0.75 + 0.31746*0.25 = 0.150794
+    assert_true(pixel.approx(wynimg_get(out, pixel.px_index(64, 20, 5, 0)),
+                             0.273016, 0.001))
+    assert_true(pixel.approx(wynimg_get(out, pixel.px_index(64, 20, 5, 1)),
+                             0.150794, 0.001))
+
+    // The left half is strictly DARKER than the untouched ramp in both R and
+    // G, at every column - multiply with a <1 factor can only reduce.
+    var x = 0
+    while x < 32 {
+        var t = x / 63.0
+        var got_r = wynimg_get(out, pixel.px_index(64, x, 5, 0))
+        var got_g = wynimg_get(out, pixel.px_index(64, x, 5, 1))
+        assert_true(got_r < (1.0 - t) + 0.0001)
+        assert_true(got_g < t + 0.0001)
+        x = x + 1
+    }
+    wynimg_free(out)
+}
+
+test "the unmasked half is the untouched ramp" {
+    build_scene()
+    var out = render.compose(64, 64)
+    var x = 32
+    while x < 64 {
+        var t = x / 63.0
+        assert_true(pixel.approx(wynimg_get(out, pixel.px_index(64, x, 40, 0)),
+                                 1.0 - t, 0.001))
+        assert_true(pixel.approx(wynimg_get(out, pixel.px_index(64, x, 40, 1)),
+                                 t, 0.001))
+        assert_true(pixel.approx(wynimg_get(out, pixel.px_index(64, x, 40, 2)),
+                                 0.0, 0.001))
+        x = x + 1
+    }
+    wynimg_free(out)
+}
+
+// No seams and no banding: the scene is constant down every column, so any two
+// rows must be identical. A row-stride error or a tile seam breaks this.
+test "the scene has no horizontal seams - every row is identical" {
+    build_scene()
+    var out = render.compose(64, 64)
+    var x = 0
+    while x < 64 {
+        var top_r = wynimg_get(out, pixel.px_index(64, x, 0, 0))
+        var mid_r = wynimg_get(out, pixel.px_index(64, x, 31, 0))
+        var bot_r = wynimg_get(out, pixel.px_index(64, x, 63, 0))
+        assert_true(pixel.approx(mid_r, top_r, 0.000001))
+        assert_true(pixel.approx(bot_r, top_r, 0.000001))
+        x = x + 1
+    }
+    wynimg_free(out)
+}
+
+// The whole canvas is opaque and in range - catches an alpha or premultiply
+// error that the colour checks above could miss.
+test "every pixel of the scene is opaque and in range" {
+    build_scene()
+    var out = render.compose(64, 64)
+    var i = 0
+    while i < 64 * 64 {
+        var a = wynimg_get(out, i * 4 + 3)
+        assert_true(pixel.approx(a, 1.0, 0.0001))
+        var c = 0
+        while c < 3 {
+            var v = wynimg_get(out, i * 4 + c)
+            assert_true(v >= 0.0 - 0.0001)
+            // At alpha 1 a valid premultiplied channel cannot exceed 1.
+            assert_true(v <= 1.0 + 0.0001)
+            c = c + 1
+        }
+        i = i + 1
+    }
+    wynimg_free(out)
+}
+
+// Rendering the same scene twice must be bit-identical, or the golden
+// comparison is measuring noise rather than correctness.
+test "rendering is deterministic" {
+    build_scene()
+    var a = render.compose(64, 64)
+    build_scene()
+    var b = render.compose(64, 64)
+    assert_true(pixel.approx(wynimg_max_diff(a, b), 0.0, 0.0000001))
+    wynimg_free(a)
+    wynimg_free(b)
+}
+
+// The committed golden must survive a real save->load round trip through the
+// codec, which is how it was produced and how it is read back.
+test "the golden file on disk round-trips through the codec" {
+    var g1 = wynimg_load_png("tests/golden/scene.png")
+    assert_eq(wynimg_width(g1), 64)
+    assert_eq(wynimg_save_png(g1, "/tmp/wyncanvas_golden_rt.png"), 1)
+    var g2 = wynimg_load_png("/tmp/wyncanvas_golden_rt.png")
+    assert_eq(wynimg_width(g2), 64)
+    // 8-bit -> 8-bit re-encode of the same data must be near-exact.
+    assert_true(wynimg_max_diff(g1, g2) < 0.006)
+    wynimg_free(g1)
+    wynimg_free(g2)
+}

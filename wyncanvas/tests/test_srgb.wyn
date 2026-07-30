@@ -1,0 +1,45 @@
+import pixel
+
+// Reference values from the IEC 61966-2-1 sRGB transfer function.
+// Anchors: 0 -> 0, 1 -> 1, and mid-grey 0.5 sRGB -> 0.21404 linear.
+
+test "srgb_to_linear anchors at 0 and 1" {
+    assert_true(pixel.approx(pixel.srgb_to_linear(0.0), 0.0, 0.00001))
+    assert_true(pixel.approx(pixel.srgb_to_linear(1.0), 1.0, 0.00001))
+}
+
+test "srgb_to_linear midpoint matches the standard" {
+    assert_true(pixel.approx(pixel.srgb_to_linear(0.5), 0.21404, 0.0001))
+}
+
+test "srgb_to_linear uses the linear segment near black" {
+    // Below the 0.04045 threshold the curve is c / 12.92.
+    assert_true(pixel.approx(pixel.srgb_to_linear(0.02), 0.0015480, 0.000001))
+}
+
+test "linear_to_srgb anchors at 0 and 1" {
+    assert_true(pixel.approx(pixel.linear_to_srgb(0.0), 0.0, 0.00001))
+    assert_true(pixel.approx(pixel.linear_to_srgb(1.0), 1.0, 0.00001))
+}
+
+test "linear_to_srgb midpoint matches the standard" {
+    assert_true(pixel.approx(pixel.linear_to_srgb(0.21404), 0.5, 0.0001))
+}
+
+test "the two directions round-trip" {
+    var vals = [0.0, 0.02, 0.15, 0.5, 0.77, 1.0]
+    var i = 0
+    while i < 6 {
+        var v = vals[i]
+        var round = pixel.linear_to_srgb(pixel.srgb_to_linear(v))
+        assert_true(pixel.approx(round, v, 0.0001))
+        i = i + 1
+    }
+}
+
+test "conversion clamps out-of-range input" {
+    assert_true(pixel.approx(pixel.srgb_to_linear(0.0 - 0.5), 0.0, 0.00001))
+    assert_true(pixel.approx(pixel.srgb_to_linear(1.5), 1.0, 0.00001))
+    assert_true(pixel.approx(pixel.linear_to_srgb(0.0 - 0.5), 0.0, 0.00001))
+    assert_true(pixel.approx(pixel.linear_to_srgb(1.5), 1.0, 0.00001))
+}

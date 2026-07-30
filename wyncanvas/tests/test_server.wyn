@@ -1,0 +1,289 @@
+import pixel
+import layer
+import render
+import server
+
+// The JSON builders are pure functions, so they are testable without
+// binding a socket.
+//
+// Call convention (v1.20.0, see WYN_FINDINGS.md):
+//   extern fns -> BARE (wynimg_new), pub fn -> QUALIFIED (server.page).
+
+test "layers_json reports an empty stack" {
+    layer.store_new()
+    assert_eq(server.layers_json(), "{\"layers\":[]}")
+}
+
+test "layers_json lists layers with their properties" {
+    server.demo_scene()
+    var j = server.layers_json()
+    assert_true(j.contains("\"name\":\"ramp\""))
+    assert_true(j.contains("\"blend\":\"multiply\""))
+    assert_true(j.contains("\"opacity\":0.75"))
+}
+
+test "json_escape neutralizes quotes and backslashes" {
+    assert_eq(server.json_escape("a\"b"), "a\\\"b")
+    assert_eq(server.json_escape("c\\d"), "c\\\\d")
+    assert_eq(server.json_escape("plain"), "plain")
+}
+
+// ---------------------------------------------------------------------------
+// The plan's three tests above cover the escaper and a happy-path listing.
+// Everything below was added because those three leave the parts most likely
+// to break silently unexamined: the exact JSON shape the browser parses, the
+// demo scene's identity with the golden scene, and the emitted HTML.
+// ---------------------------------------------------------------------------
+
+// A layer name containing a quote must not be able to break out of the JSON
+// string and corrupt the document the UI parses. This is the reason
+// json_escape is called at the layers_json call site at all, and nothing above
+// proves the call is actually wired up - only that the function works.
+test "a hostile layer name cannot break the layers JSON" {
+    layer.store_new()
+    var b = wynimg_new(2, 2)
+    layer.add("evil\",\"visible\":false,\"x\":\"", b, layer.KIND_RASTER())
+    var j = server.layers_json()
+    // The quotes survive as escaped quotes...
+    assert_true(j.contains("\\\""))
+    // ...and exactly one real `"visible":` key is emitted, so the injected one
+    // did not become a second, parsed key.
+    assert_eq(j.split("\"visible\":").len(), 2)
+    // The document still closes properly.
+    assert_true(j.starts_with("{\"layers\":["))
+    assert_true(j.ends_with("]}"))
+    wynimg_free(b)
+}
+
+// The precise shape matters: the page's JS does d.layers[i].name / .blend /
+// .opacity / .visible and Math.round(l.opacity*100). A renamed or missing key
+// silently renders an empty panel rather than failing loudly.
+test "layers_json emits every key the UI reads, in order, for both layers" {
+    server.demo_scene()
+    assert_eq(server.layers_json(),
+        "{\"layers\":[" +
+        "{\"id\":0,\"name\":\"ramp\",\"blend\":\"normal\",\"opacity\":1.0,\"visible\":true}," +
+        "{\"id\":1,\"name\":\"blue\",\"blend\":\"multiply\",\"opacity\":0.75,\"visible\":true}" +
+        "]}")
+}
+
+// Hidden layers must serialize as false, not be omitted - the panel shows a
+// "hidden" marker and would otherwise show nothing.
+test "an invisible layer serializes as visible:false" {
+    layer.store_new()
+    var b = wynimg_new(2, 2)
+    var id = layer.add("gone", b, layer.KIND_RASTER())
+    layer.set_visible(id, false)
+    assert_true(server.layers_json().contains("\"visible\":false"))
+    assert_false(server.layers_json().contains("\"visible\":true"))
+    wynimg_free(b)
+}
+
+// demo_scene is the window's only content, and its whole justification is
+// "the same scene as the golden test, so the window shows verified output".
+// If it drifts from tests/golden/scene.png's geometry that claim is false, so
+// assert the two numerically agreed properties the golden test pins down:
+// the hard mask edge at the halfway column, and multiply not adding blue.
+test "the demo scene really is the verified golden scene, scaled up" {
+    server.demo_scene()
+    var out = render.compose(server.canvas_w(), server.canvas_h())
+    var w = server.canvas_w()
+
+    // Hard vertical edge at the midpoint: x=127 masked, x=128 untouched.
+    // ramp R at x = 1 - x/255.
+    var r127 = wynimg_get(out, pixel.px_index(w, 127, 10, 0))
+    var r128 = wynimg_get(out, pixel.px_index(w, 128, 10, 0))
+    // left  = ramp*0.2*0.75 + ramp*0.25, ramp = 1 - 127/255 = 0.501961
+    assert_true(pixel.approx(r127, 0.501961 * 0.2 * 0.75 + 0.501961 * 0.25, 0.001))
+    // right = ramp untouched, ramp = 1 - 128/255 = 0.498039
+    assert_true(pixel.approx(r128, 0.498039, 0.001))
+    // The step across the edge dwarfs the per-column gradient step.
+    assert_true(r128 - r127 > 0.28)
+
+    // Multiply preserves zeros, so the ramp's absent blue stays absent - the
+    // same property tests/test_golden.wyn pins down. "Blue-tinted" is really
+    // "darkened".
+    var x = 0
+    while x < w {
+        assert_true(pixel.approx(wynimg_get(out, pixel.px_index(w, x, 10, 2)),
+                                 0.0, 0.0001))
+        x = x + 1
+    }
+    wynimg_free(out)
+}
+
+// demo_scene must be idempotent: the window can rebuild it, and every test
+// here calls it. A missing store_new would make layers accumulate.
+test "demo_scene is idempotent" {
+    server.demo_scene()
+    assert_eq(layer.count(), 2)
+    server.demo_scene()
+    assert_eq(layer.count(), 2)
+    server.demo_scene()
+    assert_eq(layer.count(), 2)
+}
+
+// ---------------------------------------------------------------------------
+// The page. Two plan deviations are encoded in its source spelling (`"""` for
+// multi-line, `\${` to stop Wyn interpolating the JS template literals), and
+// both are invisible until the browser runs the result. These assert the
+// EMITTED text, which is what the browser sees.
+// ---------------------------------------------------------------------------
+
+// NOTE ON THE SPELLING OF THIS TEST. The needles below are written `\${...}`
+// for the same reason src/server.wyn writes the page that way: an unescaped
+// `${` is Wyn interpolation and would be evaluated at compile time
+// ("Undefined variable 'l'"). The escape is consumed by the compiler, so the
+// runtime string being searched for is a literal `${l.name}` - exactly what the
+// browser must receive.
+test "the page reaches the browser with its JS template literals intact" {
+    var p = server.page()
+    assert_true(p.contains("\${l.name}"))
+    assert_true(p.contains("\${l.blend}"))
+    assert_true(p.contains("\${Math.round(l.opacity*100)}"))
+
+    // No stray backslash leaked into the output. Checked positionally rather
+    // than with a `\\${` needle, which cannot be written as a Wyn literal at
+    // all: the lexer reads the `\\` as an escaped backslash and then treats the
+    // following `${` as a live interpolation, giving "Unterminated string".
+    var at = p.index_of("\${l.name}")
+    assert_true(at > 0)
+    assert_false(p.substring(at - 1, at) == "\\")
+}
+
+test "the page is a complete document that fetches both endpoints" {
+    var p = server.page()
+    assert_true(p.starts_with("<!doctype html>"))
+    assert_true(p.ends_with("</html>"))
+    // The multi-line `"""` form really did preserve the newlines; a
+    // single-line collapse would break the CSS comment-free block anyway.
+    assert_true(p.contains("\n"))
+    // Both endpoints the page depends on are referenced, spelled exactly as
+    // `handle` routes them.
+    assert_true(p.contains("/api/layers"))
+    assert_true(p.contains("/api/render.png"))
+    // Cache-busting query, or the webview shows a stale composite forever.
+    assert_true(p.contains("Date.now()"))
+}
+
+// The render endpoint's content type is part of the contract: correct bytes
+// served as text/plain still render as garbage in the webview.
+test "the render endpoint declares itself as PNG" {
+    assert_eq(server.render_content_type(), "image/png")
+    assert_true(server.render_path().ends_with(".png"))
+}
+
+// ---------------------------------------------------------------------------
+// The binary send path. This is the single most defect-prone thing in the
+// task: the Wyn runtime CANNOT serve binary (File.read is mode "r" and
+// NUL-terminates; Http_respond sizes with strlen), so /api/render.png goes
+// through the C shim instead. These tests exercise that shim without a socket
+// by handing it a pipe/file fd, and they are what proves the bug is actually
+// fixed rather than merely described.
+// ---------------------------------------------------------------------------
+
+test "the shim refuses to send a file that does not exist" {
+    var out_fd = wynimg_open_wr("/tmp/wyncanvas_send_nofile.bin")
+    assert_true(out_fd > 0)
+    // The fd is fine, so a 0 here can only come from the missing source file.
+    assert_eq(wynimg_http_send_file(out_fd, "/tmp/wyncanvas_no_such_file.png",
+                                    "image/png"), 0)
+    wynimg_close_fd(out_fd)
+    // And it wrote nothing at all - not even a header. A 200 header followed by
+    // no body would be worse than a clean failure.
+    assert_eq(wynimg_file_size("/tmp/wyncanvas_send_nofile.bin"), 0)
+}
+
+test "the shim refuses a negative fd rather than writing anywhere" {
+    var b = wynimg_new(2, 2)
+    wynimg_fill(b, 0.5, 0.5, 0.5, 1.0)
+    assert_eq(wynimg_save_png(b, "/tmp/wyncanvas_send_probe.png"), 1)
+    assert_eq(wynimg_http_send_file(0 - 1, "/tmp/wyncanvas_send_probe.png",
+                                    "image/png"), 0)
+    wynimg_free(b)
+}
+
+// THE CENTRAL TEST OF THIS TASK. A real PNG's bytes, unabridged.
+//
+// The source PNG is proven to contain an interior NUL first (PNG's IHDR length
+// field is 00 00 00 0D at offset 8), because without that the test proves
+// nothing: it is the NUL that makes the runtime's strlen-based sender truncate.
+// Then the response is captured to a file and its length checked against
+// header + full file size. A truncating send would produce a short body.
+test "a full PNG survives the send path, NUL bytes and all" {
+    server.demo_scene()
+    var src = "/tmp/wyncanvas_send_src.png"
+    // MUST be the demo scene's own size. Composing at any other size makes
+    // every layer mismatch the accumulator, wynimg_composite refuses them all,
+    // and the result is a uniform transparent image whose PNG is 96 bytes --
+    // which would make the truncation assertions below trivially pass on a
+    // file with no interior structure. Found by this test failing.
+    assert_eq(render.compose_to_png(server.canvas_w(), server.canvas_h(), src), 1)
+
+    var n = wynimg_file_size(src)
+    // A 256x256 composite with a gradient is comfortably over a kilobyte; the
+    // degenerate blank image mentioned above is 96 bytes, so this also pins the
+    // scene down as non-empty.
+    assert_true(n > 1000)
+
+    // PNG signature, so we know we are looking at a real image.
+    assert_eq(wynimg_file_byte(src, 0), 137)
+    assert_eq(wynimg_file_byte(src, 1), 80)   // 'P'
+    assert_eq(wynimg_file_byte(src, 2), 78)   // 'N'
+    assert_eq(wynimg_file_byte(src, 3), 71)   // 'G'
+
+    // The IHDR length field: 00 00 00 0D. THIS is the byte that breaks the
+    // runtime's sender - it stops here. If this assertion ever fails, the
+    // truncation test below is vacuous and must be reconsidered.
+    assert_eq(wynimg_file_byte(src, 8), 0)
+    assert_eq(wynimg_file_byte(src, 11), 13)
+
+    var cap = "/tmp/wyncanvas_sent_response.bin"
+    var out_fd = wynimg_open_wr(cap)
+    assert_true(out_fd > 0)
+    assert_eq(wynimg_http_send_file(out_fd, src, "image/png"), 1)
+    wynimg_close_fd(out_fd)
+
+    var total = wynimg_file_size(cap)
+    // The response is a header plus the ENTIRE file. Header length is not
+    // hard-coded (it embeds a variable-length Content-Length), but the body
+    // must be present in full, so total > n, and the slack is only the header.
+    assert_true(total > n)
+    assert_true(total - n < 200)
+
+    // Truncation check with no reliance on the header's exact size: the last
+    // `n` bytes of the capture must be the source file byte for byte. A send
+    // that stopped at the first NUL would have written 8 body bytes, not n.
+    var i = 0
+    while i < n {
+        assert_eq(wynimg_file_byte(cap, total - n + i),
+                  wynimg_file_byte(src, i))
+        i = i + 1
+    }
+
+    // And the header says what the browser needs to hear.
+    assert_eq(wynimg_file_byte(cap, 0), 72)  // 'H' of HTTP/1.1
+    assert_eq(wynimg_file_byte(cap, 9), 50)  // '2' of "200"
+}
+
+// A zero-byte source is a degenerate case the render path could produce if the
+// codec failed silently; the send must still be well-formed rather than
+// emitting a header that lies about the length.
+test "the shim handles an empty source file without lying about the length" {
+    var empty = "/tmp/wyncanvas_send_empty.bin"
+    var mk = wynimg_open_wr(empty)
+    assert_true(mk > 0)
+    wynimg_close_fd(mk)
+    assert_eq(wynimg_file_size(empty), 0)
+
+    var cap = "/tmp/wyncanvas_sent_empty.bin"
+    var out_fd = wynimg_open_wr(cap)
+    assert_true(out_fd > 0)
+    assert_eq(wynimg_http_send_file(out_fd, empty, "image/png"), 1)
+    wynimg_close_fd(out_fd)
+
+    // Header only, and it advertises 0 bytes.
+    var total = wynimg_file_size(cap)
+    assert_true(total > 0)
+    assert_true(total < 200)
+}

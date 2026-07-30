@@ -1,0 +1,257 @@
+// server - HTTP surface for the editor.
+//
+// The webview has no JS->Wyn IPC (src/wyn_webview.h exposes only
+// create/html/url/eval/run/destroy/set_title), so the UI talks to Wyn over
+// localhost HTTP. Verified: a spawned server keeps answering while App.run()'s
+// [NSApp run] blocks the main thread.
+//
+// Bulk pixels never pass through Wyn - /api/render.png asks C to write the
+// file and then has C write it to the socket.
+//
+// TWO DEVIATIONS FROM THE PLAN, both forced and both measured:
+//
+//  1. `web.file(req, 200, path, "image/png")` does not exist. The web package
+//     has no `file`; its nearest helper is `serve_static`, which is built on
+//     `File.read` + `Http.respond` and therefore cannot serve a PNG (see 2).
+//     Replaced with `wynimg_http_send_file`, a shim function that writes the
+//     response bytes directly.
+//
+//  2. Serving binary through the Wyn runtime is impossible, not merely awkward.
+//     `File.read` opens with mode "r" and NUL-terminates (wyn_runtime.h:2735);
+//     `http_send_response` sets body_len = strlen(body) (wyn_runtime.h:3095).
+//     Probe: a 21-byte file with one interior NUL arrived as 12 bytes. PNG
+//     IHDR always contains NULs. See WYN_FINDINGS.md.
+//
+// CALL CONVENTION -- v1.20.0 codegen constraint, see WYN_FINDINGS.md:
+//   extern fn (from pixel)  -> `wynimg::name(...)`, because a `pub fn` in a
+//                              module that calls an extern gets double-prefixed
+//                              to `server_server_wynimg_*`. The `::` form
+//                              lowers to the real C symbol. Same as render.wyn.
+//   pub fn of another module -> QUALIFIED (layer.count, render.compose_to_png)
+//
+// This file is also symlinked at the project root as ./server.wyn, because
+// `import server` from tests/ does not search src/. See WYN_FINDINGS.md.
+
+import web
+import pixel
+import layer
+import history
+import render
+
+pub fn json_escape(s: string) -> string {
+    var out = ""
+    var i = 0
+    while i < s.len() {
+        var ch = s.substring(i, i + 1)
+        if ch == "\"" { out = out + "\\\"" }
+        else if ch == "\\" { out = out + "\\\\" }
+        else { out = out + ch }
+        i = i + 1
+    }
+    return out
+}
+
+pub fn layers_json() -> string {
+    var out = "{\"layers\":["
+    var i = 0
+    while i < layer.count() {
+        if i > 0 { out = out + "," }
+        out = out + "{\"id\":" + i.to_string()
+        out = out + ",\"name\":\"" + json_escape(layer.name(i)) + "\""
+        out = out + ",\"blend\":\"" + pixel.blend_name(layer.blend_mode(i)) + "\""
+        out = out + ",\"opacity\":" + layer.opacity(i).to_string()
+        if layer.visible(i) { out = out + ",\"visible\":true" }
+        else { out = out + ",\"visible\":false" }
+        out = out + "}"
+        i = i + 1
+    }
+    return out + "]}"
+}
+
+// The same scene as the golden test, so the window shows verified output.
+pub fn demo_scene() -> int {
+    layer.store_new()
+    history.history_new()
+
+    var bot = wynimg::new(256, 256)
+    var y = 0
+    while y < 256 {
+        var x = 0
+        while x < 256 {
+            var t = x / 255.0
+            wynimg::set(bot, pixel.px_index(256, x, y, 0), 1.0 - t)
+            wynimg::set(bot, pixel.px_index(256, x, y, 1), t)
+            wynimg::set(bot, pixel.px_index(256, x, y, 2), 0.0)
+            wynimg::set(bot, pixel.px_index(256, x, y, 3), 1.0)
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    var top = wynimg::new(256, 256)
+    wynimg::fill(top, 0.2, 0.3, 0.9, 1.0)
+
+    var msk = wynimg::new(256, 256)
+    var y2 = 0
+    while y2 < 256 {
+        var x2 = 0
+        while x2 < 256 {
+            var v = 0.0
+            if x2 < 128 { v = 1.0 }
+            wynimg::set(msk, pixel.px_index(256, x2, y2, 0), v)
+            wynimg::set(msk, pixel.px_index(256, x2, y2, 3), 1.0)
+            x2 = x2 + 1
+        }
+        y2 = y2 + 1
+    }
+
+    layer.add("ramp", bot, layer.KIND_RASTER())
+    var t2 = layer.add("blue", top, layer.KIND_RASTER())
+    layer.set_blend_mode(t2, 1)
+    layer.set_opacity(t2, 0.75)
+    layer.set_mask(t2, msk)
+    return 0
+}
+
+// The UI page.
+//
+// TWO SPELLING CONSTRAINTS, both plan deviations, both required:
+//
+//  1. `"""`, not `"`. A regular double-quoted Wyn string is single-line by
+//     design (src/lexer.c:317-319 stops the scan at '\n'); `"""` is the
+//     multi-line form (src/lexer.c:297-314). The plan's literal `"` here fails
+//     with "Unterminated string literal". Not a compiler bug - a plan defect.
+//
+//  2. `\${...}`, not `${...}`, inside the JS template literals. `${` is Wyn's
+//     own interpolation syntax and fires inside `"""` too, so the plan's
+//     `${l.name}` was compiled as a Wyn expression: "Undefined variable 'l'".
+//     A backslash marks it literal (src/parser.c:405-417) and the emitted HTML
+//     contains a bare `${l.name}` for the browser, verified by curl below.
+pub fn page() -> string {
+    return """<!doctype html><html><head><meta charset=utf-8><title>WynCanvas</title>
+<style>
+  body{margin:0;background:#1e1e1e;color:#ddd;font:13px -apple-system,sans-serif;display:flex;height:100vh}
+  #canvas{flex:1;display:flex;align-items:center;justify-content:center}
+  #canvas img{max-width:90%;box-shadow:0 4px 24px #000;image-rendering:pixelated}
+  #panel{width:230px;background:#252525;border-left:1px solid #333;padding:12px}
+  h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#888;margin:0 0 10px}
+  .layer{background:#2e2e2e;border:1px solid #3a3a3a;border-radius:4px;padding:8px;margin-bottom:6px}
+  .layer .n{font-weight:600}
+  .layer .m{color:#999;font-size:11px;margin-top:2px}
+</style></head><body>
+<div id=canvas><img id=img src=/api/render.png></div>
+<div id=panel><h2>Layers</h2><div id=layers>loading...</div></div>
+<script>
+async function refresh(){
+  const r = await fetch('/api/layers');
+  const d = await r.json();
+  document.getElementById('layers').innerHTML =
+    d.layers.slice().reverse().map(l =>
+      `<div class=layer><div class=n>\${l.name}</div>
+       <div class=m>\${l.blend} - \${Math.round(l.opacity*100)}%\${l.visible?'':' - hidden'}</div></div>`
+    ).join('') || '<div class=m>No layers</div>';
+  document.getElementById('img').src = '/api/render.png?t=' + Date.now();
+}
+refresh();
+</script></body></html>"""
+}
+
+// Content type for the render endpoint. Split out so a test can assert it
+// without a socket: an image served as text/plain renders as garbage in the
+// webview even when the bytes are perfect.
+pub fn render_content_type() -> string { return "image/png" }
+
+// Where the live composite is written before being served. One fixed path, so
+// concurrent requests overwrite rather than accumulate.
+pub fn render_path() -> string { return "/tmp/wyncanvas_live.png" }
+
+// Canvas size for the demo document.
+pub fn canvas_w() -> int { return 256 }
+pub fn canvas_h() -> int { return 256 }
+
+pub fn handle(req: string) -> int {
+    if web.is(req, "GET", "/") == 1 {
+        web.html(req, 200, page())
+        return 1
+    }
+    if web.is(req, "GET", "/api/layers") == 1 {
+        web.json(req, 200, layers_json())
+        return 1
+    }
+    if web.is(req, "GET", "/api/render.png") == 1 {
+        var path = render_path()
+        var ok = render.compose_to_png(canvas_w(), canvas_h(), path)
+        if ok == 1 {
+            // C writes the bytes: the runtime's respond() would truncate at the
+            // first NUL. See the header comment.
+            var sent = wynimg::http_send_file(web.fd(req), path,
+                                              render_content_type())
+            if sent == 0 { web.text(req, 500, "send failed") }
+        } else {
+            web.text(req, 500, "render failed")
+        }
+        return 1
+    }
+    if web.is(req, "POST", "/api/undo") == 1 {
+        history.undo()
+        web.json(req, 200, "{\"ok\":true}")
+        return 1
+    }
+    web.not_found(req)
+    return 0
+}
+
+// One connection, start to finish. Public so the ACCEPT LOOP CAN LIVE IN THE
+// ENTRY FILE and `spawn` this - see the note on `serve` below for why it must.
+//
+// The read is a separate step from the accept on purpose: inside a coroutine it
+// parks cooperatively (wyn_runtime.h:3368), so one slow client costs its own
+// coroutine a timeout rather than stalling everybody behind it in accept().
+pub fn serve_conn(conn: int) -> int {
+    var req = web.read_request(conn)
+    if req.len() > 0 { handle(req) }
+    // Every response path here advertises Connection: close, so the fd is ours
+    // to release. Without this the process leaks one fd per request until it
+    // hits the per-process limit (wyn_runtime.h:3430).
+    Http.close_client(conn)
+    return 0
+}
+
+// Accept one connection, blocking. Returns the client fd, or <= 0.
+pub fn accept_one(s: int) -> int {
+    return web.accept(s)
+}
+
+pub fn listen(port: int) -> int {
+    var s = web.listen(port)
+    println("wyncanvas server on http://localhost:" + port.to_string())
+    return s
+}
+
+// Single-connection-at-a-time accept loop.
+//
+// WHY THIS IS NOT THE ONE THE APP USES, and why there is no `spawn` in this
+// file: `spawn` INSIDE AN IMPORTED MODULE DOES NOT COMPILE in v1.20.0. The
+// wrapper collector (PASS 1, codegen_program.c:344-351) walks only the entry
+// program's statements, never the imported modules' ASTs, so no
+// `__spawn_wrapper_*` is emitted for a spawn found in a module body; and the
+// spawn call site names the wrapper from the bare source token
+// (codegen_stmt.c:2312) while the module's function is emitted module-prefixed
+// (`server_serve_conn`), so the two names could not match even if it were.
+// Result: "use of undeclared identifier '__spawn_wrapper_serve_conn_1'".
+// Minimal repro and analysis in WYN_FINDINGS.md.
+//
+// The workaround is in src/app.wyn: the accept loop lives in the ENTRY file,
+// where PASS 1 does see it, and spawns `server.serve_conn` per connection. That
+// is where the real concurrency is.
+//
+// This function is the sequential fallback - correct, and used by the tests,
+// but it handles one connection at a time.
+pub fn serve(port: int) -> int {
+    var s = listen(port)
+    while true {
+        var conn = accept_one(s)
+        if conn > 0 { serve_conn(conn) }
+    }
+    return 0
+}

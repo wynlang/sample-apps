@@ -1,0 +1,142 @@
+// layer - layer records held as parallel arrays.
+//
+// Parallel arrays rather than an array of structs: returning a struct across
+// a module boundary is a known Wyn miscompile, so every accessor here returns
+// a primitive or an opaque ptr.
+//
+// Adjustment layers store PARAMETERS, never baked pixels. That is what makes
+// the editor non-destructive, and retrofitting it later would mean rewriting
+// the whole render path.
+//
+// HANDLE COLUMNS ARE SPELLED `int`, NOT `ptr` -- v1.20.0 codegen constraint.
+// `ptr` in a module `pub fn` signature emits the undefined C type `layer_ptr`
+// (WYN_FINDINGS.md, "Defect 3"), so `add`/`buffer`/`mask`/`set_mask` take and
+// return `int`. Both are 64-bit and the value is passed straight through to an
+// `extern fn`, so nothing is lost -- and that is asserted, not assumed, by
+// "a real buffer handle survives the store round-trip" in tests/test_layer.wyn.
+// A 32-bit truncation of that column segfaults the suite, which is the check.
+//
+// CALL CONVENTION: every function here is a `pub fn`, so importers call them
+// QUALIFIED (`layer.count()`). See the note in src/pixel.wyn.
+// This file is also symlinked at the project root as ./layer.wyn, because
+// `import layer` from tests/ does not search src/. See WYN_FINDINGS.md.
+
+var l_names = [""]
+var l_bufs = [0]
+var l_kinds = [0]
+var l_opacity = [1.0]
+var l_blend = [0]
+var l_visible = [1]
+var l_masks = [0]
+var l_amount = [0.0]
+var l_count = 0
+
+pub fn KIND_RASTER() -> int { return 0 }
+pub fn KIND_ADJUST_BRIGHTNESS() -> int { return 1 }
+
+pub fn store_new() -> int {
+    l_count = 0
+    return 0
+}
+
+pub fn count() -> int { return l_count }
+
+fn valid(id: int) -> bool {
+    return id >= 0 and id < l_count
+}
+
+// Appends a layer and returns its id. `buf` is a wynimg handle for raster
+// layers, or 0 for adjustment layers (which have no pixels of their own).
+pub fn add(name: string, buf: int, kind: int) -> int {
+    var id = l_count
+    if id < l_names.len() {
+        l_names[id] = name
+        l_bufs[id] = buf
+        l_kinds[id] = kind
+        l_opacity[id] = 1.0
+        l_blend[id] = 0
+        l_visible[id] = 1
+        l_masks[id] = 0
+        l_amount[id] = 0.0
+    } else {
+        l_names.push(name)
+        l_bufs.push(buf)
+        l_kinds.push(kind)
+        l_opacity.push(1.0)
+        l_blend.push(0)
+        l_visible.push(1)
+        l_masks.push(0)
+        l_amount.push(0.0)
+    }
+    l_count = l_count + 1
+    return id
+}
+
+pub fn name(id: int) -> string {
+    if valid(id) == false { return "" }
+    return l_names[id]
+}
+
+pub fn buffer(id: int) -> int {
+    if valid(id) == false { return 0 }
+    return l_bufs[id]
+}
+
+pub fn kind(id: int) -> int {
+    if valid(id) == false { return 0 }
+    return l_kinds[id]
+}
+
+pub fn opacity(id: int) -> float {
+    if valid(id) == false { return 1.0 }
+    return l_opacity[id]
+}
+
+pub fn set_opacity(id: int, v: float) {
+    if valid(id) == false { return }
+    var c = v
+    if c < 0.0 { c = 0.0 }
+    if c > 1.0 { c = 1.0 }
+    l_opacity[id] = c
+}
+
+pub fn blend_mode(id: int) -> int {
+    if valid(id) == false { return 0 }
+    return l_blend[id]
+}
+
+pub fn set_blend_mode(id: int, m: int) {
+    if valid(id) == false { return }
+    if m < 0 or m >= 27 { return }
+    l_blend[id] = m
+}
+
+pub fn visible(id: int) -> bool {
+    if valid(id) == false { return false }
+    return l_visible[id] == 1
+}
+
+pub fn set_visible(id: int, v: bool) {
+    if valid(id) == false { return }
+    if v { l_visible[id] = 1 } else { l_visible[id] = 0 }
+}
+
+pub fn mask(id: int) -> int {
+    if valid(id) == false { return 0 }
+    return l_masks[id]
+}
+
+pub fn set_mask(id: int, m: int) {
+    if valid(id) == false { return }
+    l_masks[id] = m
+}
+
+pub fn adjust_amount(id: int) -> float {
+    if valid(id) == false { return 0.0 }
+    return l_amount[id]
+}
+
+pub fn set_adjust_amount(id: int, v: float) {
+    if valid(id) == false { return }
+    l_amount[id] = v
+}

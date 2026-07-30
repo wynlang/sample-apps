@@ -1,0 +1,202 @@
+// pixel - safe Wyn surface over the wynimg C shim.
+//
+// Pixel data NEVER crosses into Wyn in bulk: Wyn arrays are 16-byte tagged
+// unions, so a 12MP RGBA image would cost ~768MB and could not be handed to
+// libpng. Wyn holds opaque buffer handles; C owns the memory.
+//
+// HANDLES ARE SPELLED `int`, NOT `ptr` -- v1.20.0 codegen constraint, widened
+// in Task 7. The C side is unchanged: every handle is still a `void*`, and Wyn
+// `int` is `long long`, so the value passes through untouched. Three separate
+// defects force the `int` spelling, and they compound:
+//
+//   1. `ptr` in a module `pub fn` signature emits the undefined C type
+//      `<module>_ptr` (Defect 3), so `src/layer.wyn` already had to spell its
+//      handle columns `int`.
+//   2. `-> ptr` on a module `pub fn` additionally fails the checker with
+//      "Return type mismatch. Expected int, got void*", so `render.compose`
+//      cannot return `ptr` either.
+//   3. Consequently `render.compose` returns `int`. If the externs here still
+//      returned `ptr`, the two spellings of the SAME extern would collide in
+//      one compilation unit -- verified: importing a `-> ptr` module and a
+//      `-> int` module together fails with that same "Expected int, got void*".
+//
+// So the whole project uses ONE spelling. Handle fidelity is asserted, not
+// assumed: "a handle survives the int spelling" in tests/test_render.wyn reads
+// a real buffer's width and pixels back through an `int`-typed round trip, and
+// a deliberate 32-bit truncation of that path segfaults. See WYN_FINDINGS.md.
+//
+// FFI type mapping is load-bearing: Wyn float <-> C double,
+// Wyn int <-> C long long.
+//
+// CALL CONVENTION -- v1.20.0 compiler constraint, see WYN_FINDINGS.md
+// ("extern fn in an imported module"). Two rules, both forced by codegen:
+//
+//   1. `extern fn` declarations are emitted UNPREFIXED into every importing
+//      module's generated C, so importers must call them BARE:
+//
+//          import pixel
+//          var b = wynimg_new(64, 32)      // correct
+//          var b = pixel.wynimg_new(64,32) // miscompiles -> pixel_wynimg_new
+//
+//   2. `pub fn` helpers here ARE prefixed, so they must be called QUALIFIED
+//      (`pixel.approx(...)`). A `pub fn` in this module cannot call an
+//      `extern fn` at all -- codegen double-prefixes the callee to
+//      `pixel_pixel_wynimg_*`. Every helper below is therefore pure Wyn.
+//
+// This file is also symlinked at the project root as ./pixel.wyn, because
+// `import pixel` from tests/ does not search src/. See WYN_FINDINGS.md.
+
+// HANDLES, NOT POINTERS. wynimg_new returns a generation-tagged handle into a
+// slot table in C, not an address. Wyn cannot be stopped from holding a stale
+// handle -- `wynimg_free(p)` has no way to null the caller's copy, and
+// src/layer.wyn stores buffer/mask handles in parallel arrays that outlive
+// their buffers -- so freeing bumps the slot's generation and every later use
+// of the old handle resolves to NULL inside C and takes the null path.
+//
+// Consequence: a use-after-free is a silent no-op rather than corruption.
+// `wynimg_alive(h)` reports whether a handle is still valid.
+extern fn wynimg_new(w: int, h: int) -> int;
+extern fn wynimg_free(p: int);
+extern fn wynimg_alive(p: int) -> int;
+extern fn wynimg_width(p: int) -> int;
+extern fn wynimg_height(p: int) -> int;
+extern fn wynimg_get(p: int, idx: int) -> float;
+extern fn wynimg_set(p: int, idx: int, v: float);
+extern fn wynimg_fill(p: int, r: float, g: float, b: float, a: float);
+
+// Float comparison helper. Wyn has no bare `assert_eq_float` builtin, so
+// every float assertion in the suite goes through this.
+pub fn approx(a: float, b: float, tol: float) -> bool {
+    var d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    return d < tol
+}
+
+// Flat index of channel `c` of pixel (x, y) in an interleaved RGBA buffer
+// `w` pixels wide. c: 0=R 1=G 2=B 3=A.
+pub fn px_index(w: int, x: int, y: int, c: int) -> int {
+    return (y * w + x) * 4 + c
+}
+
+// sRGB <-> linear-light transfer functions (IEC 61966-2-1).
+// Compositing MUST happen in linear light; sRGB values are perceptually
+// encoded and blending them directly produces visibly wrong midtones.
+
+fn clamp01(c: float) -> float {
+    if c < 0.0 { return 0.0 }
+    if c > 1.0 { return 1.0 }
+    return c
+}
+
+pub fn srgb_to_linear(c: float) -> float {
+    var v = clamp01(c)
+    if v <= 0.04045 {
+        return v / 12.92
+    }
+    return Math.pow((v + 0.055) / 1.055, 2.4)
+}
+
+pub fn linear_to_srgb(c: float) -> float {
+    var v = clamp01(c)
+    if v <= 0.0031308 {
+        return v * 12.92
+    }
+    return 1.055 * Math.pow(v, 1.0 / 2.4) - 0.055
+}
+
+// Blend modes. The integer order is the FFI contract with csrc/wynimg_blend.c.
+// Called BARE by importers (see the CALL CONVENTION note at the top).
+extern fn wynimg_blend_px(mode: int, cb: float, cs: float) -> float;
+
+pub fn blend_count() -> int { return 27 }
+
+pub fn blend_name(mode: int) -> string {
+    if mode == 0  { return "normal" }
+    if mode == 1  { return "multiply" }
+    if mode == 2  { return "screen" }
+    if mode == 3  { return "overlay" }
+    if mode == 4  { return "darken" }
+    if mode == 5  { return "lighten" }
+    if mode == 6  { return "color_dodge" }
+    if mode == 7  { return "color_burn" }
+    if mode == 8  { return "hard_light" }
+    if mode == 9  { return "soft_light" }
+    if mode == 10 { return "linear_dodge" }
+    if mode == 11 { return "linear_burn" }
+    if mode == 12 { return "linear_light" }
+    if mode == 13 { return "vivid_light" }
+    if mode == 14 { return "difference" }
+    if mode == 15 { return "exclusion" }
+    if mode == 16 { return "subtract" }
+    if mode == 17 { return "divide" }
+    if mode == 18 { return "pin_light" }
+    if mode == 19 { return "hard_mix" }
+    if mode == 20 { return "darker_color" }
+    if mode == 21 { return "lighter_color" }
+    if mode == 22 { return "hue" }
+    if mode == 23 { return "saturation" }
+    if mode == 24 { return "color" }
+    if mode == 25 { return "luminosity" }
+    if mode == 26 { return "dissolve" }
+    return "normal"
+}
+
+// PNG I/O. Bulk pixel data never enters Wyn - C reads and writes the file
+// directly and Wyn passes only the path. All libpng longjmp error handling is
+// contained in csrc/wynimg_codec.c and never crosses this boundary: a missing,
+// truncated or non-PNG file yields a null handle (width 0) and an unwritable
+// path yields 0.
+// Called BARE by importers (see the CALL CONVENTION note at the top).
+extern fn wynimg_load_png(path: string) -> int;
+extern fn wynimg_save_png(p: int, path: string) -> int;
+
+// Loads a PNG as a MASK: its R channel becomes LINEAR coverage, with no sRGB
+// decode and no premultiply. Use this for masks, never wynimg_load_png.
+//
+// Coverage is not a colour, so it must not go through the transfer function.
+// wynimg_composite reads the mask's R channel as linear coverage, so a mask
+// loaded as imagery arrives already sRGB-decoded: a 50% grey mask (byte 128)
+// gave 0.216 coverage instead of 0.502, painting 22% where 50% was intended.
+// Called BARE by importers (see the CALL CONVENTION note at the top).
+extern fn wynimg_load_mask_png(path: string) -> int;
+
+// Compositor kernels (Task 7). `wynimg_composite` blends `src` over `dst` in
+// place; the mask's R channel is coverage and is multiplied into alpha along
+// with `opacity`. `wynimg_brightness` adjusts a buffer in linear light.
+// Called BARE by importers (see the CALL CONVENTION note at the top).
+extern fn wynimg_composite(dst: int, src: int, mask: int, mode: int, opacity: float) -> int;
+extern fn wynimg_brightness(buf: int, amount: float) -> int;
+
+// Golden-image comparison (Task 8). Returns the largest absolute per-channel
+// difference, or an impossible 2.0 when the buffers cannot be compared (null,
+// or differing dimensions) so a size change can never silently pass.
+// Called BARE by importers (see the CALL CONVENTION note at the top).
+extern fn wynimg_max_diff(a: int, b: int) -> float;
+
+// Binary-safe HTTP file response (Task 10). Writes a full 200 response with
+// the bytes of `path` to an already-accepted socket fd. Returns 1 / 0.
+//
+// This exists because the Wyn runtime cannot serve binary at all: `File.read`
+// opens with mode "r" and NUL-terminates (wyn_runtime.h:2735) and
+// `Http_respond` sizes the body with `strlen` (wyn_runtime.h:3095). A 21-byte
+// fixture with one interior NUL was measured arriving as 12 bytes. Every PNG
+// has NULs in its IHDR, so the plan's `web.file(...)` cannot be built on the
+// runtime's primitives -- and `web.file` does not exist in the web package
+// either (its only file helper, `serve_static`, is File.read-based and has the
+// same truncation bug).
+//
+// Keeping the send in C also matches the project rule that bulk pixels never
+// enter Wyn: the Wyn side passes an fd and a path.
+// Called BARE by importers (see the CALL CONVENTION note at the top).
+extern fn wynimg_http_send_file(fd: int, path: string, content_type: string) -> int;
+
+// Test seam for the send path. Wyn's own File.open returns an index into a
+// FILE* table (wyn_runtime.h:2982), not a descriptor, so without these a test
+// has nothing to hand wynimg_http_send_file, and the truncation bug it fixes is
+// invisible to any assertion that routes through a Wyn string (which is exactly
+// where the bug lives). Not used by src/server.wyn.
+// Called BARE by importers (see the CALL CONVENTION note at the top).
+extern fn wynimg_open_wr(path: string) -> int;
+extern fn wynimg_close_fd(fd: int) -> int;
+extern fn wynimg_file_size(path: string) -> int;
+extern fn wynimg_file_byte(path: string, off: int) -> int;

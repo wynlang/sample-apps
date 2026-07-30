@@ -1,0 +1,168 @@
+import pixel
+import layer
+
+// Call convention (v1.20.0 codegen constraint, see WYN_FINDINGS.md):
+//   extern fns   -> called BARE          (wynimg_new)
+//   pub fn Wyn   -> called QUALIFIED     (pixel.approx, layer.count)
+
+test "a new store is empty" {
+    layer.store_new()
+    assert_eq(layer.count(), 0)
+}
+
+test "adding layers returns sequential ids" {
+    layer.store_new()
+    var b1 = wynimg_new(8, 8)
+    var b2 = wynimg_new(8, 8)
+    var id1 = layer.add("background", b1, layer.KIND_RASTER())
+    var id2 = layer.add("top", b2, layer.KIND_RASTER())
+    assert_eq(id1, 0)
+    assert_eq(id2, 1)
+    assert_eq(layer.count(), 2)
+    assert_eq(layer.name(0), "background")
+    assert_eq(layer.name(1), "top")
+}
+
+test "layers default to opaque, normal, visible" {
+    layer.store_new()
+    var b = wynimg_new(8, 8)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+    assert_true(pixel.approx(layer.opacity(id), 1.0, 0.00001))
+    assert_eq(layer.blend_mode(id), 0)
+    assert_true(layer.visible(id))
+}
+
+test "layer properties are mutable" {
+    layer.store_new()
+    var b = wynimg_new(8, 8)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+    layer.set_opacity(id, 0.5)
+    layer.set_blend_mode(id, 1)
+    layer.set_visible(id, false)
+    assert_true(pixel.approx(layer.opacity(id), 0.5, 0.00001))
+    assert_eq(layer.blend_mode(id), 1)
+    assert_false(layer.visible(id))
+}
+
+test "opacity is clamped to 0..1" {
+    layer.store_new()
+    var b = wynimg_new(8, 8)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+    layer.set_opacity(id, 1.8)
+    assert_true(pixel.approx(layer.opacity(id), 1.0, 0.00001))
+    layer.set_opacity(id, 0.0 - 0.4)
+    assert_true(pixel.approx(layer.opacity(id), 0.0, 0.00001))
+}
+
+test "adjustment layers carry an amount, not pixels" {
+    layer.store_new()
+    var id = layer.add("brighten", 0, layer.KIND_ADJUST_BRIGHTNESS())
+    layer.set_adjust_amount(id, 0.25)
+    assert_eq(layer.kind(id), layer.KIND_ADJUST_BRIGHTNESS())
+    assert_true(pixel.approx(layer.adjust_amount(id), 0.25, 0.00001))
+}
+
+test "querying an out-of-range id is safe" {
+    layer.store_new()
+    assert_eq(layer.name(99), "")
+    assert_eq(layer.blend_mode(99), 0)
+    assert_false(layer.visible(99))
+}
+
+// The store's handle columns are declared `int`, not `ptr`, because a `ptr` in
+// a module `pub fn` signature miscompiles to `layer_ptr` (WYN_FINDINGS.md,
+// Defect 3). Both are 64-bit, so this is a spelling change -- but that must be
+// PROVEN, not assumed: a truncated handle would corrupt every later task.
+test "a real buffer handle survives the store round-trip" {
+    layer.store_new()
+    var b = wynimg_new(12, 9)
+    wynimg_fill(b, 0.25, 0.5, 0.75, 1.0)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+
+    // Read the handle back out of the int-typed column and hand it to C.
+    var back = layer.buffer(id)
+    assert_eq(wynimg_width(back), 12)
+    assert_eq(wynimg_height(back), 9)
+    assert_true(pixel.approx(wynimg_get(back, 0), 0.25, 0.00001))
+    assert_true(pixel.approx(wynimg_get(back, 2), 0.75, 0.00001))
+    wynimg_free(b)
+}
+
+test "a mask handle survives the store round-trip" {
+    layer.store_new()
+    var b = wynimg_new(4, 4)
+    var m = wynimg_new(4, 4)
+    wynimg_fill(m, 0.5, 0.0, 0.0, 1.0)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+    assert_eq(layer.mask(id), 0)
+
+    layer.set_mask(id, m)
+    var back = layer.mask(id)
+    assert_eq(wynimg_width(back), 4)
+    assert_true(pixel.approx(wynimg_get(back, 0), 0.5, 0.00001))
+    wynimg_free(b)
+    wynimg_free(m)
+}
+
+test "store_new resets ids and clears stale properties" {
+    layer.store_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("first", b, layer.KIND_RASTER())
+    layer.set_opacity(id, 0.1)
+    layer.set_blend_mode(id, 7)
+    layer.set_visible(id, false)
+    layer.set_adjust_amount(id, 0.9)
+
+    // Reusing a slot must not inherit the previous layer's settings.
+    layer.store_new()
+    assert_eq(layer.count(), 0)
+    var id2 = layer.add("second", b, layer.KIND_RASTER())
+    assert_eq(id2, 0)
+    assert_eq(layer.name(id2), "second")
+    assert_true(pixel.approx(layer.opacity(id2), 1.0, 0.00001))
+    assert_eq(layer.blend_mode(id2), 0)
+    assert_true(layer.visible(id2))
+    assert_true(pixel.approx(layer.adjust_amount(id2), 0.0, 0.00001))
+    wynimg_free(b)
+}
+
+test "set_blend_mode rejects out-of-range modes" {
+    layer.store_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+    layer.set_blend_mode(id, 3)
+    layer.set_blend_mode(id, 27)
+    assert_eq(layer.blend_mode(id), 3)
+    layer.set_blend_mode(id, 0 - 1)
+    assert_eq(layer.blend_mode(id), 3)
+    wynimg_free(b)
+}
+
+test "the store grows past its initial capacity" {
+    layer.store_new()
+    var b = wynimg_new(2, 2)
+    var i = 0
+    while i < 40 {
+        var id = layer.add("l" + i.to_string(), b, layer.KIND_RASTER())
+        assert_eq(id, i)
+        i = i + 1
+    }
+    assert_eq(layer.count(), 40)
+    assert_eq(layer.name(0), "l0")
+    assert_eq(layer.name(39), "l39")
+    assert_eq(wynimg_width(layer.buffer(39)), 2)
+    wynimg_free(b)
+}
+
+test "mutating an out-of-range id is a safe no-op" {
+    layer.store_new()
+    layer.set_opacity(99, 0.5)
+    layer.set_blend_mode(99, 4)
+    layer.set_visible(99, true)
+    layer.set_mask(99, 0)
+    layer.set_adjust_amount(99, 0.5)
+    assert_eq(layer.count(), 0)
+    assert_eq(layer.buffer(99), 0)
+    assert_eq(layer.mask(99), 0)
+    assert_true(pixel.approx(layer.adjust_amount(99), 0.0, 0.00001))
+}

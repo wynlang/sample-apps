@@ -1,0 +1,24 @@
+import pixel
+
+// The `aws` package's DESIGN NOTE reports that structs defined in one module
+// miscompile when returned to another. Every interface in this project is
+// primitive- or handle-based precisely to avoid that. This test documents the
+// actual behaviour on v1.20.0 so the constraint is evidence, not folklore.
+//
+// Call convention note (see src/pixel.wyn header and WYN_FINDINGS.md):
+// `extern fn`s reach here UNPREFIXED, so they are called bare; `pub fn`s are
+// module-prefixed, so they are called qualified.
+
+test "handles cross module boundaries safely" {
+    var b = wynimg_new(8, 8)
+    wynimg_fill(b, 0.5, 0.6, 0.7, 1.0)
+    // ptr returned from `pixel` and used here in the test module.
+    assert_eq(wynimg_width(b), 8)
+    assert_true(pixel.approx(wynimg_get(b, 0), 0.5, 0.00001))
+    wynimg_free(b)
+}
+
+test "floats cross module boundaries safely" {
+    // The FFI double<->float mapping plus a module boundary in one path.
+    assert_true(pixel.approx(pixel.srgb_to_linear(1.0), 1.0, 0.00001))
+}

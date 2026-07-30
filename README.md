@@ -59,6 +59,28 @@ Real-world programs written in Wyn. Every app compiles and runs.
 | **pong** | Classic Pong game |
 | **notepad** | Text editor with input widget |
 
+### 🖼 wyncanvas/ (1 app, requires a C toolchain)
+The largest program here, and the only one with its own test suite. A layered
+image editor: float32 linear premultiplied imaging core, 27 blend modes, masks,
+adjustment layers, PNG I/O, and undo/redo. Wyn for all logic, a thin C shim for
+per-pixel work.
+
+| Part | What |
+|------|------|
+| `src/pixel.wyn` | buffers, colour space, sRGB transfer |
+| `src/layer.wyn` | layer stack, masks, adjustment layers |
+| `src/render.wyn` | compositor, 27 blend modes |
+| `src/history.wyn` | undo/redo as command records |
+| `src/cli.wyn` | headless CLI |
+| `csrc/` | C shim (`libwynimg`) for the hot pixel loops |
+| `tests/` | 12 files, 149 tests, incl. a golden-image test |
+
+```bash
+cd wyncanvas
+./csrc/build.sh                                    # build the C shim first
+WYN_ROOT=/path/to/wyn /path/to/wyn/wyn test        # 12 files, 149 tests
+```
+
 ## Running
 
 ```bash

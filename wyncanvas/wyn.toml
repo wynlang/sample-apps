@@ -1,0 +1,10 @@
+[project]
+name = "wyncanvas"
+version = "0.1.0"
+
+[ffi]
+libs = "wynimg, png, z"
+lib_dirs = "libwynimg, /opt/homebrew/opt/libpng/lib"
+
+[dependencies]
+web = "https://github.com/wynlang/web"

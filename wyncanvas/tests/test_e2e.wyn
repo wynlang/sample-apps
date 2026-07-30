@@ -1,0 +1,273 @@
+import pixel
+import layer
+import history
+import render
+
+// The cycle-1 deliverable, exercised end to end: real files in, layered
+// composite out, verified numerically.
+//
+// Call convention (v1.20.0, see WYN_FINDINGS.md):
+//   extern fns -> BARE (wynimg_new), pub fn -> QUALIFIED (pixel.approx).
+
+fn make_fixture(path: string, r: float, g: float, b: float) -> int {
+    var buf = wynimg_new(32, 32)
+    wynimg_fill(buf, r, g, b, 1.0)
+    var ok = wynimg_save_png(buf, path)
+    wynimg_free(buf)
+    return ok
+}
+
+test "two loaded PNGs composite and save correctly" {
+    assert_eq(make_fixture("/tmp/wyn_e2e_a.png", 0.8, 0.2, 0.2), 1)
+    assert_eq(make_fixture("/tmp/wyn_e2e_b.png", 0.2, 0.2, 0.8), 1)
+
+    layer.store_new()
+    history.history_new()
+
+    var a = wynimg_load_png("/tmp/wyn_e2e_a.png")
+    var b = wynimg_load_png("/tmp/wyn_e2e_b.png")
+    assert_eq(wynimg_width(a), 32)
+    assert_eq(wynimg_width(b), 32)
+
+    layer.add("base", a, layer.KIND_RASTER())
+    var top = layer.add("over", b, layer.KIND_RASTER())
+    layer.set_opacity(top, 0.5)
+
+    var out = render.compose(32, 32)
+    // Normal blend at 50%: 0.5*0.2 + 0.5*0.8 = 0.5 red, blue likewise.
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.5, 0.01))
+    assert_true(pixel.approx(wynimg_get(out, 2), 0.5, 0.01))
+    assert_true(pixel.approx(wynimg_get(out, 3), 1.0, 0.01))
+
+    assert_eq(wynimg_save_png(out, "/tmp/wyn_e2e_out.png"), 1)
+    var back = wynimg_load_png("/tmp/wyn_e2e_out.png")
+    assert_eq(wynimg_width(back), 32)
+
+    wynimg_free(out)
+    wynimg_free(back)
+    wynimg_free(a)
+    wynimg_free(b)
+}
+
+// NOTE: the plan titled this "a mask, blend mode and adjustment layer combine",
+// but its body adds no mask at all. The title is left corrected rather than the
+// body extended, because a real masked case is covered separately below ("a mask
+// confines the blend..."), where the mask's effect is checked on BOTH sides of
+// the edge - which is the only way a mask test can fail for the right reason.
+test "a blend mode and adjustment layer combine" {
+    assert_eq(make_fixture("/tmp/wyn_e2e_c.png", 0.5, 0.5, 0.5), 1)
+
+    layer.store_new()
+    history.history_new()
+
+    var base = wynimg_load_png("/tmp/wyn_e2e_c.png")
+    var mul = wynimg_new(32, 32)
+    wynimg_fill(mul, 0.5, 0.5, 0.5, 1.0)
+
+    layer.add("base", base, layer.KIND_RASTER())
+    var m = layer.add("multiply", mul, layer.KIND_RASTER())
+    layer.set_blend_mode(m, 1)
+    var adj = layer.add("brighten", 0, layer.KIND_ADJUST_BRIGHTNESS())
+    layer.set_adjust_amount(adj, 0.1)
+
+    var out = render.compose(32, 32)
+    // 0.5 * 0.5 = 0.25, then +0.1 = 0.35
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.35, 0.01))
+
+    wynimg_free(out)
+    wynimg_free(base)
+    wynimg_free(mul)
+}
+
+test "undo reverts a composite change" {
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(8, 8)
+    wynimg_fill(b, 1.0, 1.0, 1.0, 1.0)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+
+    layer.set_opacity(id, 0.25)
+    history.record_opacity(id, 1.0, 0.25)
+    var dim = render.compose(8, 8)
+    assert_true(pixel.approx(wynimg_get(dim, 0), 0.25, 0.01))
+    wynimg_free(dim)
+
+    history.undo()
+    var full = render.compose(8, 8)
+    assert_true(pixel.approx(wynimg_get(full, 0), 1.0, 0.01))
+    wynimg_free(full)
+    wynimg_free(b)
+}
+
+// ---------------------------------------------------------------------------
+// Added beyond the plan's three. Those three assert one pixel each (index 0),
+// which cannot distinguish a correct composite from one that is right in the
+// top-left corner and wrong everywhere else, and none of them checks that the
+// saved file's CONTENT survives the round trip -- only that it reloads at the
+// right width.
+// ---------------------------------------------------------------------------
+
+// The plan's first test asserts pixel 0 only. A stride or premultiply error is
+// invisible there. Check the whole surface, and check the saved file's pixels
+// rather than just its dimensions.
+test "the composite is uniform across every pixel and survives the file round trip" {
+    assert_eq(make_fixture("/tmp/wyn_e2e_a.png", 0.8, 0.2, 0.2), 1)
+    assert_eq(make_fixture("/tmp/wyn_e2e_b.png", 0.2, 0.2, 0.8), 1)
+
+    layer.store_new()
+    history.history_new()
+    var a = wynimg_load_png("/tmp/wyn_e2e_a.png")
+    var b = wynimg_load_png("/tmp/wyn_e2e_b.png")
+    layer.add("base", a, layer.KIND_RASTER())
+    var top = layer.add("over", b, layer.KIND_RASTER())
+    layer.set_opacity(top, 0.5)
+    var out = render.compose(32, 32)
+
+    // Every one of the 1024 pixels, not just the first.
+    var i = 0
+    while i < 32 * 32 {
+        assert_true(pixel.approx(wynimg_get(out, i * 4 + 0), 0.5, 0.01))
+        assert_true(pixel.approx(wynimg_get(out, i * 4 + 1), 0.2, 0.01))
+        assert_true(pixel.approx(wynimg_get(out, i * 4 + 2), 0.5, 0.01))
+        assert_true(pixel.approx(wynimg_get(out, i * 4 + 3), 1.0, 0.01))
+        i = i + 1
+    }
+
+    // The round trip must preserve the VALUES, not merely the size. max_diff
+    // returns an impossible 2.0 on a dimension mismatch, so this also catches a
+    // resize. Tolerance is 8-bit quantization, as in the golden test.
+    assert_eq(wynimg_save_png(out, "/tmp/wyn_e2e_out.png"), 1)
+    var back = wynimg_load_png("/tmp/wyn_e2e_out.png")
+    assert_eq(wynimg_height(back), 32)
+    assert_true(wynimg_max_diff(out, back) < 0.006)
+
+    wynimg_free(out)
+    wynimg_free(back)
+    wynimg_free(a)
+    wynimg_free(b)
+}
+
+// The mask case the plan's title promised. Asserting both sides matters: a mask
+// that is ignored entirely, or inverted, changes only one of these two numbers.
+test "a mask confines the blend to the region it covers" {
+    assert_eq(make_fixture("/tmp/wyn_e2e_m.png", 0.5, 0.5, 0.5), 1)
+
+    layer.store_new()
+    history.history_new()
+    var base = wynimg_load_png("/tmp/wyn_e2e_m.png")
+    var mul = wynimg_new(32, 32)
+    wynimg_fill(mul, 0.5, 0.5, 0.5, 1.0)
+
+    // Mask covers the left half only; coverage lives in the R channel.
+    var msk = wynimg_new(32, 32)
+    var y = 0
+    while y < 32 {
+        var x = 0
+        while x < 32 {
+            var v = 0.0
+            if x < 16 { v = 1.0 }
+            wynimg_set(msk, pixel.px_index(32, x, y, 0), v)
+            wynimg_set(msk, pixel.px_index(32, x, y, 3), 1.0)
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    layer.add("base", base, layer.KIND_RASTER())
+    var m = layer.add("multiply", mul, layer.KIND_RASTER())
+    layer.set_blend_mode(m, 1)
+    layer.set_mask(m, msk)
+
+    var out = render.compose(32, 32)
+    // Masked (left): 0.5 * 0.5 = 0.25. Unmasked (right): base untouched, 0.5.
+    assert_true(pixel.approx(wynimg_get(out, pixel.px_index(32, 5, 5, 0)),
+                             0.25, 0.01))
+    assert_true(pixel.approx(wynimg_get(out, pixel.px_index(32, 25, 5, 0)),
+                             0.5, 0.01))
+    // Hard edge exactly at x=16, not 15 or 17.
+    assert_true(pixel.approx(wynimg_get(out, pixel.px_index(32, 15, 5, 0)),
+                             0.25, 0.01))
+    assert_true(pixel.approx(wynimg_get(out, pixel.px_index(32, 16, 5, 0)),
+                             0.5, 0.01))
+
+    wynimg_free(out)
+    wynimg_free(base)
+    wynimg_free(mul)
+    wynimg_free(msk)
+}
+
+// A hidden layer must contribute nothing. This is the visibility toggle the UI
+// panel exposes, and it is not covered anywhere else end to end.
+test "hiding a layer removes it from the composite" {
+    layer.store_new()
+    history.history_new()
+    var base = wynimg_new(8, 8)
+    var over = wynimg_new(8, 8)
+    wynimg_fill(base, 1.0, 0.0, 0.0, 1.0)
+    wynimg_fill(over, 0.0, 0.0, 1.0, 1.0)
+    layer.add("base", base, layer.KIND_RASTER())
+    var t = layer.add("over", over, layer.KIND_RASTER())
+
+    // Visible: the opaque top layer wins.
+    var covered = render.compose(8, 8)
+    assert_true(pixel.approx(wynimg_get(covered, 2), 1.0, 0.01))
+    assert_true(pixel.approx(wynimg_get(covered, 0), 0.0, 0.01))
+    wynimg_free(covered)
+
+    // Hidden: the base shows through, unchanged.
+    layer.set_visible(t, false)
+    var shown = render.compose(8, 8)
+    assert_true(pixel.approx(wynimg_get(shown, 0), 1.0, 0.01))
+    assert_true(pixel.approx(wynimg_get(shown, 2), 0.0, 0.01))
+    wynimg_free(shown)
+
+    wynimg_free(base)
+    wynimg_free(over)
+}
+
+// Redo, the other half of the history contract. The plan's undo test leaves the
+// stack in an undone state and never replays it.
+test "redo replays an undone opacity change" {
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(8, 8)
+    wynimg_fill(b, 1.0, 1.0, 1.0, 1.0)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+
+    layer.set_opacity(id, 0.25)
+    history.record_opacity(id, 1.0, 0.25)
+    assert_true(history.can_undo())
+
+    history.undo()
+    var full = render.compose(8, 8)
+    assert_true(pixel.approx(wynimg_get(full, 0), 1.0, 0.01))
+    wynimg_free(full)
+    assert_true(history.can_redo())
+
+    history.redo()
+    var dim = render.compose(8, 8)
+    assert_true(pixel.approx(wynimg_get(dim, 0), 0.25, 0.01))
+    wynimg_free(dim)
+    wynimg_free(b)
+}
+
+// The failure the CLI's error path depends on. A missing or non-PNG file must
+// yield a null handle (width 0), never a crash and never a bogus image -- the
+// CLI's "cannot read" branch is only reachable if this holds.
+test "loading a missing or malformed file fails cleanly" {
+    var missing = wynimg_load_png("/tmp/wyn_e2e_definitely_absent.png")
+    assert_eq(wynimg_width(missing), 0)
+    assert_eq(wynimg_height(missing), 0)
+
+    // A real file that is not a PNG.
+    var junk = "/tmp/wyn_e2e_not_a_png.png"
+    assert_eq(File.write(junk, "this is definitely not a PNG"), 1)
+    var bad = wynimg_load_png(junk)
+    assert_eq(wynimg_width(bad), 0)
+
+    // And an unwritable destination reports failure rather than pretending.
+    var b = wynimg_new(4, 4)
+    wynimg_fill(b, 0.5, 0.5, 0.5, 1.0)
+    assert_eq(wynimg_save_png(b, "/tmp/wyn_e2e_no_such_dir/x.png"), 0)
+    wynimg_free(b)
+}

@@ -1,0 +1,63 @@
+// render - composites the layer stack into a single output buffer.
+//
+// This is the only module that knows about both the layer tree and the pixel
+// API. Layers are walked bottom-up; each raster layer is blended over the
+// accumulator, and each adjustment layer transforms everything composited
+// beneath it so far - which is what makes adjustments non-destructive.
+//
+// CALL CONVENTION -- v1.20.0 codegen constraint, see WYN_FINDINGS.md.
+// This module is the first `pub fn` in the project that must call an
+// `extern fn`, and the plan's literal spelling does not compile. Three
+// spellings were tried; only the third works:
+//
+//   wynimg_composite(...)        -> emits `render_render_wynimg_composite`
+//                                   (Defect 2: two prefixers both fire)
+//   render.wynimg_composite(...) -> emits `render_wynimg_composite` (Defect 1)
+//   wynimg::composite(...)       -> emits `wynimg_composite`        CORRECT
+//
+// The `::` form works because `A::b` lowers to `A_b` on a path that runs
+// BEFORE the module prefixer, so it reconstructs the real C symbol name. It is
+// not a hack in the sense of being fragile-if-wrong: a typo (`wynimg::nwe`) or
+// a wrong arity is a hard C compile error, verified, never a silent miscall.
+//
+// The declarations come from `pixel` via the import; re-declaring them here
+// would be redundant (though harmless, if signatures match exactly).
+//
+// Handles are `int`, not `ptr` -- see the long note in src/pixel.wyn.
+// This file is also symlinked at the project root as ./render.wyn, because
+// `import render` from tests/ does not search src/. See WYN_FINDINGS.md.
+
+import pixel
+import layer
+
+pub fn compose(w: int, h: int) -> int {
+    var out = wynimg::new(w, h)
+    if out == 0 { return 0 }
+
+    var i = 0
+    while i < layer.count() {
+        if layer.visible(i) {
+            var k = layer.kind(i)
+            if k == layer.KIND_ADJUST_BRIGHTNESS() {
+                wynimg::brightness(out, layer.adjust_amount(i))
+            } else {
+                var buf = layer.buffer(i)
+                if buf != 0 {
+                    wynimg::composite(out, buf, layer.mask(i),
+                                      layer.blend_mode(i), layer.opacity(i))
+                }
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// Composites and writes the result to `path`. Returns 1 on success.
+pub fn compose_to_png(w: int, h: int, path: string) -> int {
+    var out = compose(w, h)
+    if out == 0 { return 0 }
+    var ok = wynimg::save_png(out, path)
+    wynimg::free(out)
+    return ok
+}

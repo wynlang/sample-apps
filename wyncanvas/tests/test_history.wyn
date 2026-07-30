@@ -1,0 +1,399 @@
+import pixel
+import layer
+import history
+
+// Call convention (v1.20.0 codegen constraint, see WYN_FINDINGS.md):
+//   extern fns   -> called BARE          (wynimg_new)
+//   pub fn Wyn   -> called QUALIFIED     (layer.set_opacity, history.undo)
+
+test "a new history has nothing to undo" {
+    history.history_new()
+    assert_false(history.can_undo())
+    assert_false(history.can_redo())
+    assert_eq(history.depth(), 0)
+}
+
+test "undo restores a previous opacity" {
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+
+    layer.set_opacity(id, 0.4)
+    history.record_opacity(id, 1.0, 0.4)
+    assert_true(history.can_undo())
+
+    history.undo()
+    assert_true(pixel.approx(layer.opacity(id), 1.0, 0.00001))
+    wynimg_free(b)
+}
+
+test "redo reapplies an undone change" {
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+
+    layer.set_opacity(id, 0.4)
+    history.record_opacity(id, 1.0, 0.4)
+    history.undo()
+    assert_true(history.can_redo())
+
+    history.redo()
+    assert_true(pixel.approx(layer.opacity(id), 0.4, 0.00001))
+    wynimg_free(b)
+}
+
+test "undo and redo work across several steps" {
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+
+    layer.set_opacity(id, 0.8)
+    history.record_opacity(id, 1.0, 0.8)
+    layer.set_opacity(id, 0.6)
+    history.record_opacity(id, 0.8, 0.6)
+    layer.set_opacity(id, 0.2)
+    history.record_opacity(id, 0.6, 0.2)
+    assert_eq(history.depth(), 3)
+
+    history.undo()
+    assert_true(pixel.approx(layer.opacity(id), 0.6, 0.00001))
+    history.undo()
+    assert_true(pixel.approx(layer.opacity(id), 0.8, 0.00001))
+    history.undo()
+    assert_true(pixel.approx(layer.opacity(id), 1.0, 0.00001))
+    assert_false(history.can_undo())
+
+    history.redo()
+    assert_true(pixel.approx(layer.opacity(id), 0.8, 0.00001))
+    wynimg_free(b)
+}
+
+test "a new action after undo discards the redo branch" {
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+
+    layer.set_opacity(id, 0.8)
+    history.record_opacity(id, 1.0, 0.8)
+    history.undo()
+    assert_true(history.can_redo())
+
+    layer.set_opacity(id, 0.3)
+    history.record_opacity(id, 1.0, 0.3)
+    assert_false(history.can_redo())
+    assert_eq(history.depth(), 1)
+    wynimg_free(b)
+}
+
+test "blend mode and visibility changes undo too" {
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+
+    layer.set_blend_mode(id, 5)
+    history.record_blend(id, 0, 5)
+    history.undo()
+    assert_eq(layer.blend_mode(id), 0)
+
+    layer.set_visible(id, false)
+    history.record_visible(id, true, false)
+    history.undo()
+    assert_true(layer.visible(id))
+    wynimg_free(b)
+}
+
+test "undo with an empty history is a safe no-op" {
+    history.history_new()
+    assert_eq(history.undo(), 0)
+    assert_eq(history.redo(), 0)
+}
+
+test "entries carry human-readable labels" {
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+    layer.set_opacity(id, 0.5)
+    history.record_opacity(id, 1.0, 0.5)
+    assert_eq(history.label(0), "opacity")
+    wynimg_free(b)
+}
+
+// --- The load-bearing design decision: command records, never snapshots. ---
+
+test "history records parameters, not pixels" {
+    // The decisive property. If history snapshotted the canvas, undo would
+    // also revert pixel edits made after the recorded action. It must not:
+    // an entry is (op, target, old, new) and touches nothing else.
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(8, 8)
+    wynimg_fill(b, 0.1, 0.1, 0.1, 1.0)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+
+    layer.set_opacity(id, 0.4)
+    history.record_opacity(id, 1.0, 0.4)
+
+    // Paint AFTER the recorded action.
+    wynimg_set(b, 0, 0.9)
+    history.undo()
+
+    // Opacity reverted; the pixel edit survived untouched.
+    assert_true(pixel.approx(layer.opacity(id), 1.0, 0.00001))
+    assert_true(pixel.approx(wynimg_get(b, 0), 0.9, 0.00001))
+    wynimg_free(b)
+}
+
+test "recording is O(1) in canvas size" {
+    // A snapshot-based history scales with pixel count; command records do not.
+    // The threshold below is calibrated against a MEASURED snapshot cost, not
+    // guessed: a C driver copying 40 snapshots of this exact 2048x2048 RGBA
+    // float32 buffer (64MB each) takes 584 ms and 2560 MB of RAM. Recording 40
+    // command records copies 6 scalars each and takes ~0 ms.
+    //
+    // 150 ms sits far above the real cost and far below the snapshot cost, so
+    // this test genuinely discriminates between the two designs. (An earlier
+    // draft used a 512x512 canvas, where 40 real snapshots cost only 37.7 ms
+    // and would have passed a 100 ms threshold -- a vacuous test.)
+    layer.store_new()
+    history.history_new()
+    var big = wynimg_new(2048, 2048)
+    var id = layer.add("big", big, layer.KIND_RASTER())
+
+    var t0 = Time.now_millis()
+    var i = 0
+    while i < 40 {
+        history.record_opacity(id, 1.0, 0.5)
+        i = i + 1
+    }
+    var elapsed = Time.now_millis() - t0
+    assert_eq(history.depth(), 40)
+    assert_true(elapsed < 150)
+    wynimg_free(big)
+}
+
+// --- Cursor edge cases the plan's tests do not reach. ---
+
+test "redo past the newest entry is a safe no-op" {
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+
+    layer.set_opacity(id, 0.4)
+    history.record_opacity(id, 1.0, 0.4)
+    assert_false(history.can_redo())
+    assert_eq(history.redo(), 0)
+    // The extra redo must not have moved the cursor or reapplied anything.
+    assert_true(pixel.approx(layer.opacity(id), 0.4, 0.00001))
+    history.undo()
+    assert_true(pixel.approx(layer.opacity(id), 1.0, 0.00001))
+    wynimg_free(b)
+}
+
+test "undo past the oldest entry is a safe no-op" {
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+
+    layer.set_opacity(id, 0.4)
+    history.record_opacity(id, 1.0, 0.4)
+    history.undo()
+    assert_eq(history.undo(), 0)
+    assert_eq(history.undo(), 0)
+    // Still fully redoable -- the failed undos did not corrupt the cursor.
+    assert_true(history.can_redo())
+    history.redo()
+    assert_true(pixel.approx(layer.opacity(id), 0.4, 0.00001))
+    wynimg_free(b)
+}
+
+test "depth counts entries, not remaining undos" {
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+
+    layer.set_opacity(id, 0.8)
+    history.record_opacity(id, 1.0, 0.8)
+    layer.set_opacity(id, 0.6)
+    history.record_opacity(id, 0.8, 0.6)
+    assert_eq(history.depth(), 2)
+
+    // Undo moves the cursor; the entries are still there to redo.
+    history.undo()
+    assert_eq(history.depth(), 2)
+    history.undo()
+    assert_eq(history.depth(), 2)
+    assert_false(history.can_undo())
+    assert_true(history.can_redo())
+    wynimg_free(b)
+}
+
+test "repeated undo/redo cycling is stable" {
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+
+    layer.set_opacity(id, 0.25)
+    history.record_opacity(id, 1.0, 0.25)
+
+    var i = 0
+    while i < 20 {
+        history.undo()
+        assert_true(pixel.approx(layer.opacity(id), 1.0, 0.00001))
+        history.redo()
+        assert_true(pixel.approx(layer.opacity(id), 0.25, 0.00001))
+        i = i + 1
+    }
+    assert_eq(history.depth(), 1)
+    wynimg_free(b)
+}
+
+test "the redo branch is truncated, not merely hidden" {
+    // Reusing a slot after truncation must overwrite every column. A stale
+    // old_f left in a reused slot would make a later undo restore the wrong
+    // value -- the classic parallel-array bug.
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+
+    layer.set_opacity(id, 0.8)
+    history.record_opacity(id, 1.0, 0.8)
+    layer.set_opacity(id, 0.6)
+    history.record_opacity(id, 0.8, 0.6)
+    layer.set_opacity(id, 0.4)
+    history.record_opacity(id, 0.6, 0.4)
+    assert_eq(history.depth(), 3)
+
+    history.undo()
+    history.undo()
+    assert_eq(history.depth(), 3)
+
+    // New action at cursor 1 discards entries 1 and 2 and reuses slot 1.
+    layer.set_blend_mode(id, 2)
+    history.record_blend(id, 0, 2)
+    assert_eq(history.depth(), 2)
+    assert_false(history.can_redo())
+    assert_eq(history.label(1), "blend mode")
+
+    // Undoing the reused slot must apply the BLEND old value, not the
+    // opacity values that previously occupied it.
+    history.undo()
+    assert_eq(layer.blend_mode(id), 0)
+    assert_true(pixel.approx(layer.opacity(id), 0.8, 0.00001))
+    wynimg_free(b)
+}
+
+test "entries target their own layer independently" {
+    layer.store_new()
+    history.history_new()
+    var b1 = wynimg_new(4, 4)
+    var b2 = wynimg_new(4, 4)
+    var a = layer.add("a", b1, layer.KIND_RASTER())
+    var c = layer.add("c", b2, layer.KIND_RASTER())
+
+    layer.set_opacity(a, 0.5)
+    history.record_opacity(a, 1.0, 0.5)
+    layer.set_opacity(c, 0.2)
+    history.record_opacity(c, 1.0, 0.2)
+
+    // Undo the newest entry only: layer c reverts, layer a does not.
+    history.undo()
+    assert_true(pixel.approx(layer.opacity(c), 1.0, 0.00001))
+    assert_true(pixel.approx(layer.opacity(a), 0.5, 0.00001))
+    wynimg_free(b1)
+    wynimg_free(b2)
+}
+
+test "labels cover every op and reject out-of-range indices" {
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+
+    history.record_opacity(id, 1.0, 0.5)
+    history.record_blend(id, 0, 3)
+    history.record_visible(id, true, false)
+    assert_eq(history.label(0), "opacity")
+    assert_eq(history.label(1), "blend mode")
+    assert_eq(history.label(2), "visibility")
+    assert_eq(history.label(3), "")
+    assert_eq(history.label(0 - 1), "")
+    wynimg_free(b)
+}
+
+test "history_new clears a populated history" {
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+    history.record_opacity(id, 1.0, 0.5)
+    history.record_opacity(id, 0.5, 0.2)
+    history.undo()
+    assert_eq(history.depth(), 2)
+
+    history.history_new()
+    assert_eq(history.depth(), 0)
+    assert_false(history.can_undo())
+    assert_false(history.can_redo())
+    assert_eq(history.label(0), "")
+    wynimg_free(b)
+}
+
+test "history grows past its initial capacity" {
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+
+    // Walk opacity down in 50 steps, recording each.
+    var i = 0
+    while i < 50 {
+        history.record_opacity(id, 1.0 - i / 100.0, 1.0 - (i + 1) / 100.0)
+        i = i + 1
+    }
+    assert_eq(history.depth(), 50)
+    layer.set_opacity(id, 0.5)
+
+    // Undo all the way back; the oldest entry's old value is 1.0.
+    var j = 0
+    while j < 50 {
+        history.undo()
+        j = j + 1
+    }
+    assert_false(history.can_undo())
+    assert_true(pixel.approx(layer.opacity(id), 1.0, 0.00001))
+    wynimg_free(b)
+}
+
+test "visibility undo round-trips in both directions" {
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+
+    layer.set_visible(id, false)
+    history.record_visible(id, true, false)
+    history.undo()
+    assert_true(layer.visible(id))
+    history.redo()
+    assert_false(layer.visible(id))
+
+    // And the other direction: hidden -> shown.
+    layer.set_visible(id, true)
+    history.record_visible(id, false, true)
+    history.undo()
+    assert_false(layer.visible(id))
+    history.redo()
+    assert_true(layer.visible(id))
+    wynimg_free(b)
+}

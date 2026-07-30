@@ -1,0 +1,680 @@
+import pixel
+import layer
+import render
+
+// Call convention (v1.20.0 codegen constraint, see WYN_FINDINGS.md):
+//   extern fns   -> called BARE          (wynimg_new)
+//   pub fn Wyn   -> called QUALIFIED     (pixel.approx, render.compose)
+
+test "a single opaque layer composites unchanged" {
+    layer.store_new()
+    var b = wynimg_new(4, 4)
+    wynimg_fill(b, 0.5, 0.25, 0.75, 1.0)
+    layer.add("only", b, layer.KIND_RASTER())
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.5, 0.001))
+    assert_true(pixel.approx(wynimg_get(out, 1), 0.25, 0.001))
+    assert_true(pixel.approx(wynimg_get(out, 2), 0.75, 0.001))
+    assert_true(pixel.approx(wynimg_get(out, 3), 1.0, 0.001))
+    wynimg_free(out)
+    wynimg_free(b)
+}
+
+test "an opaque top layer hides the one below" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var top = wynimg_new(4, 4)
+    wynimg_fill(bot, 1.0, 0.0, 0.0, 1.0)
+    wynimg_fill(top, 0.0, 0.0, 1.0, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    layer.add("top", top, layer.KIND_RASTER())
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.0, 0.001))
+    assert_true(pixel.approx(wynimg_get(out, 2), 1.0, 0.001))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(top)
+}
+
+test "50 percent opacity blends halfway" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var top = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.0, 0.0, 0.0, 1.0)
+    wynimg_fill(top, 1.0, 1.0, 1.0, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var t = layer.add("top", top, layer.KIND_RASTER())
+    layer.set_opacity(t, 0.5)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.5, 0.002))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(top)
+}
+
+test "an invisible layer is skipped" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var top = wynimg_new(4, 4)
+    wynimg_fill(bot, 1.0, 0.0, 0.0, 1.0)
+    wynimg_fill(top, 0.0, 1.0, 0.0, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var t = layer.add("top", top, layer.KIND_RASTER())
+    layer.set_visible(t, false)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 1.0, 0.001))
+    assert_true(pixel.approx(wynimg_get(out, 1), 0.0, 0.001))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(top)
+}
+
+test "multiply blend darkens the stack" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var top = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.5, 0.5, 0.5, 1.0)
+    wynimg_fill(top, 0.5, 0.5, 0.5, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var t = layer.add("top", top, layer.KIND_RASTER())
+    layer.set_blend_mode(t, 1)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.25, 0.002))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(top)
+}
+
+test "a black mask hides the layer entirely" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var top = wynimg_new(4, 4)
+    var msk = wynimg_new(4, 4)
+    wynimg_fill(bot, 1.0, 0.0, 0.0, 1.0)
+    wynimg_fill(top, 0.0, 0.0, 1.0, 1.0)
+    wynimg_fill(msk, 0.0, 0.0, 0.0, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var t = layer.add("top", top, layer.KIND_RASTER())
+    layer.set_mask(t, msk)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 1.0, 0.001))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(top)
+    wynimg_free(msk)
+}
+
+test "a brightness adjustment layer affects layers below it" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.25, 0.25, 0.25, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var a = layer.add("brighten", 0, layer.KIND_ADJUST_BRIGHTNESS())
+    layer.set_adjust_amount(a, 0.25)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.5, 0.002))
+    wynimg_free(out)
+    wynimg_free(bot)
+}
+
+test "an empty layer stack composites to transparent" {
+    layer.store_new()
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 3), 0.0, 0.001))
+    wynimg_free(out)
+}
+
+// ---------------------------------------------------------------------------
+// The subtle compositing invariants. The eight tests above are the plan's, and
+// every one of them composites onto a FULLY OPAQUE backdrop with UNIT-alpha
+// sources -- the regime where premultiply and the transparent-backdrop guard
+// are both invisible. The kernel can be wrong in three specific ways that all
+// still pass those eight. Expected values below are hand-derived from the
+// formulas in the design spec and cross-checked against an independent
+// reference implementation of the same math.
+// ---------------------------------------------------------------------------
+
+// INVARIANT 1: where the backdrop is transparent there is nothing to blend
+// against, so source colour passes through UNBLENDED.
+//
+// This is the one the task brief calls out as "wrong in a way that looks
+// plausible". The first layer of every stack composites onto a fresh (fully
+// transparent) buffer, so if the guard is missing, the blend kernel runs
+// against an un-premultiplied backdrop of 0. For multiply that yields
+// 0 * cs = 0 -- the bottom layer of any multiply stack goes BLACK.
+test "a multiply layer over a transparent backdrop passes through unblended" {
+    layer.store_new()
+    var b = wynimg_new(4, 4)
+    wynimg_fill(b, 0.5, 0.25, 0.75, 1.0)
+    var t = layer.add("only", b, layer.KIND_RASTER())
+    layer.set_blend_mode(t, 1)
+
+    var out = render.compose(4, 4)
+    // Guard present -> source passes through: 0.5, 0.25, 0.75.
+    // Guard absent   -> multiply against dr=0 -> 0.0, 0.0, 0.0 (all black).
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.5, 0.001))
+    assert_true(pixel.approx(wynimg_get(out, 1), 0.25, 0.001))
+    assert_true(pixel.approx(wynimg_get(out, 2), 0.75, 0.001))
+    assert_true(pixel.approx(wynimg_get(out, 3), 1.0, 0.001))
+    wynimg_free(out)
+    wynimg_free(b)
+}
+
+// The same case with a PARTIALLY transparent backdrop, where the blend is
+// weighted rather than skipped. Backdrop premult (0.25,0.25,0.25,a=0.5) is
+// unpremult grey 0.5.
+//
+// W3C Compositing and Blending L1 sec.9:  Cr = (1 - ab) * Cs + ab * B(Cb, Cs)
+//   B(0.5, 0.5) multiply = 0.25
+//   Cr = (1 - 0.5) * 0.5 + 0.5 * 0.25 = 0.25 + 0.125 = 0.375
+//   oa = as + ab*(1 - as) = 1 + 0.5*0 = 1;  out premult = 0.375 * 1 = 0.375
+//
+// This expectation was previously 0.25 -- the value produced by binary-
+// switching the blend on `da > 0.0`, which applied the FULL blend at any
+// non-zero backdrop alpha instead of fading it in. 0.25 is B itself with the
+// (1-ab)*Cs term dropped entirely, i.e. it was read off the buggy
+// implementation rather than derived from the spec.
+test "multiply against a semi-transparent backdrop blends proportionally" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var top = wynimg_new(4, 4)
+    // Premultiplied: unpremultiplied grey 0.5 at alpha 0.5.
+    wynimg_fill(bot, 0.25, 0.25, 0.25, 0.5)
+    wynimg_fill(top, 0.5, 0.5, 0.5, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var t = layer.add("top", top, layer.KIND_RASTER())
+    layer.set_blend_mode(t, 1)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.375, 0.002))
+    assert_true(pixel.approx(wynimg_get(out, 3), 1.0, 0.002))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(top)
+}
+
+// INVARIANT 2: blend formulas are defined on UNPREMULTIPLIED colour, so both
+// sides are un-premultiplied before the kernel and re-premultiplied after.
+//
+// A half-transparent pure-red source is premultiplied (0.5, 0, 0, 0.5) --
+// un-premultiplied it is FULL red (1.0). Over an opaque black backdrop at
+// normal blend the result is red 0.5 (source-over of full red at alpha 0.5).
+// If the source were fed to the kernel still premultiplied, cs would be 0.5
+// instead of 1.0 and the answer would be 0.25 -- half as bright.
+test "a semi-transparent source is un-premultiplied before blending" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var top = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.0, 0.0, 0.0, 1.0)
+    wynimg_fill(top, 0.5, 0.0, 0.0, 0.5)   // premultiplied FULL red @ a=0.5
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    layer.add("top", top, layer.KIND_RASTER())
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.5, 0.002))
+    assert_true(pixel.approx(wynimg_get(out, 3), 1.0, 0.002))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(top)
+}
+
+// The source-over combine RE-PREMULTIPLIES the backdrop term: the retained
+// backdrop contribution is `dr * da * (1 - alpha)`, not `dr * (1 - alpha)`,
+// because `dr` was un-premultiplied for the blend and must be scaled back by
+// `da` on the way out.
+//
+// This only shows up when BOTH sides are partially transparent -- with an
+// opaque backdrop `da == 1` and the two spellings are identical, which is why
+// every test above misses it. Found by mutation testing: dropping `* da`
+// initially passed all 30 other tests.
+//
+// All three channels carry DISTINCT values, so the R, G and B combines are
+// checked independently -- mutating only the G term also has to fail.
+//
+// Backdrop unpremult (0.5, 0.25, 0.75) @ a=0.5 -> premult (0.25, 0.125, 0.375).
+// Source   unpremult (1.0, 0.8,  0.6 ) @ a=0.5 -> premult (0.5,  0.4,   0.3  ).
+//   alpha = 0.5 * 1.0 = 0.5, oa = 0.5 + 0.5*0.5 = 0.75
+//   correct         R = 1.0*0.5 + 0.5 *0.5*0.5 = 0.625
+//                   G = 0.8*0.5 + 0.25*0.5*0.5 = 0.4625
+//                   B = 0.6*0.5 + 0.75*0.5*0.5 = 0.4875
+//   missing * da    R = 0.75    G = 0.525      B = 0.675
+test "source-over re-premultiplies the retained backdrop, per channel" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var top = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.25, 0.125, 0.375, 0.5)  // unpremult (0.5,0.25,0.75)
+    wynimg_fill(top, 0.5,  0.4,   0.3,   0.5)  // unpremult (1.0,0.8, 0.6 )
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    layer.add("top", top, layer.KIND_RASTER())
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.625, 0.002))
+    assert_true(pixel.approx(wynimg_get(out, 1), 0.4625, 0.002))
+    assert_true(pixel.approx(wynimg_get(out, 2), 0.4875, 0.002))
+    assert_true(pixel.approx(wynimg_get(out, 3), 0.75, 0.002))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(top)
+}
+
+// INVARIANT 3: mask coverage comes from the mask's R CHANNEL, and is
+// multiplied into alpha ALONGSIDE layer opacity (not instead of it).
+
+// R=1 but G=B=A=0 proves coverage is read from R and not from the mask's
+// alpha. A kernel reading msk->px[o+3] would see 0 here and hide the layer.
+test "mask coverage is read from the R channel, not the mask alpha" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var top = wynimg_new(4, 4)
+    var msk = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.0, 0.0, 0.0, 1.0)
+    wynimg_fill(top, 1.0, 1.0, 1.0, 1.0)
+    wynimg_fill(msk, 1.0, 0.0, 0.0, 0.0)   // R=1, alpha=0
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var t = layer.add("top", top, layer.KIND_RASTER())
+    layer.set_mask(t, msk)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 1.0, 0.002))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(top)
+    wynimg_free(msk)
+}
+
+// A grey mask gives partial coverage - the plan only tests a fully black one,
+// which passes even if coverage were treated as a boolean.
+test "a grey mask gives proportional coverage" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var top = wynimg_new(4, 4)
+    var msk = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.0, 0.0, 0.0, 1.0)
+    wynimg_fill(top, 1.0, 1.0, 1.0, 1.0)
+    wynimg_fill(msk, 0.5, 0.5, 0.5, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var t = layer.add("top", top, layer.KIND_RASTER())
+    layer.set_mask(t, msk)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.5, 0.002))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(top)
+    wynimg_free(msk)
+}
+
+// Mask AND opacity must MULTIPLY: 0.5 coverage * 0.5 opacity = 0.25.
+// If one overwrote the other the answer would be 0.5.
+test "mask coverage and layer opacity multiply together" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var top = wynimg_new(4, 4)
+    var msk = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.0, 0.0, 0.0, 1.0)
+    wynimg_fill(top, 1.0, 1.0, 1.0, 1.0)
+    wynimg_fill(msk, 0.5, 0.5, 0.5, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var t = layer.add("top", top, layer.KIND_RASTER())
+    layer.set_mask(t, msk)
+    layer.set_opacity(t, 0.5)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.25, 0.002))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(top)
+    wynimg_free(msk)
+}
+
+// ---------------------------------------------------------------------------
+// Brightness adjustment: operates on UN-premultiplied colour and clamps.
+// ---------------------------------------------------------------------------
+
+// Premultiplied (0.25,0,0,0.5) is unpremultiplied red 0.5. +0.25 -> 0.75,
+// re-premultiplied -> 0.375. Adding the amount to the PREMULTIPLIED value
+// would give 0.5 instead, and would also brighten transparent regions.
+test "brightness adjusts un-premultiplied colour" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.25, 0.0, 0.0, 0.5)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var a = layer.add("brighten", 0, layer.KIND_ADJUST_BRIGHTNESS())
+    layer.set_adjust_amount(a, 0.25)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.375, 0.002))
+    assert_true(pixel.approx(wynimg_get(out, 3), 0.5, 0.002))
+    wynimg_free(out)
+    wynimg_free(bot)
+}
+
+// Clamping happens on the un-premultiplied value, BEFORE re-premultiplying:
+// 0.5 + 0.75 = 1.25 -> clamped to 1.0 -> premultiplied by 0.5 -> 0.5.
+// An unclamped kernel would emit 0.625, which is an invalid premultiplied
+// pixel (colour above alpha) and shows up as a bright halo after un-premult.
+test "brightness clamps before re-premultiplying" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.25, 0.0, 0.0, 0.5)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var a = layer.add("brighten", 0, layer.KIND_ADJUST_BRIGHTNESS())
+    layer.set_adjust_amount(a, 0.75)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.5, 0.002))
+    wynimg_free(out)
+    wynimg_free(bot)
+}
+
+test "a negative brightness amount darkens and clamps at zero" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.25, 0.25, 0.25, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var a = layer.add("dim", 0, layer.KIND_ADJUST_BRIGHTNESS())
+    layer.set_adjust_amount(a, 0.0 - 0.1)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.15, 0.002))
+    wynimg_free(out)
+
+    layer.set_adjust_amount(a, 0.0 - 0.9)
+    var out2 = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out2, 0), 0.0, 0.002))
+    assert_true(pixel.approx(wynimg_get(out2, 3), 1.0, 0.002))
+    wynimg_free(out2)
+    wynimg_free(bot)
+}
+
+// A fully transparent pixel has no colour to adjust; dividing by its alpha
+// would be a divide-by-zero. It must be left alone.
+test "brightness leaves fully transparent pixels alone" {
+    layer.store_new()
+    var a = layer.add("brighten", 0, layer.KIND_ADJUST_BRIGHTNESS())
+    layer.set_adjust_amount(a, 0.5)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.0, 0.001))
+    assert_true(pixel.approx(wynimg_get(out, 3), 0.0, 0.001))
+    wynimg_free(out)
+}
+
+// ---------------------------------------------------------------------------
+// Walk order and geometry.
+// ---------------------------------------------------------------------------
+
+// An adjustment layer transforms only what is composited BENEATH it. Both
+// orderings use the same three layers, so only the walk order distinguishes
+// them -- this is the test that fails if the walk is ever reordered or the
+// adjustment is hoisted to the end.
+//   adjust in the middle: (0.25+0.25)=0.5, then white@50% -> 0.75
+//   adjust applied last:  0.25 then white@50% =0.625, +0.25 -> 0.875
+test "an adjustment layer affects only the layers beneath it" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var top = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.25, 0.25, 0.25, 1.0)
+    wynimg_fill(top, 1.0, 1.0, 1.0, 1.0)
+
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var a = layer.add("brighten", 0, layer.KIND_ADJUST_BRIGHTNESS())
+    layer.set_adjust_amount(a, 0.25)
+    var t = layer.add("top", top, layer.KIND_RASTER())
+    layer.set_opacity(t, 0.5)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.75, 0.003))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(top)
+}
+
+// An invisible ADJUSTMENT layer must be skipped too. The plan only covers an
+// invisible raster layer, and the two take different branches of the walk.
+test "an invisible adjustment layer is skipped" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.25, 0.25, 0.25, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var a = layer.add("brighten", 0, layer.KIND_ADJUST_BRIGHTNESS())
+    layer.set_adjust_amount(a, 0.5)
+    layer.set_visible(a, false)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.25, 0.002))
+    wynimg_free(out)
+    wynimg_free(bot)
+}
+
+// Non-square, so a row-vs-column (w/h swap) mistake in the offset arithmetic
+// cannot cancel out. Composites a per-pixel gradient and checks three
+// specific addresses, including the last pixel.
+test "compositing is correct across a non-square buffer" {
+    layer.store_new()
+    var bot = wynimg_new(8, 3)
+    var y = 0
+    while y < 3 {
+        var x = 0
+        while x < 8 {
+            wynimg_set(bot, pixel.px_index(8, x, y, 0), x / 8.0)
+            wynimg_set(bot, pixel.px_index(8, x, y, 1), y / 4.0)
+            wynimg_set(bot, pixel.px_index(8, x, y, 3), 1.0)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    layer.add("grad", bot, layer.KIND_RASTER())
+
+    var out = render.compose(8, 3)
+    // (0,0) R=0 G=0 ; (5,1) R=0.625 G=0.25 ; (7,2) R=0.875 G=0.5
+    assert_true(pixel.approx(wynimg_get(out, pixel.px_index(8, 0, 0, 0)), 0.0, 0.002))
+    assert_true(pixel.approx(wynimg_get(out, pixel.px_index(8, 5, 1, 0)), 0.625, 0.002))
+    assert_true(pixel.approx(wynimg_get(out, pixel.px_index(8, 5, 1, 1)), 0.25, 0.002))
+    assert_true(pixel.approx(wynimg_get(out, pixel.px_index(8, 7, 2, 0)), 0.875, 0.002))
+    assert_true(pixel.approx(wynimg_get(out, pixel.px_index(8, 7, 2, 1)), 0.5, 0.002))
+    // The very last channel of the very last pixel must have been written.
+    assert_true(pixel.approx(wynimg_get(out, pixel.px_index(8, 7, 2, 3)), 1.0, 0.002))
+    wynimg_free(out)
+    wynimg_free(bot)
+}
+
+// ---------------------------------------------------------------------------
+// Failure modes: the kernel refuses mismatched work rather than reading
+// out of bounds.
+// ---------------------------------------------------------------------------
+
+// A layer whose buffer is a different size than the canvas must be REFUSED,
+// not partially composited -- otherwise the kernel walks off the end of the
+// smaller allocation. compose() must survive and leave the backdrop intact.
+test "a layer whose size differs from the canvas is refused, not read out of bounds" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var wrong = wynimg_new(2, 2)
+    wynimg_fill(bot, 1.0, 0.0, 0.0, 1.0)
+    wynimg_fill(wrong, 0.0, 0.0, 1.0, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    layer.add("wrong size", wrong, layer.KIND_RASTER())
+
+    var out = render.compose(4, 4)
+    // Backdrop unchanged: still red, no blue bled in.
+    assert_true(pixel.approx(wynimg_get(out, 0), 1.0, 0.001))
+    assert_true(pixel.approx(wynimg_get(out, 2), 0.0, 0.001))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(wrong)
+}
+
+test "a mask whose size differs from the canvas is refused" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var top = wynimg_new(4, 4)
+    var msk = wynimg_new(2, 2)
+    wynimg_fill(bot, 1.0, 0.0, 0.0, 1.0)
+    wynimg_fill(top, 0.0, 0.0, 1.0, 1.0)
+    wynimg_fill(msk, 1.0, 1.0, 1.0, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var t = layer.add("top", top, layer.KIND_RASTER())
+    layer.set_mask(t, msk)
+
+    var out = render.compose(4, 4)
+    // Whole composite refused, so the backdrop shows through.
+    assert_true(pixel.approx(wynimg_get(out, 0), 1.0, 0.001))
+    assert_true(pixel.approx(wynimg_get(out, 2), 0.0, 0.001))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(top)
+    wynimg_free(msk)
+}
+
+test "composite reports failure on a null or mismatched buffer" {
+    var a = wynimg_new(4, 4)
+    var b = wynimg_new(4, 4)
+    var small = wynimg_new(2, 2)
+    assert_eq(wynimg_composite(a, b, 0, 0, 1.0), 1)
+    assert_eq(wynimg_composite(a, small, 0, 0, 1.0), 0)
+    assert_eq(wynimg_composite(0, b, 0, 0, 1.0), 0)
+    assert_eq(wynimg_composite(a, 0, 0, 0, 1.0), 0)
+    assert_eq(wynimg_brightness(a, 0.1), 1)
+    assert_eq(wynimg_brightness(0, 0.1), 0)
+    wynimg_free(a)
+    wynimg_free(b)
+    wynimg_free(small)
+}
+
+// Opacity outside [0,1] is clamped by the kernel rather than producing
+// out-of-range premultiplied output. (layer.set_opacity clamps too, so this
+// goes at the C entry point directly.)
+test "composite clamps out-of-range opacity" {
+    var dst = wynimg_new(2, 2)
+    var src = wynimg_new(2, 2)
+    wynimg_fill(dst, 0.0, 0.0, 0.0, 1.0)
+    wynimg_fill(src, 1.0, 1.0, 1.0, 1.0)
+    assert_eq(wynimg_composite(dst, src, 0, 0, 5.0), 1)
+    assert_true(pixel.approx(wynimg_get(dst, 0), 1.0, 0.002))
+    assert_true(pixel.approx(wynimg_get(dst, 3), 1.0, 0.002))
+
+    wynimg_fill(dst, 0.0, 0.0, 0.0, 1.0)
+    assert_eq(wynimg_composite(dst, src, 0, 0, 0.0 - 3.0), 1)
+    assert_true(pixel.approx(wynimg_get(dst, 0), 0.0, 0.002))
+    wynimg_free(dst)
+    wynimg_free(src)
+}
+
+// compose() with a bad size must return 0 rather than a wild handle.
+test "compose rejects a non-positive canvas size" {
+    layer.store_new()
+    assert_eq(render.compose(0, 0), 0)
+    assert_eq(render.compose(0 - 4, 4), 0)
+}
+
+// ---------------------------------------------------------------------------
+// The `int`-spelled handle. src/pixel.wyn spells every buffer handle `int`
+// rather than `ptr` because of three compounding v1.20.0 codegen defects
+// (see the note there). That makes the type system unable to check it, so the
+// fidelity of the round trip is ASSERTED here instead. A 32-bit truncation
+// anywhere in this path segfaults rather than silently passing.
+// ---------------------------------------------------------------------------
+test "a handle survives the int spelling out of a module pub fn" {
+    layer.store_new()
+    var b = wynimg_new(37, 11)
+    wynimg_fill(b, 0.25, 0.5, 0.75, 1.0)
+    layer.add("l", b, layer.KIND_RASTER())
+
+    // render.compose returns the handle as `int`, straight back into C.
+    var out = render.compose(37, 11)
+    assert_true(out != 0)
+    assert_eq(wynimg_width(out), 37)
+    assert_eq(wynimg_height(out), 11)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.25, 0.002))
+    assert_true(pixel.approx(wynimg_get(out, 1), 0.5, 0.002))
+    assert_true(pixel.approx(wynimg_get(out, 2), 0.75, 0.002))
+    wynimg_free(out)
+    wynimg_free(b)
+}
+
+// compose_to_png goes handle -> C -> file, and frees the handle itself.
+test "compose_to_png writes the composited result to disk" {
+    layer.store_new()
+    var b = wynimg_new(16, 8)
+    wynimg_fill(b, 0.9, 0.2, 0.35, 1.0)
+    layer.add("l", b, layer.KIND_RASTER())
+
+    assert_eq(render.compose_to_png(16, 8, "/tmp/wyncanvas_render_c2p.png"), 1)
+
+    var back = wynimg_load_png("/tmp/wyncanvas_render_c2p.png")
+    assert_eq(wynimg_width(back), 16)
+    assert_eq(wynimg_height(back), 8)
+    // 8-bit round trip through sRGB encode/decode.
+    assert_true(pixel.approx(wynimg_get(back, 0), 0.9, 0.005))
+    assert_true(pixel.approx(wynimg_get(back, 1), 0.2, 0.005))
+    assert_true(pixel.approx(wynimg_get(back, 2), 0.35, 0.005))
+    wynimg_free(back)
+    wynimg_free(b)
+}
+
+test "compose_to_png reports failure on an unwritable path" {
+    layer.store_new()
+    var b = wynimg_new(4, 4)
+    layer.add("l", b, layer.KIND_RASTER())
+    assert_eq(render.compose_to_png(4, 4, "/nonexistent_dir_x7/out.png"), 0)
+    wynimg_free(b)
+}
+
+// Repeated composites must not leak or corrupt: 200 iterations of the full
+// walk, checking the answer is still right at the end.
+test "repeated compose does not leak or drift" {
+    layer.store_new()
+    var bot = wynimg_new(32, 32)
+    var top = wynimg_new(32, 32)
+    wynimg_fill(bot, 0.5, 0.5, 0.5, 1.0)
+    wynimg_fill(top, 0.5, 0.5, 0.5, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var t = layer.add("top", top, layer.KIND_RASTER())
+    layer.set_blend_mode(t, 1)
+
+    var i = 0
+    while i < 200 {
+        var out = render.compose(32, 32)
+        wynimg_free(out)
+        i = i + 1
+    }
+    var final = render.compose(32, 32)
+    assert_true(pixel.approx(wynimg_get(final, 0), 0.25, 0.002))
+    wynimg_free(final)
+    wynimg_free(bot)
+    wynimg_free(top)
+}
+
+// Mask coverage must be CLAMPED to [0,1]. Layer opacity was already clamped;
+// the mask was not, so a mask R channel above 1.0 wrote an alpha above 1.0 --
+// an invalid premultiplied buffer that silently corrupts colour on save.
+test "mask coverage above 1 is clamped, not trusted" {
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var top = wynimg_new(4, 4)
+    var msk = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.0, 0.0, 0.0, 0.0)
+    wynimg_fill(top, 0.25, 0.25, 0.25, 1.0)
+    wynimg_fill(msk, 4.0, 0.0, 0.0, 1.0)      // absurd coverage
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var t = layer.add("top", top, layer.KIND_RASTER())
+    layer.set_mask(t, msk)
+
+    var out = render.compose(4, 4)
+    // Alpha saturates at 1.0 and the colour stays grey 0.25 rather than being
+    // scaled to white by the 4x coverage.
+    assert_true(pixel.approx(wynimg_get(out, 3), 1.0, 0.001))
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.25, 0.001))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(top)
+    wynimg_free(msk)
+}

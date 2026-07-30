@@ -16,3 +16,14 @@ wyn_cc_err.txt
 **/tests/test_*
 !**/tests/test_*.wyn
 !**/tests/test_*.js
+
+# ---- wyncanvas ----
+# Build artifact of wyncanvas/csrc/build.sh - regenerate with ./csrc/build.sh
+wyncanvas/libwynimg/
+wyncanvas/build/
+wyncanvas/packages/
+wyncanvas/wyn.lock
+# Dogfooding findings live in the private internal-docs repo, never here:
+# they cite absolute local paths and unshipped compiler internals.
+WYN_FINDINGS.md
+docs/superpowers/plans/

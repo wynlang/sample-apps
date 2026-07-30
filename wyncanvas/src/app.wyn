@@ -1,0 +1,43 @@
+// app - launches the editor window.
+//
+// The server runs in a spawned coroutine; App.run() then blocks in
+// [NSApp run] on the main thread. Verified working: the server keeps
+// answering HTTP while the window is up.
+//
+// WHY THE ACCEPT LOOP IS HERE AND NOT IN src/server.wyn (plan deviation):
+// `spawn` inside an imported module does not compile in v1.20.0. The wrapper
+// collector (PASS 1, codegen_program.c:344-351) walks only the ENTRY program's
+// statements and never the imported modules' ASTs, so no `__spawn_wrapper_*` is
+// emitted for a spawn in a module body; and the call site names the wrapper from
+// the bare source token (codegen_stmt.c:2312) while a module function is emitted
+// module-prefixed, so the names could not match even if it were emitted. The
+// symptom is "use of undeclared identifier '__spawn_wrapper_serve_conn_1'".
+// Full analysis and minimal repro in WYN_FINDINGS.md.
+//
+// Putting the loop in this file - the entry file, which PASS 1 does scan - is
+// the workaround, and it costs nothing: `spawn server.serve_conn(conn)` from
+// here is verified to work, so per-connection concurrency is preserved.
+
+import server
+
+fn accept_loop(port: int) -> int {
+    var s = server.listen(port)
+    while true {
+        var conn = server.accept_one(s)
+        // One coroutine per connection. The request READ happens inside
+        // serve_conn, where it parks cooperatively, so a slow client cannot
+        // stall the accept loop (wyn_runtime.h:3313-3327).
+        if conn > 0 { spawn server.serve_conn(conn) }
+    }
+    return 0
+}
+
+fn main() -> int {
+    server.demo_scene()
+    spawn accept_loop(8420)
+
+    App.create("WynCanvas", 1000, 640)
+    App.url("http://localhost:8420/")
+    App.run()
+    return 0
+}

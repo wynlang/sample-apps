@@ -1,0 +1,97 @@
+// cli - headless composite, for scripting and CI.
+//
+//   wyn run src/cli.wyn -- bottom.png top.png out.png
+//
+// Layers composite in argument order (first = bottom).
+//
+// PLAN DEVIATION -- ARGV[0]. The plan's version indexes `args` from 0 and
+// treats args[0] as the first input file. `System.args()` on v1.20.0 INCLUDES
+// the program name at index 0, verified:
+//
+//   wyn run src/main.wyn -- alpha beta gamma
+//   argc=4  0: ./src/main.wyn.out  1: alpha  2: beta  3: gamma
+//
+// Left as written, the CLI would try to load its own executable as a PNG and
+// print "error: cannot read ./src/cli.wyn.out" for every invocation. Inputs
+// therefore start after the program name.
+//
+// AND A LEADING "--". `wyn run f.wyn -- a b c` normally strips the `--`, but on
+// the CACHED (no-recompile) path it does not: src/main.c:2938 forwards
+// argv[3..] verbatim without consulting the `user_args_start` index that the
+// two compiling paths use (main.c:3149, main.c:3456). So the same command
+// yields different argv depending on whether the binary was up to date --
+// reproducible by running any program twice. Skipping a leading "--" here is
+// correct under both behaviours; the compiler fix is recorded in
+// WYN_FINDINGS.md but not applied, because that checkout is mid-change on
+// another branch.
+
+import pixel
+import layer
+import history
+import render
+
+fn main() -> int {
+    var args = System.args()
+
+    // First real argument: after the program name, and after a "--" if the
+    // cached-path bug above leaked one through.
+    var first = 1
+    if args.len() > 1 {
+        if args[1] == "--" { first = 2 }
+    }
+
+    // A valid call needs at least one input and an output.
+    if args.len() - first < 2 {
+        println("usage: cli <layer.png> [more.png ...] <out.png>")
+        return 1
+    }
+
+    layer.store_new()
+    history.history_new()
+
+    var out_path = args[args.len() - 1]
+    var w = 0
+    var h = 0
+    var i = first
+    while i < args.len() - 1 {
+        var buf = wynimg_load_png(args[i])
+        // A missing, unreadable or non-PNG file yields a null handle, whose
+        // width reads back as 0. Reported, not crashed on.
+        if wynimg_width(buf) == 0 {
+            println("error: cannot read " + args[i])
+            return 1
+        }
+        if w == 0 {
+            w = wynimg_width(buf)
+            h = wynimg_height(buf)
+        } else {
+            // The compositor requires matching dimensions and silently skips
+            // any layer that mismatches, which would produce a partial
+            // composite that still exits 0. Fail loudly instead.
+            if wynimg_width(buf) != w {
+                println("error: " + args[i] + " is "
+                        + wynimg_width(buf).to_string() + "x"
+                        + wynimg_height(buf).to_string()
+                        + ", expected " + w.to_string() + "x" + h.to_string())
+                return 1
+            }
+            if wynimg_height(buf) != h {
+                println("error: " + args[i] + " is "
+                        + wynimg_width(buf).to_string() + "x"
+                        + wynimg_height(buf).to_string()
+                        + ", expected " + w.to_string() + "x" + h.to_string())
+                return 1
+            }
+        }
+        layer.add(args[i], buf, layer.KIND_RASTER())
+        i = i + 1
+    }
+
+    if render.compose_to_png(w, h, out_path) == 1 {
+        println("wrote " + out_path + " (" + w.to_string() + "x" + h.to_string()
+                + ", " + layer.count().to_string() + " layers)")
+        return 0
+    }
+    println("error: composite failed")
+    return 1
+}

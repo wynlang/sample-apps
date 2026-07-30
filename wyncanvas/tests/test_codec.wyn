@@ -1,0 +1,112 @@
+import pixel
+
+// Call convention (v1.20.0 codegen constraint, see WYN_FINDINGS.md):
+//   extern fns   -> called BARE          (wynimg_load_png)
+//   pub fn Wyn   -> called QUALIFIED     (pixel.approx)
+
+test "save then load round-trips pixel values" {
+    var b = wynimg_new(16, 16)
+    wynimg_fill(b, 0.9, 0.2, 0.35, 1.0)
+    var ok = wynimg_save_png(b, "/tmp/wyncanvas_rt.png")
+    assert_eq(ok, 1)
+    wynimg_free(b)
+
+    var b2 = wynimg_load_png("/tmp/wyncanvas_rt.png")
+    assert_eq(wynimg_width(b2), 16)
+    assert_eq(wynimg_height(b2), 16)
+    // 8-bit storage costs precision: 0.9 -> round(0.9*255)=230 -> 230/255
+    assert_true(pixel.approx(wynimg_get(b2, 0), 0.9, 0.005))
+    assert_true(pixel.approx(wynimg_get(b2, 1), 0.2, 0.005))
+    assert_true(pixel.approx(wynimg_get(b2, 2), 0.35, 0.005))
+    assert_true(pixel.approx(wynimg_get(b2, 3), 1.0, 0.005))
+    wynimg_free(b2)
+}
+
+test "loading a missing file returns null, not a crash" {
+    var b = wynimg_load_png("/tmp/definitely_does_not_exist_9f3a.png")
+    assert_eq(wynimg_width(b), 0)
+}
+
+test "loading a non-PNG file returns null, not a crash" {
+    File.write("/tmp/wyncanvas_garbage.png", "this is not a png at all")
+    var b = wynimg_load_png("/tmp/wyncanvas_garbage.png")
+    assert_eq(wynimg_width(b), 0)
+}
+
+test "saving to an unwritable path fails cleanly" {
+    var b = wynimg_new(4, 4)
+    var ok = wynimg_save_png(b, "/nonexistent_dir_x7/out.png")
+    assert_eq(ok, 0)
+    wynimg_free(b)
+}
+
+// A FAILED load must free the pixel buffer it had already allocated. `im` and
+// `row` are written after setjmp and read in the longjmp handler; without
+// `volatile` the -O2 build kept them in callee-saved registers that longjmp
+// restores to their setjmp-time values (NULL), so the handler freed nothing.
+// Measured against the shipped archive: 1049632 bytes leaked per failed load
+// of a 256x256 PNG, and 0 bytes at -O0 -- which is why it was invisible.
+test "repeated failed loads do not leak the pixel buffer" {
+    File.write("/tmp/wyncanvas_leak_notpng.png", "this is definitely not a png")
+    var i = 0
+    while i < 300 {
+        assert_eq(wynimg_load_png("/tmp/wyncanvas_leak_notpng.png"), 0)
+        i = i + 1
+    }
+    // Still functional afterwards.
+    var ok = wynimg_new(16, 16)
+    assert_eq(wynimg_width(ok), 16)
+    wynimg_free(ok)
+}
+
+// wynimg_save_png had the identical defect on its `row` buffer.
+test "repeated failed saves do not leak the row buffer" {
+    var b = wynimg_new(64, 64)
+    wynimg_fill(b, 0.5, 0.5, 0.5, 1.0)
+    var i = 0
+    while i < 300 {
+        assert_eq(wynimg_save_png(b, "/nonexistent_dir_x7/out.png"), 0)
+        i = i + 1
+    }
+    wynimg_free(b)
+}
+
+// Mask coverage is NOT a colour and must not go through the sRGB transfer
+// function. wynimg_composite reads the mask's R channel as LINEAR coverage,
+// so loading a mask with wynimg_load_png (which sRGB-decodes) meant a 50%
+// grey mask painted 21.6% coverage instead of 50%.
+//
+// Round-tripping linear 0.21404 through the colour save path writes byte 128
+// (l2s(0.21404) = 0.5), so byte 128 is what these read back.
+test "a mask PNG loads as linear coverage, not sRGB-decoded" {
+    var m = wynimg_new(4, 4)
+    wynimg_fill(m, 0.21404, 0.21404, 0.21404, 1.0)
+    assert_eq(wynimg_save_png(m, "/tmp/wyncanvas_maskfile.png"), 1)
+    wynimg_free(m)
+
+    var cov = wynimg_load_mask_png("/tmp/wyncanvas_maskfile.png")
+    assert_eq(wynimg_width(cov), 4)
+    // 128/255 = 0.501961 coverage, NOT s2l(128/255) = 0.215861.
+    assert_true(pixel.approx(wynimg_get(cov, 0), 0.501961, 0.005))
+    // A mask is opaque coverage: alpha forced to 1, nothing premultiplied.
+    assert_true(pixel.approx(wynimg_get(cov, 3), 1.0, 0.00001))
+    wynimg_free(cov)
+}
+
+// The colour path must be UNCHANGED by the mask loader's arrival.
+test "the colour loader still applies the sRGB decode" {
+    var m = wynimg_new(4, 4)
+    wynimg_fill(m, 0.21404, 0.21404, 0.21404, 1.0)
+    assert_eq(wynimg_save_png(m, "/tmp/wyncanvas_colfile.png"), 1)
+    wynimg_free(m)
+
+    var col = wynimg_load_png("/tmp/wyncanvas_colfile.png")
+    assert_true(pixel.approx(wynimg_get(col, 0), 0.21404, 0.005))
+    wynimg_free(col)
+}
+
+test "the mask loader fails cleanly on a bad file" {
+    assert_eq(wynimg_load_mask_png("/tmp/definitely_absent_mask_4b1.png"), 0)
+    File.write("/tmp/wyncanvas_maskgarbage.png", "not a png")
+    assert_eq(wynimg_load_mask_png("/tmp/wyncanvas_maskgarbage.png"), 0)
+}
