@@ -31,3 +31,6 @@ wyncanvas/wyn.lock
 # would not match `wyncanvas/docs/superpowers/`, which is where it actually was.
 **/WYN_FINDINGS.md
 **/docs/superpowers/
+# Python bytecode from the math-lib wrapper's generated module
+__pycache__/
+*.pyc

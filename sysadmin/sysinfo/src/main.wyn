@@ -66,10 +66,15 @@ fn main() {
     print("    Total:     ${mem_gb} GB")
     print("")
 
+    // `df -Ph` pads its columns, and split_at(" ", n) returns "" on any run of
+    // more than one space - so this printed "used /  total ()" with every field
+    // blank. words() collapses whitespace runs, which is what diskmon and
+    // procwatch already use for the same reason.
     var df = data[8].value
-    var size = df.split_at(" ", 1)
-    var used = df.split_at(" ", 2)
-    var cap = df.split_at(" ", 4)
+    var cols = df.words()
+    var size = cols[1]
+    var used = cols[2]
+    var cap = cols[4]
     print("  \x1b[1;33m● Disk\x1b[0m")
     print("    Root (/):  ${used} used / ${size} total (${cap})")
     print("")

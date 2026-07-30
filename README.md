@@ -51,7 +51,7 @@ Real-world programs written in Wyn. Every app compiles and runs.
 | **server** | Full web server with routing, SQLite, JSON API, arena GC |
 | **rest-api** | REST API server with SQLite + JSON |
 
-### 🎨 gui/ (4 apps, require SDL2)
+### 🎨 gui/ (4 apps, require SDL3)
 | App | Description |
 |-----|-------------|
 | **hello_gui** | Colored rectangles and text |
@@ -87,19 +87,19 @@ WYN_ROOT=/path/to/wyn /path/to/wyn/wyn test        # 12 files, 149 tests
 cd wyn
 
 # CLI and sysadmin tools
-./wyn run ../sample-apps/sysadmin/sysinfo/main.wyn
-./wyn run ../sample-apps/cli-tools/loc/main.wyn
+./wyn run ../sample-apps/sysadmin/sysinfo/src/main.wyn
+./wyn run ../sample-apps/cli-tools/loc/src/main.wyn
 
 # Interactive TUI apps
-./wyn run ../sample-apps/sysadmin/sysmon/main.wyn
-./wyn run ../sample-apps/cli-tools/twux/main.wyn
+./wyn run ../sample-apps/sysadmin/sysmon/src/main.wyn
+./wyn run ../sample-apps/cli-tools/twux/src/main.wyn
 
-# GUI apps (requires: brew install sdl2)
-./wyn run ../sample-apps/gui/pong/main.wyn
-./wyn run ../sample-apps/gui/dashboard/main.wyn
+# GUI apps (requires: brew install sdl3)
+./wyn run ../sample-apps/gui/pong/src/main.wyn
+./wyn run ../sample-apps/gui/dashboard/src/main.wyn
 
 # Web server
-./wyn run ../sample-apps/web/rest-api/main.wyn
+./wyn run ../sample-apps/web/rest-api/src/main.wyn
 ```
 
 ### python/

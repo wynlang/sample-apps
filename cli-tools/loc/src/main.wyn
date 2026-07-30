@@ -23,11 +23,11 @@ fn main() {
     print("=== Lines of Code Counter ===")
 
     var files = [
-        "../sample-apps/cli-tools/loc/src/main.wyn",
-        "../sample-apps/cli-tools/todo-finder/src/main.wyn",
-        "../sample-apps/cli-tools/word-counter/src/main.wyn",
-        "../sample-apps/cli-tools/config-reader/src/main.wyn",
-        "../sample-apps/cli-tools/md-toc/src/main.wyn"
+    "../sample-apps/cli-tools/loc/src/main.wyn",
+    "../sample-apps/cli-tools/todo-finder/src/main.wyn",
+    "../sample-apps/cli-tools/word-counter/src/main.wyn",
+    "../sample-apps/cli-tools/config-reader/src/main.wyn",
+    "../sample-apps/cli-tools/md-toc/src/main.wyn"
     ]
     var count = files.len()
 
