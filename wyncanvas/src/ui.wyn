@@ -1,0 +1,810 @@
+// ui - WynCanvas's editor window, natively, on SDL3.
+//
+// This replaces the webview-plus-localhost-HTTP UI in src/app.wyn. That design
+// existed for one reason: the webview has no JS->Wyn IPC, so the only channel
+// from a button to the imaging core was a socket. The cost was a whole HTTP
+// server, a JSON encoder, a binary-safe file sender written in C to work around
+// the runtime's inability to serve a PNG, and a document that could only reach
+// the screen by being encoded to PNG and re-decoded by a browser. None of that
+// is UI work.
+//
+// Here the same buttons call the same modules directly, and the document reaches
+// the screen as a texture upload. src/app.wyn is left untouched and still works.
+//
+//   ./csrc/build.sh                        # once, and repos/gui/csrc/build.sh
+//   WYN_ROOT=... wyn run src/ui.wyn
+//
+// THE VIEWPORT IS ONE UPLOAD AND ONE BLIT.
+//
+// Win_texture_update_f32 takes exactly the representation wynimg already holds -
+// interleaved float32 RGBA, LINEAR light, PREMULTIPLIED - and converts to display
+// encoding inside the backend. So the composite goes to the GPU with no
+// conversion and no copy on this side, and the bulk pixels still never enter Wyn:
+// csrc/wynimg_tex.c takes a texture handle and a buffer handle, two scalars, and
+// does the hand-off in C where wynimg_deref lives.
+//
+// The alternative that must be named to be dismissed: painting the document with
+// one Win_rect per pixel. A 1024x768 view is 786,432 calls per frame. That is not
+// a slow version of this, it is a non-working version.
+//
+// NOTHING HERE KNOWS HOW TO COMPOSITE, BLEND, LOAD OR SAVE.
+//
+// Every imaging operation is a call into the existing modules - render.compose,
+// render.compose_to_png, wynimg_load_png, layer.*, history.undo/redo. This file
+// is layout, paint and dispatch. If a blend mode is wrong, it is wrong in
+// csrc/, and no edit here could hide that.
+//
+// ---------------------------------------------------------------------------
+// WHY THE PAINT IS HAND-WRITTEN WHILE THE WIDGET MODEL IS NOT
+//
+// The `widgets` toolkit is reused for what is genuinely hard: the retained
+// widget list, hit-testing, and press/release dispatch (a click is only a click
+// if it is RELEASED over the control it began on). What is NOT used is
+// `Ui_draw`/`Ui_frame`, and that is a correctness requirement, not a preference.
+//
+// Ui_draw is a complete frame: it clears, paints the widgets, and presents. An
+// editor frame is viewport + layer list + widgets, so calling Ui_draw would
+// force either drawing the viewport BEFORE the clear that erases it, or AFTER
+// the present that ends the frame. The second appears to work - measured: a rect
+// drawn after Win_present is still in the next screenshot on this backend - but
+// it is relying on undefined behaviour. SDL's contract is that the backbuffer is
+// invalidated by SDL_RenderPresent; a double-buffered driver would show the
+// viewport flickering on alternate frames, and that is precisely the class of
+// bug that is invisible on the machine it was written on.
+//
+// So this file owns the frame: one Win_clear, all painting, one Win_present.
+// `Ui_events` still owns the event queue - it must, because it drains the queue
+// and a second reader would see nothing.
+//
+// ---------------------------------------------------------------------------
+// WHY HANDLERS SET FLAGS INSTEAD OF DOING THE WORK
+//
+// A Wyn closure cannot capture a mutable reference to surrounding state, so a
+// handler receives only the widget id that was clicked and can reach only
+// module-level state. For Undo, Redo and a layer toggle that is enough: they
+// need the id and the modules, both of which are in scope.
+//
+// Open and Save additionally need the path the user typed, which lives in the
+// Ui - unreachable from a handler. Those two therefore record a REQUEST
+// (`g_req`) and the frame loop, which does hold the Ui, services it. Not a
+// workaround so much as the only shape available: it also means the file I/O
+// happens at a known point in the frame rather than inside event dispatch.
+
+import gui
+import widgets
+import pixel
+import layer
+import history
+import render
+import server
+
+// Bridge from a wynimg buffer handle to a GPU texture. Implemented in
+// csrc/wynimg_tex.c, because resolving a handle to its `float*` requires
+// wynimg_deref, which is internal to the shim on purpose - exposing it to Wyn
+// would reintroduce the use-after-free the handle table prevents.
+//
+// Called BARE, not `wynimg::upload_tex`: this is the ENTRY file, where `extern
+// fn` declarations are emitted unprefixed. The `::` spelling is only needed
+// inside an imported module's `pub fn` (see the note in src/render.wyn).
+extern fn wynimg_upload_tex(tex: int, p: int) -> int;
+
+// ---- layout ---------------------------------------------------------------
+//
+// Functions rather than constants so the arithmetic is written once. Every
+// number below is a pixel in window space.
+
+fn WIN_W() -> int { return 1000 }
+fn WIN_H() -> int { return 660 }
+
+fn TOOLBAR_H() -> int { return 46 }
+fn STATUS_H() -> int { return 26 }
+fn PANEL_W() -> int { return 210 }
+
+fn VIEW_X() -> int { return 0 }
+fn VIEW_Y() -> int { return TOOLBAR_H() }
+fn VIEW_W() -> int { return WIN_W() - PANEL_W() }
+fn VIEW_H() -> int { return WIN_H() - TOOLBAR_H() - STATUS_H() }
+
+fn PANEL_X() -> int { return WIN_W() - PANEL_W() }
+fn ROW_H() -> int { return 26 }
+
+// ---- state ----------------------------------------------------------------
+//
+// Module-level because handlers can reach nothing else. Each one is written by
+// a handler or by the frame loop and read by the painter.
+
+var g_win = -1
+var g_font = -1
+
+var g_doc_w = 0
+var g_doc_h = 0
+var g_zoom = 100
+
+// The composited document, on the GPU. Recreated only when the document's
+// dimensions change - a texture cannot be resized under its handle.
+var g_tex = -1
+var g_tex_w = 0
+var g_tex_h = 0
+
+// Set whenever anything that affects the pixels changes: a visibility toggle,
+// an undo, a load. The composite is the expensive operation in the frame, so it
+// runs when the document changed and not once per frame.
+var g_dirty = 1
+
+// Deferred requests from Open/Save, serviced by the frame loop (see the header).
+var REQ_NONE = 0
+var REQ_OPEN = 1
+var REQ_SAVE = 2
+var g_req = 0
+
+// One line of feedback, shown in the status bar. A UI that silently does
+// nothing when a file cannot be read is indistinguishable from a broken one.
+var g_msg = "ready"
+
+// widget id -> layer index, for the per-row click targets. A handler is given
+// the id and nothing else, so this table is how it learns which layer was hit.
+var g_row_ids = [0]
+var g_row_layer = [0]
+var g_row_count = 0
+
+// The path entry's widget id, so the frame loop can read what was typed.
+var g_path_id = -1
+
+fn layer_of_widget(id: int) -> int {
+    var i = 0
+    while i < g_row_count {
+        if g_row_ids[i] == id { return g_row_layer[i] }
+        i = i + 1
+    }
+    return -1
+}
+
+fn remember_row(id: int, li: int) {
+    if g_row_count < g_row_ids.len() {
+        g_row_ids[g_row_count] = id
+        g_row_layer[g_row_count] = li
+    } else {
+        g_row_ids.push(id)
+        g_row_layer.push(li)
+    }
+    g_row_count = g_row_count + 1
+}
+
+// ---- handlers -------------------------------------------------------------
+
+fn on_open(id: int) { g_req = REQ_OPEN }
+fn on_save(id: int) { g_req = REQ_SAVE }
+
+// Undo and Redo call the history module and nothing else. History records
+// parameter changes, not pixels, so replaying one only needs the composite
+// re-run - which is what g_dirty asks for.
+fn on_undo(id: int) {
+    if history.can_undo() == false {
+        g_msg = "nothing to undo"
+        return
+    }
+    history.undo()
+    g_msg = "undo"
+    g_dirty = 1
+}
+
+fn on_redo(id: int) {
+    if history.can_redo() == false {
+        g_msg = "nothing to redo"
+        return
+    }
+    history.redo()
+    g_msg = "redo"
+    g_dirty = 1
+}
+
+fn on_zoom_in(id: int) {
+    if g_zoom < 800 { g_zoom = g_zoom * 2 }
+    g_msg = "zoom " + g_zoom.to_string() + "%"
+}
+
+fn on_zoom_out(id: int) {
+    if g_zoom > 12 { g_zoom = g_zoom / 2 }
+    g_msg = "zoom " + g_zoom.to_string() + "%"
+}
+
+// A layer row toggles visibility THROUGH history, so the toggle is undoable
+// like every other document change. Writing layer.set_visible without the
+// record would make Undo silently skip it, which is worse than not having the
+// button.
+fn on_layer_row(id: int) {
+    var li = layer_of_widget(id)
+    if li < 0 { return }
+    var was = layer.visible(li)
+    // Hoisted, not written inline as `record_visible(li, was, was == false)`.
+    // A comparison passed DIRECTLY as a `bool` argument is typed `int` and the
+    // checker rejects it ("Expected: bool, Got: int"); bound to a `var` first it
+    // is a bool, as is `not was`. Reported. Same reason `now` exists rather than
+    // three copies of the expression.
+    var now = not was
+    history.record_visible(li, was, now)
+    layer.set_visible(li, now)
+    g_msg = layer.name(li) + " " + vis_word(now)
+    g_dirty = 1
+}
+
+fn vis_word(on: bool) -> string {
+    if on { return "shown" }
+    return "hidden"
+}
+
+// ---- document -------------------------------------------------------------
+
+// (Re)create the texture to match the document, then composite and upload.
+//
+// The composite buffer is freed immediately: it is a full float32 RGBA image
+// (16 bytes a pixel) and holding one per frame would leak the document's size
+// every 16ms.
+fn refresh(id: int) {
+    if g_doc_w <= 0 { return }
+    if g_doc_h <= 0 { return }
+
+    if g_tex_w != g_doc_w or g_tex_h != g_doc_h {
+        if g_tex >= 0 { gui.Win_texture_free(g_tex) }
+        g_tex = gui.Win_texture(g_win, g_doc_w, g_doc_h)
+        g_tex_w = g_doc_w
+        g_tex_h = g_doc_h
+    }
+    if g_tex < 0 { return }
+
+    var out = render.compose(g_doc_w, g_doc_h)
+    if out == 0 {
+        g_msg = "composite failed"
+        return
+    }
+    if wynimg_upload_tex(g_tex, out) == 0 { g_msg = "texture upload failed" }
+    wynimg_free(out)
+    g_dirty = 0
+}
+
+// Replaces the document with a single PNG. A missing, truncated or non-PNG file
+// yields a null handle whose width reads back 0 (all libpng longjmp handling is
+// contained in csrc/wynimg_codec.c), so this reports rather than crashes.
+fn open_png(path: string) {
+    if path == "" {
+        g_msg = "no path"
+        return
+    }
+    var buf = wynimg_load_png(path)
+    if wynimg_width(buf) == 0 {
+        g_msg = "cannot read " + path
+        return
+    }
+    layer.store_new()
+    history.history_new()
+    layer.add(path, buf, layer.KIND_RASTER())
+    g_doc_w = wynimg_width(buf)
+    g_doc_h = wynimg_height(buf)
+    g_msg = "opened " + path
+    g_dirty = 1
+}
+
+fn save_png(path: string) {
+    if path == "" {
+        g_msg = "no path"
+        return
+    }
+    if render.compose_to_png(g_doc_w, g_doc_h, path) == 1 {
+        g_msg = "wrote " + path
+        return
+    }
+    g_msg = "cannot write " + path
+}
+
+// ---- paint ----------------------------------------------------------------
+//
+// One Win_clear, everything, one Win_present. See the header for why Ui_draw is
+// not used.
+//
+// WHY THE Ui_*_at ACCESSORS AND NOT `ui.widgets[i].label` DIRECTLY.
+//
+// The accessors are used because they are the toolkit's published surface, NOT
+// because the direct spelling is broken. That distinction was worth measuring,
+// because it decides whether this indirection is a permanent workaround or a
+// style choice, and the two age very differently.
+//
+// The historical defect - indexing a struct-array field of a type that came from
+// an imported module lost the element type, giving "Unknown method 'x' for type
+// 'int'" - DOES NOT REPRODUCE on this compiler (v1.20.0-dev). Four shapes were
+// built and run against the real `widgets` module: a constant index, a
+// loop-variable index, a local bound to the element, a write through the index
+// (`ui.widgets[0].x = 99`), and a non-main fn taking `ui: Ui` as a parameter.
+// All five compiled and printed correct values.
+//
+// So the accessors stay on their own merits: paint code reading through
+// Ui_x_at/Ui_label_at cannot be broken by a field rename inside widgets.wyn,
+// which reaching into `ui.widgets[i]` from another repository could be.
+
+// Chrome for one toolbar control, painted from the toolkit's own data (label and
+// rect) and its interaction state, so hover and press feedback still come from
+// the toolkit rather than being reinvented.
+fn paint_button(ui: Ui, i: int) {
+    var x = widgets.Ui_x_at(ui, i)
+    var y = widgets.Ui_y_at(ui, i)
+    var w = widgets.Ui_w_at(ui, i)
+    var h = widgets.Ui_h_at(ui, i)
+    var id = widgets.Ui_id_at(ui, i)
+
+    var r = 52
+    var g = 52
+    var b = 62
+    if id == widgets.Ui_active(ui) {
+        r = 50
+        g = 90
+        b = 150
+    } else {
+        if id == widgets.Ui_hot(ui) {
+            r = 70
+            g = 110
+            b = 170
+        }
+    }
+    gui.Win_rect(g_win, x, y, w, h, r, g, b)
+    gui.Win_rect_outline(g_win, x, y, w, h, 120, 120, 140)
+
+    var label = widgets.Ui_label_at(ui, i)
+    var tw = gui.Win_text_width(g_font, label)
+    var th = gui.Win_font_height(g_font)
+    gui.Win_text(g_win, g_font, label, x + (w - tw) / 2, y + (h - th) / 2,
+                 235, 235, 240)
+}
+
+fn paint_entry(ui: Ui, i: int) {
+    var x = widgets.Ui_x_at(ui, i)
+    var y = widgets.Ui_y_at(ui, i)
+    var w = widgets.Ui_w_at(ui, i)
+    var h = widgets.Ui_h_at(ui, i)
+    var id = widgets.Ui_id_at(ui, i)
+
+    gui.Win_rect(g_win, x, y, w, h, 16, 16, 20)
+    var er = 110
+    var eg = 110
+    var eb = 130
+    if id == widgets.Ui_focus(ui) {
+        er = 70
+        eg = 110
+        eb = 170
+    }
+    gui.Win_rect_outline(g_win, x, y, w, h, er, eg, eb)
+
+    // Clip, so a long path stops at the border instead of painting across the
+    // toolbar.
+    gui.Win_clip(g_win, x + 1, y + 1, w - 2, h - 2)
+    var text = widgets.Ui_text_at(ui, i)
+    var th = gui.Win_font_height(g_font)
+    gui.Win_text(g_win, g_font, text, x + 5, y + (h - th) / 2, 225, 225, 232)
+    if id == widgets.Ui_focus(ui) {
+        var cw = gui.Win_text_width(g_font, text)
+        gui.Win_rect(g_win, x + 6 + cw, y + 4, 2, h - 8, 225, 225, 232)
+    }
+    gui.Win_clip(g_win, 0, 0, 0, 0)
+}
+
+// The document. Centred in the viewport at the current zoom, clipped to it, on
+// a checkerboard so that transparency is visible as transparency rather than as
+// whatever colour the panel happens to be.
+fn paint_viewport(ui: Ui) {
+    gui.Win_rect(g_win, VIEW_X(), VIEW_Y(), VIEW_W(), VIEW_H(), 24, 24, 28)
+    gui.Win_clip(g_win, VIEW_X(), VIEW_Y(), VIEW_W(), VIEW_H())
+
+    if g_tex >= 0 and g_doc_w > 0 {
+        var dw = g_doc_w * g_zoom / 100
+        var dh = g_doc_h * g_zoom / 100
+        if dw < 1 { dw = 1 }
+        if dh < 1 { dh = 1 }
+        var dx = VIEW_X() + (VIEW_W() - dw) / 2
+        var dy = VIEW_Y() + (VIEW_H() - dh) / 2
+
+        // Checkerboard, exactly under the image.
+        var cy = 0
+        while cy * 16 < dh {
+            var cx = 0
+            while cx * 16 < dw {
+                // NB: the parity is hoisted, not written inline as
+                // `if (cx + cy) % 2 == 0`. An `if` whose condition STARTS with
+                // "(" has that paren consumed as a C-style condition delimiter,
+                // so any operator after the closing paren is a parse error -
+                // "Expected an expression". `if (a) == 2 { }` fails the same
+                // way. Reported; harmless once known, because the hoist is
+                // equally readable.
+                var parity = (cx + cy) % 2
+                var shade = 58
+                if parity == 0 { shade = 74 }
+                var cw = 16
+                var ch = 16
+                if cx * 16 + cw > dw { cw = dw - cx * 16 }
+                if cy * 16 + ch > dh { ch = dh - cy * 16 }
+                gui.Win_rect(g_win, dx + cx * 16, dy + cy * 16, cw, ch,
+                             shade, shade, shade)
+                cx = cx + 1
+            }
+            cy = cy + 1
+        }
+
+        // The whole point of this file: one blit.
+        gui.Win_blit(g_win, g_tex, dx, dy, dw, dh)
+        gui.Win_rect_outline(g_win, dx - 1, dy - 1, dw + 2, dh + 2, 90, 90, 105)
+    } else {
+        gui.Win_text(g_win, g_font, "no document - type a path and press Open",
+                     VIEW_X() + 20, VIEW_Y() + 20, 150, 150, 165)
+    }
+
+    gui.Win_clip(g_win, 0, 0, 0, 0)
+}
+
+// The layer list. Drawn TOP-DOWN in stacking order, i.e. the topmost layer
+// first, because that is what the compositor's last-blended layer is and
+// showing a stack upside down is a real usability bug rather than a cosmetic
+// one. layer.count()-1 is the top of the stack.
+//
+// Visibility is painted from layer.visible(), never from a cached copy in a
+// widget: after an Undo the layer module is the truth, and a widget-held flag
+// would silently disagree with the pixels on screen.
+fn paint_layers(ui: Ui) {
+    gui.Win_rect(g_win, PANEL_X(), VIEW_Y(), PANEL_W(), VIEW_H(), 34, 34, 41)
+    gui.Win_line(g_win, PANEL_X(), VIEW_Y(), PANEL_X(), VIEW_Y() + VIEW_H(),
+                 60, 60, 72)
+    gui.Win_text(g_win, g_font, "Layers", PANEL_X() + 10, VIEW_Y() + 8,
+                 235, 235, 240)
+
+    var n = layer.count()
+    var k = 0
+    while k < n {
+        var li = n - 1 - k                 // top of the stack first
+        var y = VIEW_Y() + 30 + k * ROW_H()
+        var id = -1
+        var j = 0
+        while j < g_row_count {
+            if g_row_layer[j] == li { id = g_row_ids[j] }
+            j = j + 1
+        }
+
+        var rr = 40
+        var rg = 40
+        var rb = 48
+        if id == widgets.Ui_hot(ui) {
+            rr = 56
+            rg = 62
+            rb = 78
+        }
+        gui.Win_rect(g_win, PANEL_X() + 6, y, PANEL_W() - 12, ROW_H() - 3,
+                     rr, rg, rb)
+
+        // Visibility box, from the layer module.
+        gui.Win_rect_outline(g_win, PANEL_X() + 12, y + 5, 13, 13,
+                             130, 130, 150)
+        if layer.visible(li) {
+            gui.Win_rect(g_win, PANEL_X() + 15, y + 8, 7, 7, 120, 200, 130)
+        }
+
+        var fr = 232
+        var fg = 232
+        var fb = 238
+        if layer.visible(li) == false {
+            fr = 130
+            fg = 130
+            fb = 142
+        }
+        gui.Win_clip(g_win, PANEL_X() + 32, y, PANEL_W() - 44, ROW_H() - 3)
+        gui.Win_text(g_win, g_font, layer.name(li), PANEL_X() + 34, y + 4,
+                     fr, fg, fb)
+        gui.Win_clip(g_win, 0, 0, 0, 0)
+
+        k = k + 1
+    }
+
+    if n == 0 {
+        gui.Win_text(g_win, g_font, "(empty)", PANEL_X() + 12, VIEW_Y() + 34,
+                     140, 140, 152)
+    }
+}
+
+// Dimensions, layer count, zoom - plus the history position, because the two
+// buttons that move it are useless without a visible effect, and the last
+// message.
+fn paint_status(ui: Ui) {
+    var y = WIN_H() - STATUS_H()
+    gui.Win_rect(g_win, 0, y, WIN_W(), STATUS_H(), 20, 20, 25)
+    gui.Win_line(g_win, 0, y, WIN_W(), y, 60, 60, 72)
+
+    var s = g_doc_w.to_string() + "x" + g_doc_h.to_string()
+    s = s + "   " + layer.count().to_string() + " layers"
+    s = s + "   zoom " + g_zoom.to_string() + "%"
+    s = s + "   history " + history.depth().to_string()
+    s = s + "   " + g_msg
+    gui.Win_text(g_win, g_font, s, 10, y + 5, 200, 200, 212)
+}
+
+fn paint(ui: Ui) {
+    gui.Win_clear(g_win, 28, 28, 34)
+
+    gui.Win_rect(g_win, 0, 0, WIN_W(), TOOLBAR_H(), 38, 38, 46)
+    gui.Win_line(g_win, 0, TOOLBAR_H(), WIN_W(), TOOLBAR_H(), 60, 60, 72)
+
+    paint_viewport(ui)
+    paint_layers(ui)
+
+    // Widgets last, so a control can never be painted over by the viewport.
+    var i = 0
+    while i < widgets.Ui_count(ui) {
+        var kind = widgets.Ui_kind_at(ui, i)
+        if kind == 1 {
+            // A layer row's click target has no chrome of its own: the row is
+            // already painted by paint_layers. Only toolbar buttons are drawn.
+            if layer_of_widget(widgets.Ui_id_at(ui, i)) < 0 {
+                paint_button(ui, i)
+            }
+        }
+        if kind == 3 { paint_entry(ui, i) }
+        if kind == 0 {
+            gui.Win_text(g_win, g_font, widgets.Ui_label_at(ui, i),
+                         widgets.Ui_x_at(ui, i), widgets.Ui_y_at(ui, i),
+                         200, 200, 212)
+        }
+        i = i + 1
+    }
+
+    paint_status(ui)
+    gui.Win_present(g_win)
+}
+
+// ---- form -----------------------------------------------------------------
+
+// Declared once, like a Visual Basic form: a list of controls with handlers.
+// The layer rows are click targets with no chrome - paint_layers draws the row
+// itself, and the toolkit supplies only hit-testing and dispatch, which is the
+// part that is genuinely difficult to get right.
+fn build_form(win: int, font: int) -> Ui {
+    var ui = widgets.Ui_new(win, font)
+
+    ui = widgets.Ui_button(ui, "Open", 10, 9, 74, 28, on_open)
+    ui = widgets.Ui_button(ui, "Save", 90, 9, 74, 28, on_save)
+    ui = widgets.Ui_button(ui, "Undo", 176, 9, 74, 28, on_undo)
+    ui = widgets.Ui_button(ui, "Redo", 256, 9, 74, 28, on_redo)
+    ui = widgets.Ui_button(ui, "-", 342, 9, 30, 28, on_zoom_out)
+    ui = widgets.Ui_button(ui, "+", 376, 9, 30, 28, on_zoom_in)
+
+    ui = widgets.Ui_entry(ui, "/tmp/wyncanvas-out.png", 420, 9, 300, 28)
+    g_path_id = widgets.Ui_last_id(ui)
+
+    ui = widgets.Ui_label(ui, "Esc to quit", 740, 15)
+
+    var i = 0
+    while i < layer.count() {
+        var y = VIEW_Y() + 30 + (layer.count() - 1 - i) * ROW_H()
+        ui = widgets.Ui_button(ui, layer.name(i), PANEL_X() + 6, y,
+                               PANEL_W() - 12, ROW_H() - 3, on_layer_row)
+        remember_row(widgets.Ui_last_id(ui), i)
+        i = i + 1
+    }
+
+    return ui
+}
+
+// ---- headless verification seam -------------------------------------------
+//
+// WHY THIS IS NOT TEST-ONLY SCAFFOLDING BOLTED ON.
+//
+// The claim "Undo is wired to the history module" is not provable by looking at
+// a screenshot, and it is not provable by a unit test either: a test can call
+// history.undo() directly and pass while the BUTTON is wired to nothing. What
+// has to be exercised is the path from the widget's handler through to the
+// module - and a handler takes a widget id, so something has to supply one.
+//
+// WYNCANVAS_SCRIPT is a comma-separated list of actions run against the real
+// widget ids, through the real handlers, before the frame loop. It prints what
+// it observes, so `undo` moving history's position and a toggle changing
+// layer.visible() are visible facts rather than assertions about the source.
+//
+// The `click:Label` action is the STRONGEST of these, and the others exist only
+// because they can reach state a click cannot address by name. A click pushes a
+// real press and a real release onto the PLATFORM event queue with
+// Win_push_mouse_down/up, then lets widgets.Ui_events drain it. So it exercises
+// hit-testing, the press/release-over-the-same-control rule and handler dispatch
+// - the shipping path, byte for byte, with the only synthetic part being who
+// moved the mouse. Calling on_undo(0) directly cannot fail the way a real
+// button can: it would still pass if the button were wired to the wrong
+// handler, or to no handler, or laid out off-screen.
+
+// Presses and releases the centre of the widget labelled `label`, then drains
+// the queue through the toolkit. Returns the Ui, because dispatch mutates it
+// (structs are by value; see the header).
+fn click_label(ui: Ui, label: string) -> Ui {
+    var i = 0
+    while i < widgets.Ui_count(ui) {
+        if widgets.Ui_label_at(ui, i) == label {
+            var cx = widgets.Ui_x_at(ui, i) + widgets.Ui_w_at(ui, i) / 2
+            var cy = widgets.Ui_y_at(ui, i) + widgets.Ui_h_at(ui, i) / 2
+            // Move first: `hot` is recomputed from the pointer position, and a
+            // real click is always preceded by the pointer arriving.
+            gui.Win_push_mouse_move(g_win, cx, cy)
+            gui.Win_push_mouse_down(g_win, cx, cy, gui.MOUSE_LEFT)
+            gui.Win_push_mouse_up(g_win, cx, cy, gui.MOUSE_LEFT)
+            return widgets.Ui_events(ui)
+        }
+        i = i + 1
+    }
+    println("  no widget labelled " + label)
+    return ui
+}
+
+// Returns the Ui rather than a status, because a real click mutates it and
+// structs are by value - discarding the return would discard the dispatch.
+fn run_action(ui: Ui, act: string) -> Ui {
+    // click:Undo, click:Redo, click:Open, ... - a real event-queue click.
+    if act.starts_with("click:") {
+        var label = act.substring(6, act.len())
+        var u = click_label(ui, label)
+        // g_req is printed because Open and Save are DEFERRED: their handlers
+        // record a request and the frame loop performs the I/O (see the header).
+        // So `click:Save -> msg=ready req=2` is the correct observation, and the
+        // proof that the save happened is the file, one frame later.
+        println("  click:" + label + " -> msg=" + g_msg
+                + " req=" + g_req.to_string()
+                + " can_undo=" + history.can_undo().to_string()
+                + " can_redo=" + history.can_redo().to_string()
+                + " zoom=" + g_zoom.to_string() + "%")
+        return u
+    }
+    if act == "toggle_top" {
+        // The topmost layer's row, dispatched by widget id exactly as a click
+        // would - which is the point: this goes through on_layer_row.
+        var top = layer.count() - 1
+        var j = 0
+        while j < g_row_count {
+            if g_row_layer[j] == top { on_layer_row(g_row_ids[j]) }
+            j = j + 1
+        }
+        println("  toggle_top -> visible(" + top.to_string() + ")="
+                + layer.visible(top).to_string()
+                + " history.depth=" + history.depth().to_string())
+        return ui
+    }
+    if act == "undo" {
+        on_undo(0)
+        println("  undo -> can_undo=" + history.can_undo().to_string()
+                + " can_redo=" + history.can_redo().to_string()
+                + " msg=" + g_msg)
+        return ui
+    }
+    if act == "redo" {
+        on_redo(0)
+        println("  redo -> can_undo=" + history.can_undo().to_string()
+                + " can_redo=" + history.can_redo().to_string()
+                + " msg=" + g_msg)
+        return ui
+    }
+    if act == "zoom_in" {
+        on_zoom_in(0)
+        println("  zoom_in -> " + g_zoom.to_string() + "%")
+        return ui
+    }
+    if act == "zoom_out" {
+        on_zoom_out(0)
+        println("  zoom_out -> " + g_zoom.to_string() + "%")
+        return ui
+    }
+    if act == "save" {
+        save_png(System.env("WYNCANVAS_SAVE"))
+        println("  save -> " + g_msg)
+        return ui
+    }
+    if act == "open" {
+        open_png(System.env("WYNCANVAS_OPEN"))
+        println("  open -> " + g_msg + " doc=" + g_doc_w.to_string() + "x"
+                + g_doc_h.to_string() + " layers=" + layer.count().to_string())
+        return ui
+    }
+    println("  unknown action: " + act)
+    return ui
+}
+
+fn main() -> int {
+    // A GUI program that may run headless has to be able to find that out and
+    // exit cleanly rather than crash on the first draw call.
+    if gui.Win_available() == 0 {
+        println("no display backend available")
+        return 0
+    }
+
+    // The same demo document the golden test verifies, so what the window shows
+    // is output that has already been checked pixel-for-pixel. Compositing,
+    // masks, blend modes and opacity all come from the existing modules.
+    server.demo_scene()
+    g_doc_w = 256
+    g_doc_h = 256
+
+    g_win = gui.Win_window("WynCanvas", WIN_W(), WIN_H())
+    if g_win < 0 {
+        println("could not open a window")
+        return 1
+    }
+    g_font = gui.Win_font_default(14)
+    if g_font < 0 {
+        println("no font available")
+        gui.Win_close(g_win)
+        return 1
+    }
+    // BARE, not `gui.Win_backend_name()`. A DOT-QUALIFIED call to an `extern fn`
+    // that returns `string` is typed `int` at the call site: the emitted C is
+    // `long long x = Win_backend_name();` against `extern char*`, so the pointer
+    // prints as a decimal address ("4344711438"). The bare spelling emits
+    // `const char*` and is correct. Reported; applies to every string-returning
+    // extern, so `Win_event_text` inside widgets.wyn is called bare there too.
+    println("backend: " + Win_backend_name())
+
+    var ui = build_form(g_win, g_font)
+
+    // Headless verification seam. With WYNCANVAS_FRAMES set the loop runs that
+    // many frames and exits, optionally writing a screenshot - because no
+    // assertion can tell you the UI LOOKED right, and a text renderer passes a
+    // width test whether it draws letters or mojibake.
+    var limit = 0
+    var frames_env = System.env("WYNCANVAS_FRAMES")
+    if frames_env != "" { limit = frames_env.to_int() }
+    var shot = System.env("WYNCANVAS_SHOT")
+
+    // Drive the real handlers before entering the loop (see run_action).
+    var script = System.env("WYNCANVAS_SCRIPT")
+    if script != "" {
+        println("script:")
+        var acts = script.split(",")
+        var s = 0
+        while s < acts.len() {
+            ui = run_action(ui, acts[s])
+            // Opening replaces the stack, so the rows must be rebuilt - the
+            // same rebuild the frame loop does.
+            if layer.count() != g_row_count {
+                g_row_count = 0
+                ui = build_form(g_win, g_font)
+            }
+            s = s + 1
+        }
+    }
+
+    var n = 0
+    while widgets.Ui_running(ui) == 1 {
+        ui = widgets.Ui_events(ui)
+
+        // Service a deferred Open/Save now that the Ui - and so the typed path
+        // - is in scope.
+        if g_req != REQ_NONE {
+            var path = widgets.Ui_text(ui, g_path_id)
+            if g_req == REQ_OPEN { open_png(path) }
+            if g_req == REQ_SAVE { save_png(path) }
+            g_req = REQ_NONE
+            // Opening replaces the layer stack, so the rows must be rebuilt.
+            if layer.count() != g_row_count {
+                g_row_count = 0
+                ui = build_form(g_win, g_font)
+            }
+        }
+
+        if g_dirty == 1 { refresh(0) }
+
+        paint(ui)
+
+        n = n + 1
+        if limit > 0 {
+            if n >= limit {
+                if shot != "" { gui.Win_screenshot(g_win, shot) }
+                ui = widgets.Ui_set_focus(ui, -1)
+                break
+            }
+        }
+
+        // Without this the loop spins a core at 100%, which on a laptop is
+        // audible within seconds.
+        gui.Win_delay(16)
+    }
+
+    if g_tex >= 0 { gui.Win_texture_free(g_tex) }
+    gui.Win_font_free(g_font)
+    gui.Win_close(g_win)
+    return 0
+}

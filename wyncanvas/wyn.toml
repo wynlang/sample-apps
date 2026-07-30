@@ -3,8 +3,33 @@ name = "wyncanvas"
 version = "0.1.0"
 
 [ffi]
-libs = "wynimg, png, z"
-lib_dirs = "libwynimg, /opt/homebrew/opt/libpng/lib"
+# COMMA-SEPARATED STRINGS, not TOML arrays. `libs = ["gui","SDL3"]` is accepted
+# by the parser and passed through verbatim, so it reaches the linker as
+# `-l[gui` and fails with `library '[gui' not found`.
+#
+# `gui` and `SDL3` are the SDL3 UI (src/ui.wyn); `wynimg`, `png`, `z` are the
+# pre-existing imaging shim. Both are required: dropping gui+wynimg was measured
+# failing with "Undefined symbols: _Win_available, _Win_blit, _Win_clear, ...".
+#
+# On ORDER: csrc/wynimg_tex.c (a member of libwynimg.a) references
+# Win_texture_update_f32, which lives in libgui.a, so the classic single-pass
+# static-archive rule would demand wynimg precede gui. wynimg IS listed first,
+# and that is the portable order - but note that it was NOT possible to make the
+# reverse order fail here: `gui, SDL3, wynimg, png, z` also links and runs
+# (Apple ld64 resolves archives iteratively). Keep this order anyway, because a
+# single-pass GNU ld on Linux is the case that would break, and it is not the
+# platform this was tested on.
+libs = "wynimg, gui, SDL3, png, z"
+
+# Homebrew's lib dir is not searched by default, and neither is a sibling
+# repository's build output - libgui.a is produced by
+# repos/gui/csrc/build.sh into repos/gui/libgui/.
+lib_dirs = "libwynimg, ../../gui/libgui, /opt/homebrew/lib, /opt/homebrew/opt/libpng/lib"
 
 [dependencies]
 web = "https://github.com/wynlang/web"
+# The native GUI. Declared as a real dependency, NOT symlinked into src/ - a
+# symlink only resolves on the machine that made it, and would not survive a
+# clone. `wyn pkg install` fetches this into the package cache, which the module
+# resolver already searches.
+gui = "https://github.com/wynlang/gui"
