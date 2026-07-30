@@ -468,6 +468,14 @@ test "contrast does not shift the colour of a semi-transparent pixel" {
     assert_true(pixel.approx(col, raw(op, 4, 1, 1, 0), 0.0001))
     // Explicitly NOT the value the broken version produces.
     assert_true(pixel.approx(col, 0.77191772, 0.01) == false)
+    // And assert the RAW STORED value, not just the ratio. `col` divides by
+    // alpha, so it cancels a missing re-premultiply exactly: dropping the
+    // `* al` on the store leaves this file green while every pixel is written
+    // un-premultiplied, which then composites far too bright. The stored value
+    // must be colour * alpha = 0.98595886 * 0.5.
+    assert_true(pixel.approx(raw(tr, 4, 1, 1, 0), 0.49297943, 0.0001))
+    // Alpha itself is untouched by a colour filter.
+    assert_true(pixel.approx(raw(tr, 4, 1, 1, 3), 0.5, 0.0001))
     wynimg_free(op)
     wynimg_free(tr)
 }

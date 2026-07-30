@@ -189,7 +189,7 @@ static long long apply_point(void* bufp, void* maskp, PointFn fn, const FParam* 
             // boost ends up storing colour > alpha.
             double v = clamp01d(rgb[ch]);
             double mixed = orig[ch] * (1.0 - cov) + v * cov;
-            im->px[o + ch] = (float)(mixed);
+            im->px[o + ch] = (float)(mixed * al);
         }
     }
     return 1;
