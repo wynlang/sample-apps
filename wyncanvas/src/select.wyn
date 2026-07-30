@@ -1,0 +1,343 @@
+// select - the selection engine's Wyn surface.
+//
+// A SELECTION IS A FLOAT32 COVERAGE MASK THE SIZE OF THE DOCUMENT, 0..1 per
+// pixel. It is NOT a rectangle, and that is the whole design.
+//
+// A rectangle cannot represent a feathered edge, a lasso, or an antialiased
+// circle, so an editor built on rectangles grows a second representation the
+// first time any of those is added, and then a second clipping path per tool.
+// Coverage collapses all of it into ONE code path: a fractional rect edge, a
+// feathered border, an antialiased ellipse rim and a lasso are the same numbers
+// in the same buffer, and "how much of this pixel is selected" has one answer.
+//
+// It is also ALREADY the representation this project uses twice over - the brush
+// accumulates a coverage buffer (src/paint.wyn), text rasterises into one
+// (src/text.wyn), and wynimg_composite reads a layer mask's R channel as linear
+// coverage. So a selection composes with all three by MULTIPLICATION and needs
+// no new compositing rule: `select.clip(cov)` before `wynimg_stroke_apply` is
+// the entire integration, and any tool that already produces coverage becomes
+// selection-aware by one call.
+//
+// FILL RULE FOR LASSO/POLYGON: NONZERO WINDING, not even-odd.
+//
+// For a self-intersecting path the two disagree, and the disagreement is
+// observable: the centre of a pentagram has winding 2, so nonzero calls it
+// SELECTED while even-odd calls it a HOLE. Nonzero is chosen because a lasso is
+// a gesture, not a glyph - a user who crosses their own path expects the
+// enclosed area to stay selected rather than to be punched out. (Even-odd is the
+// right default for type, where a counter IS a hole.) tests/test_select.wyn
+// asserts the pentagram centre reads 1.0, so switching the rule turns it red.
+//
+// MODULE-LEVEL STATE, like src/paint.wyn: there is one current selection, its
+// handle lives here, and every op is a `pub fn` that mutates it in place. In
+// place rather than handle-swapping because handles are shared - src/layer.wyn
+// stores buffer handles in parallel arrays - and swapping would strand any other
+// holder, the same argument src/history.wyn makes for restoring undo snapshots
+// by copy.
+//
+// CALL CONVENTION - v1.20.0 codegen constraint. `extern fn`s are emitted
+// unprefixed, so importers call them BARE (`wynimg_sel_at(...)`), while a
+// `pub fn` here must reach them as `wynimg::sel_at(...)`; the `::` form lowers
+// to the real C symbol before the module prefixer runs. See the long note at the
+// top of src/render.wyn.
+//
+// This module declares its OWN externs rather than adding them to src/pixel.wyn,
+// so the selection engine is one file's worth of surface area.
+//
+// IMPORT THIS AS `selection`, NOT `select`.
+//
+// `select` is a RESERVED WORD in the Wyn lexer (src/lexer.c:245 -> TOKEN_SELECT,
+// the channel-multiplexing statement `select { v = ch.recv() => ... }`), so
+// `import select` cannot parse at all:
+//
+//     import select
+//     // Error: Expected module name  --> file.wyn:2:1
+// NAMED `select`, WHICH THE COMPILER ONCE FORBADE. `select` is a keyword
+// (channel multiplexing, `select { v = ch.recv() => ... }`) and used to be
+// reserved unconditionally, so `import select` could not parse - it failed with
+// "Expected module name" and never mentioned the keyword. This file therefore
+// shipped alongside a src/selection.wyn symlink.
+//
+// The compiler now treats `select` as CONTEXTUAL (a statement only when a `{`
+// follows), so the symlink is gone and importers say `import select`. The
+// engine keeps the name it should have.
+
+import pixel
+
+// ---- boolean ops -----------------------------------------------------------
+//
+// The integer values are the FFI contract with csrc/wynimg_select.c. Functions
+// rather than constants because a module-level `var` is mutable state a caller
+// could stomp, and this project already spells its enums this way
+// (paint.TOOL_BRUSH()).
+pub fn OP_REPLACE() -> int { return 0 }
+pub fn OP_ADD() -> int { return 1 }
+pub fn OP_SUBTRACT() -> int { return 2 }
+pub fn OP_INTERSECT() -> int { return 3 }
+
+pub fn op_name(op: int) -> string {
+    if op == 0 { return "replace" }
+    if op == 1 { return "add" }
+    if op == 2 { return "subtract" }
+    if op == 3 { return "intersect" }
+    return "?"
+}
+
+// ---- externs ---------------------------------------------------------------
+
+// Buffer plumbing. Re-declared here with identical signatures rather than
+// imported from pixel, because an extern is emitted unprefixed into each
+// importing unit anyway - which is how src/text.wyn does it too.
+extern fn wynimg_new(w: int, h: int) -> int;
+extern fn wynimg_free(p: int);
+extern fn wynimg_width(p: int) -> int;
+extern fn wynimg_height(p: int) -> int;
+
+// Coverage combine. `op` is one of the OP_* values above.
+extern fn wynimg_sel_combine(dst: int, src: int, op: int) -> int;
+extern fn wynimg_sel_all(sel: int) -> int;
+extern fn wynimg_sel_none(sel: int) -> int;
+extern fn wynimg_sel_invert(sel: int) -> int;
+
+// Shapes. Coordinates are CONTINUOUS document coordinates, so fractional edges
+// mean something: a rect edge at x=16.5 puts exactly 0.5 coverage in column 16.
+extern fn wynimg_sel_rect(sel: int, x: float, y: float, w: float, h: float,
+                          op: int) -> int;
+extern fn wynimg_sel_ellipse(sel: int, cx: float, cy: float,
+                             rx: float, ry: float, op: int) -> int;
+
+// A POINT LIST IS A wynimg BUFFER, not a Wyn array: a Wyn array cell is a
+// 16-byte tagged union and bulk data never crosses this boundary, so a 400-point
+// lasso would be 400 boxed values. An n-by-1 buffer holds x in R and y in G and
+// reuses the handle table, the allocation cap and the generation tagging that
+// already exist, so a stale point list is a safe no-op like any stale handle.
+extern fn wynimg_poly_new(npts: int) -> int;
+extern fn wynimg_poly_set(pts: int, i: int, x: float, y: float) -> int;
+extern fn wynimg_poly_count(pts: int) -> int;
+extern fn wynimg_sel_polygon(sel: int, pts: int, op: int) -> int;
+
+extern fn wynimg_sel_feather(sel: int, radius: float, passes: int) -> int;
+extern fn wynimg_sel_grow(sel: int, amount: int) -> int;
+
+extern fn wynimg_sel_at(sel: int, x: int, y: int) -> float;
+extern fn wynimg_sel_sum(sel: int) -> float;
+extern fn wynimg_sel_max(sel: int) -> float;
+extern fn wynimg_sel_is_empty(sel: int) -> int;
+extern fn wynimg_sel_bbox(sel: int, which: int) -> int;
+extern fn wynimg_sel_clip(cov: int, sel: int) -> int;
+
+// ---- the current selection -------------------------------------------------
+
+var s_sel = 0
+var s_w = 0
+var s_h = 0
+
+// Allocates (or reallocates) the selection for a `w` x `h` document and selects
+// NOTHING. Returns the handle, or 0 on failure.
+//
+// "Nothing selected" and "no selection object" are deliberately the same
+// observable state (`is_empty()` is true for both), because every consumer of a
+// selection has to handle the empty case anyway, and a separate "no selection
+// means everything" convention is the classic source of a tool that silently
+// edits the whole document. Callers that want the everything case say
+// `select_all()`.
+pub fn init(w: int, h: int) -> int {
+    if s_sel != 0 { wynimg::free(s_sel) }
+    s_sel = 0
+    s_w = 0
+    s_h = 0
+    if w <= 0 { return 0 }
+    if h <= 0 { return 0 }
+    var m = wynimg::new(w, h)
+    if m == 0 { return 0 }
+    s_sel = m
+    s_w = w
+    s_h = h
+    return m
+}
+
+// The current selection's coverage buffer, or 0 if there is none. Handed out so
+// the compositor can multiply by it directly; nobody should free it.
+pub fn handle() -> int { return s_sel }
+
+pub fn doc_w() -> int { return s_w }
+pub fn doc_h() -> int { return s_h }
+pub fn active() -> bool { return s_sel != 0 }
+
+pub fn release() {
+    if s_sel != 0 { wynimg::free(s_sel) }
+    s_sel = 0
+    s_w = 0
+    s_h = 0
+}
+
+// ---- whole-document ops ----------------------------------------------------
+
+pub fn select_all() -> bool { return wynimg::sel_all(s_sel) == 1 }
+pub fn select_none() -> bool { return wynimg::sel_none(s_sel) == 1 }
+
+// Exactly 1-c per pixel, so this is an involution on PARTIAL coverage too: a
+// half-selected feathered edge inverts to half and back to half. A
+// threshold-based invert would quietly harden every soft edge it touched, and
+// "invert twice is the identity" is asserted bit-exactly for that reason.
+pub fn invert() -> bool { return wynimg::sel_invert(s_sel) == 1 }
+
+// ---- shapes ----------------------------------------------------------------
+
+// Antialiased rectangle. (x,y) is the top-left, (w,h) the size, in continuous
+// document coordinates. Coverage is the EXACT area of each pixel square inside
+// the rect (an axis-aligned box filter is separable and has a closed form), not
+// a supersampled estimate - so a half-pixel edge reads exactly 0.5.
+pub fn rect(x: float, y: float, w: float, h: float, op: int) -> bool {
+    return wynimg::sel_rect(s_sel, x, y, w, h, op) == 1
+}
+
+// Antialiased axis-aligned ellipse. Coverage on the rim is 4x4 supersampled - an
+// ellipse's exact pixel overlap has no cheap closed form - so a boundary pixel
+// reads a multiple of 1/16.
+pub fn ellipse(cx: float, cy: float, rx: float, ry: float, op: int) -> bool {
+    return wynimg::sel_ellipse(s_sel, cx, cy, rx, ry, op) == 1
+}
+
+// Circle - the common case, and named so a caller does not have to remember
+// which of rx/ry comes first.
+pub fn circle(cx: float, cy: float, r: float, op: int) -> bool {
+    return wynimg::sel_ellipse(s_sel, cx, cy, r, r, op) == 1
+}
+
+// ---- lasso / polygon -------------------------------------------------------
+
+// Allocates a point list of `n` points, all at (0,0). 0 on failure.
+pub fn poly_new(n: int) -> int { return wynimg::poly_new(n) }
+pub fn poly_free(pts: int) { wynimg::free(pts) }
+pub fn poly_count(pts: int) -> int { return wynimg::poly_count(pts) }
+
+pub fn poly_set(pts: int, i: int, x: float, y: float) -> bool {
+    return wynimg::poly_set(pts, i, x, y) == 1
+}
+
+// Fills the (implicitly closed) polygon under the NONZERO WINDING rule - see the
+// file header. Needs at least 3 points; fewer is not an area and returns false.
+pub fn polygon(pts: int, op: int) -> bool {
+    return wynimg::sel_polygon(s_sel, pts, op) == 1
+}
+
+// ---- feather ---------------------------------------------------------------
+//
+// SEPARABLE, because a 2D kernel at radius 20 is 41x41 = 1681 taps per pixel
+// against 2x41 = 82 for two 1D passes - 20x the work for the identical answer,
+// which on a 12MP document is the difference between interactive and not. Each
+// 1D pass is O(1) per pixel via a prefix sum, so the cost does not grow with the
+// radius at all.
+//
+// Canvas edges CLAMP (the border pixel is replicated) rather than being treated
+// as unselected, because a selection that touches the canvas edge fading out
+// along that edge is never what a user means.
+
+// A single box pass: the ramp is exactly linear, so its values can be derived by
+// counting pixels. That is why the tests use it - a feather whose numbers cannot
+// be predicted by hand is a feather nobody can review.
+pub fn feather_box(rad: float, passes: int) -> bool {
+    return wynimg::sel_feather(s_sel, rad, passes) == 1
+}
+
+// Three box passes approximate a gaussian to within about 3% (the central limit
+// theorem doing the work), for a third of the cost of a real gaussian kernel and
+// none of its truncation choices.
+pub fn feather(rad: float) -> bool {
+    return wynimg::sel_feather(s_sel, rad, 3) == 1
+}
+
+// ---- grow / contract -------------------------------------------------------
+//
+// THE APPROXIMATION, STATED PLAINLY: this is a THRESHOLD SHIFT on a box-blurred
+// copy, not a Euclidean distance transform.
+//
+//   grow n     = clamp01(sum of coverage over the (2n+1)^2 neighbourhood)
+//   contract n = the same on the complement (erosion is dilation of the inverse)
+//
+// For a HARD mask it is EXACT morphological dilation/erosion in the CHEBYSHEV
+// metric: the boundary lands exactly n pixels out or in, including diagonally,
+// which the tests assert at named coordinates. The neighbourhood is a SQUARE
+// because that is what a separable kernel gives, so a circle grown by 10 comes
+// back with slightly flattened diagonals; a true disc needs a distance
+// transform, which is more machinery than this buys.
+//
+// For a SOFT (feathered) mask it moves the edge AND hardens it, because clamping
+// a neighbourhood sum saturates. Feather AFTER growing, not before.
+
+pub fn grow(n: int) -> bool {
+    if n < 0 { return false }
+    return wynimg::sel_grow(s_sel, n) == 1
+}
+
+pub fn contract(n: int) -> bool {
+    if n < 0 { return false }
+    return wynimg::sel_grow(s_sel, 0 - n) == 1
+}
+
+// ---- queries ---------------------------------------------------------------
+
+// Coverage at one pixel. 0.0 outside the document and when there is no
+// selection, so a caller reading past the edge gets "not selected" rather than
+// garbage.
+pub fn cov_at(x: int, y: int) -> float { return wynimg::sel_at(s_sel, x, y) }
+
+// Total selected area, in pixels. This is what makes "feather approximately
+// conserves coverage" checkable: an unnormalised blur, or one applied twice,
+// changes this number even when the shape still looks right.
+pub fn area() -> float { return wynimg::sel_sum(s_sel) }
+
+pub fn peak() -> float { return wynimg::sel_max(s_sel) }
+
+// Empty means NO pixel has ANY coverage. Not "the area rounds to nothing": a
+// one-pixel selection is not empty, and a caller that skipped the document
+// because the area was small would silently drop the user's work.
+pub fn is_empty() -> bool { return wynimg::sel_is_empty(s_sel) == 1 }
+
+// Inclusive bounding box of every pixel with coverage > 0, so callers can skip
+// untouched rows. All four are -1 when the selection is empty.
+//
+// The threshold is "> 0" and not "> 0.5" precisely BECAUSE callers skip rows: a
+// row that is 3% selected still has to be processed, and a bbox that excluded it
+// would clip the feathered border off every operation.
+pub fn bbox_x0() -> int { return wynimg::sel_bbox(s_sel, 0) }
+pub fn bbox_y0() -> int { return wynimg::sel_bbox(s_sel, 1) }
+pub fn bbox_x1() -> int { return wynimg::sel_bbox(s_sel, 2) }
+pub fn bbox_y1() -> int { return wynimg::sel_bbox(s_sel, 3) }
+
+// ---- integration -----------------------------------------------------------
+
+// Multiplies a tool's coverage buffer by the selection, in place.
+//
+// THIS IS THE ENTIRE INTEGRATION with the rest of the editor. A brush stroke, a
+// text layout and a bucket fill all produce a coverage buffer; one call here
+// before `wynimg_stroke_apply` makes any of them respect the selection, with no
+// change to the compositing kernel and no second clipping path. With no active
+// selection this is a no-op that returns false, so a caller can treat "no
+// selection" as "no clipping" without a special case.
+pub fn clip(cov: int) -> bool {
+    if s_sel == 0 { return false }
+    return wynimg::sel_clip(cov, s_sel) == 1
+}
+
+// ---- explicit-handle helpers ----------------------------------------------
+//
+// The ops above act on the module's current selection, which is what the editor
+// wants. These act on a handle the caller owns, which is what a test wants and
+// what a future "save the selection as a channel" would want - the C kernels are
+// handle-taking anyway, so exposing them costs nothing and avoids a second
+// implementation.
+
+pub fn new_mask(w: int, h: int) -> int { return wynimg::new(w, h) }
+pub fn free_mask(m: int) { wynimg::free(m) }
+pub fn mask_all(m: int) -> bool { return wynimg::sel_all(m) == 1 }
+pub fn mask_none(m: int) -> bool { return wynimg::sel_none(m) == 1 }
+pub fn mask_at(m: int, x: int, y: int) -> float { return wynimg::sel_at(m, x, y) }
+pub fn mask_area(m: int) -> float { return wynimg::sel_sum(m) }
+
+// Combines any two coverage buffers of matching size. Used by the tests to check
+// a boolean op without going through the current-selection state.
+pub fn mask_combine(dst: int, src: int, op: int) -> bool {
+    return wynimg::sel_combine(dst, src, op) == 1
+}

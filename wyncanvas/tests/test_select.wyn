@@ -1,0 +1,757 @@
+// test_select - the selection engine, asserted on actual COVERAGE VALUES.
+//
+// Every number here is derived from first principles, not from a previous run,
+// and the derivation is written next to it so a reviewer can re-check it without
+// executing anything. Two families of value appear:
+//
+//   * RECT coverage is EXACT AREA. An axis-aligned box filter is separable and
+//     has a closed form, so `rect(4.5, 4.5, 8, 8)` puts exactly 0.5*0.5 = 0.25
+//     in the corner pixel (4,4), 0.5 in the edge pixel (4,5), and 1.0 in (5,5).
+//     Not "about 0.25" - exactly.
+//   * ELLIPSE and POLYGON coverage is 4x4 SUPERSAMPLED, so a boundary pixel is
+//     an exact multiple of 1/16 = 0.0625. A rim pixel reading 13/16 = 0.8125 is
+//     a countable fact about which of 16 sample points fall inside the conic,
+//     not a fudge.
+//
+// WHY THESE PARTICULAR ASSERTIONS. Each one is aimed at a failure mode that a
+// weaker test would not see:
+//
+//   * "add is max(), not a+b-ab" - adding the same soft edge twice must leave it
+//     at 0.5, not 0.75. A probabilistic union looks right on hard masks and
+//     darkens every soft edge it touches a second time. Same accumulation bug
+//     the brush avoids in csrc/wynimg_paint.c, same fix.
+//   * "invert twice is the identity" is asserted with wynimg_max_diff == 0.0 on
+//     PARTIAL coverage. A threshold-based invert round-trips hard masks
+//     perfectly and silently hardens every feathered edge.
+//   * "intersect of two disjoint rects is empty" checks is_empty() AND that the
+//     bbox reports -1. A bbox that returned 0 for an empty selection would make
+//     every caller process row 0.
+//   * feather is checked BOTH ways: the edge must become gradual (a monotone
+//     ramp at predicted values) AND the total area must be conserved to ~1e-5.
+//     An unnormalised blur passes the first and fails the second; a blur applied
+//     to a copy that is then discarded passes the second and fails the first.
+//   * the SELF-INTERSECTING PENTAGRAM makes the fill rule observable: its centre
+//     has winding number 2, so nonzero selects it (1.0) and even-odd would punch
+//     a hole (0.0). Switching the rule in csrc/wynimg_select.c turns this red,
+//     which is the point.
+// The module is imported as `import select`. That spelling used to be
+// impossible: `select` is a keyword and was reserved unconditionally, so the
+// import failed with "Expected module name" and the engine had to ship a
+// src/selection.wyn symlink. The compiler now treats `select` as contextual, so
+// this asserts the natural spelling works as much as it asserts the coverage maths.
+//
+// LOCAL NAMES avoid every `pub fn` of select and pixel: a local `var` in a
+// test block whose name matches a pub fn of any transitively imported module
+// resolves as that FUNCTION, and the error ("Cannot compare function with int")
+// does not mention the collision. Hence `cvg`, `msk`, `snp`, `tot`.
+
+import pixel
+import select
+
+// ---- rect: exact antialiased area -----------------------------------------
+
+test "an integer-aligned rect is exactly 1.0 inside and 0.0 outside" {
+    select.init(32, 32)
+    select.rect(4.0, 4.0, 8.0, 8.0, select.OP_REPLACE())
+
+    // Interior, all four corners of the 8x8 block, and one pixel outside each.
+    assert_true(pixel.approx(select.cov_at(8, 8), 1.0, 0.0001))    // centre
+    assert_true(pixel.approx(select.cov_at(4, 4), 1.0, 0.0001))    // corner
+    assert_true(pixel.approx(select.cov_at(11, 11), 1.0, 0.0001))  // far corner
+    assert_true(pixel.approx(select.cov_at(3, 4), 0.0, 0.0001))    // outside left
+    assert_true(pixel.approx(select.cov_at(12, 11), 0.0, 0.0001))  // outside right
+    assert_true(pixel.approx(select.cov_at(8, 20), 0.0, 0.0001))   // far outside
+
+    // 8x8 = 64 pixels of coverage, exactly.
+    assert_true(pixel.approx(select.area(), 64.0, 0.0001))
+}
+
+test "a HALF-PIXEL rect edge is exactly 0.5, and a corner exactly 0.25" {
+    select.init(32, 32)
+    // Offset by half a pixel in both axes. Pixel (4,4) is covered on x in
+    // [4.5,5) and on y in [4.5,5): 0.5 * 0.5 = 0.25. Pixel (4,5) is half-covered
+    // on x and fully on y: 0.5 * 1.0 = 0.5. Pixel (5,5) is whole: 1.0.
+    select.rect(4.5, 4.5, 8.0, 8.0, select.OP_REPLACE())
+
+    assert_true(pixel.approx(select.cov_at(4, 4), 0.25, 0.0001))   // corner
+    assert_true(pixel.approx(select.cov_at(4, 5), 0.5, 0.0001))    // left edge
+    assert_true(pixel.approx(select.cov_at(5, 4), 0.5, 0.0001))    // top edge
+    assert_true(pixel.approx(select.cov_at(5, 5), 1.0, 0.0001))    // interior
+    // The far edge lands at 12.5, so pixel 12 is half-covered and (12,12) is
+    // the far corner at 0.25.
+    assert_true(pixel.approx(select.cov_at(12, 12), 0.25, 0.0001))
+    assert_true(pixel.approx(select.cov_at(12, 8), 0.5, 0.0001))
+    assert_true(pixel.approx(select.cov_at(13, 8), 0.0, 0.0001))
+
+    // Area is unchanged by the sub-pixel shift: still exactly 8*8.
+    assert_true(pixel.approx(select.area(), 64.0, 0.0001))
+}
+
+test "a rect selection's bounding box is EXACT" {
+    select.init(64, 64)
+    select.rect(10.0, 20.0, 12.0, 7.0, select.OP_REPLACE())
+    // Inclusive: x spans [10,22) -> columns 10..21; y spans [20,27) -> 20..26.
+    assert_eq(select.bbox_x0(), 10)
+    assert_eq(select.bbox_y0(), 20)
+    assert_eq(select.bbox_x1(), 21)
+    assert_eq(select.bbox_y1(), 26)
+    assert_true(pixel.approx(select.area(), 84.0, 0.0001))   // 12*7
+
+    // A fractional edge EXTENDS the bbox, because a 25%-covered column is still
+    // selected and a caller skipping it would clip the antialiased border off.
+    select.rect(10.5, 20.5, 12.0, 7.0, select.OP_REPLACE())
+    assert_eq(select.bbox_x0(), 10)
+    assert_eq(select.bbox_y0(), 20)
+    assert_eq(select.bbox_x1(), 22)
+    assert_eq(select.bbox_y1(), 27)
+}
+
+// ---- ellipse: supersampled antialiasing ------------------------------------
+
+test "an ellipse is solid at the centre, antialiased on the rim, zero outside" {
+    select.init(64, 64)
+    // r = 6.5 about (32,32). Sample points sit at x + 1/8 + k/4, so the rim
+    // pixels land on partial counts out of 16.
+    select.circle(32.0, 32.0, 6.5, select.OP_REPLACE())
+
+    assert_true(pixel.approx(select.cov_at(32, 32), 1.0, 0.0001))  // centre
+    assert_true(pixel.approx(select.cov_at(37, 32), 1.0, 0.0001))  // inside
+    // (38,32): x samples run 38.125..38.875, i.e. 6.125..6.875 from the centre,
+    // all within 6.5 for the left half only -> 8 of 16 = 0.5 exactly.
+    assert_true(pixel.approx(select.cov_at(38, 32), 0.5, 0.0001))  // rim
+    assert_true(pixel.approx(select.cov_at(39, 32), 0.0, 0.0001))  // outside
+    // The diagonal rim: 10 of 16 samples inside = 0.625.
+    assert_true(pixel.approx(select.cov_at(36, 36), 0.625, 0.0001))
+    assert_true(pixel.approx(select.cov_at(35, 35), 1.0, 0.0001))
+    // A corner of the document is untouched.
+    assert_true(pixel.approx(select.cov_at(0, 0), 0.0, 0.0001))
+
+    // Area is pi*r^2 = pi*42.25 = 132.73, and 4x4 supersampling lands within a
+    // fraction of a percent. Asserted as a BAND: the exact number depends on
+    // where the sample grid falls, but a rasteriser that filled the bounding box
+    // (169) or only the inscribed square (84) fails it.
+    assert_true(select.area() > 131.0)
+    assert_true(select.area() < 135.0)
+}
+
+test "a non-circular ellipse honours BOTH radii" {
+    select.init(64, 64)
+    select.ellipse(32.0, 32.0, 16.0, 8.0, select.OP_REPLACE())
+    // Widest at y=32: x reaches 48, so column 47 is in and 48 is out.
+    assert_true(pixel.approx(select.cov_at(47, 32), 1.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(48, 32), 0.0, 0.0001))
+    // Tallest at x=32: y reaches 40, so row 39 is in and 40 is out. This is the
+    // assertion that catches rx and ry being swapped - a circle of r=16 would
+    // put 1.0 at (32,39) AND at (32,44).
+    assert_true(pixel.approx(select.cov_at(32, 39), 1.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(32, 40), 0.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(32, 44), 0.0, 0.0001))
+
+    assert_eq(select.bbox_x0(), 16)
+    assert_eq(select.bbox_y0(), 24)
+    assert_eq(select.bbox_x1(), 47)
+    assert_eq(select.bbox_y1(), 39)
+    // pi*16*8 = 402.1
+    assert_true(select.area() > 399.0)
+    assert_true(select.area() < 406.0)
+}
+
+// ---- lasso / polygon, and THE FILL RULE ------------------------------------
+
+test "a convex polygon fills its interior and nothing else" {
+    select.init(32, 32)
+    var pts = select.poly_new(3)
+    select.poly_set(pts, 0, 4.0, 4.0)
+    select.poly_set(pts, 1, 28.0, 4.0)
+    select.poly_set(pts, 2, 4.0, 28.0)
+    assert_true(select.polygon(pts, select.OP_REPLACE()))
+
+    assert_true(pixel.approx(select.cov_at(6, 6), 1.0, 0.0001))     // inside
+    assert_true(pixel.approx(select.cov_at(14, 14), 1.0, 0.0001))   // inside, near diag
+    assert_true(pixel.approx(select.cov_at(20, 20), 0.0, 0.0001))   // beyond the diagonal
+    assert_true(pixel.approx(select.cov_at(2, 2), 0.0, 0.0001))     // outside the corner
+    assert_true(pixel.approx(select.cov_at(30, 30), 0.0, 0.0001))   // far outside
+
+    // Half of a 24x24 square = 288; the antialiased hypotenuse gives 285.
+    assert_true(select.area() > 280.0)
+    assert_true(select.area() < 292.0)
+    select.poly_free(pts)
+}
+
+test "a SELF-INTERSECTING pentagram demonstrates the NONZERO fill rule" {
+    // THIS TEST IS THE FILL-RULE DECISION, made observable.
+    //
+    // A {5/2} pentagram: five vertices on radius 24 about (32,32) at angles
+    // -90 + 144k degrees, connected in that order, so the edges cross and the
+    // central pentagon is wound TWICE.
+    //
+    //   NONZERO  (what this engine implements): winding 2 != 0 -> the centre is
+    //            SELECTED, coverage 1.0.
+    //   EVEN-ODD (what a font rasteriser would do): 2 is even -> the centre is a
+    //            HOLE, coverage 0.0.
+    //
+    // Nonzero is chosen because a lasso is a gesture, not a glyph: a user who
+    // crosses their own path expects the enclosed region to stay selected rather
+    // than to be punched out. Flipping the rule in csrc/wynimg_select.c's
+    // `winding` turns the first assertion below red - which is exactly what a
+    // test of a fill-rule choice has to do.
+    select.init(64, 64)
+    var pts = select.poly_new(5)
+    select.poly_set(pts, 0, 32.00,  8.00)   // -90 deg, up
+    select.poly_set(pts, 1, 46.11, 51.42)   //  54 deg
+    select.poly_set(pts, 2,  9.17, 24.58)   // 198 deg
+    select.poly_set(pts, 3, 54.83, 24.58)   // 342 deg
+    select.poly_set(pts, 4, 17.89, 51.42)   // 126 deg
+    assert_true(select.polygon(pts, select.OP_REPLACE()))
+
+    // THE FILL RULE. Winding 2 at the centre.
+    assert_true(pixel.approx(select.cov_at(32, 32), 1.0, 0.0001))
+    // The whole central pentagon, in all four directions - so the assertion is
+    // about a region, not one lucky pixel.
+    assert_true(pixel.approx(select.cov_at(32, 26), 1.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(32, 38), 1.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(26, 32), 1.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(38, 32), 1.0, 0.0001))
+
+    // The upper POINT is winding 1 - selected under either rule, so it proves
+    // the star was rasterised at all rather than merely that the middle is set.
+    assert_true(pixel.approx(select.cov_at(32, 14), 1.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(32, 20), 1.0, 0.0001))
+
+    // The NOTCH between the two lower points is winding 0 - OUTSIDE under both
+    // rules. This is the counterweight: an implementation that just filled the
+    // convex hull would pass every assertion above and fail this one.
+    assert_true(pixel.approx(select.cov_at(32, 44), 0.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(32, 48), 0.0, 0.0001))
+
+    // Outside the star entirely.
+    assert_true(pixel.approx(select.cov_at(2, 2), 0.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(60, 60), 0.0, 0.0001))
+
+    // Area: a {5/2} pentagram of circumradius 24 with the centre FILLED has
+    // area 24^2 * 5 * sin(72)*sin(36)/sin(108) ~= 651. Under even-odd (centre
+    // hollow) it would be ~475 - the central pentagon has area ~176 - so this
+    // band is a second, independent witness to the fill rule.
+    assert_true(select.area() > 620.0)
+    assert_true(select.area() < 680.0)
+    select.poly_free(pts)
+}
+
+test "a polygon needs at least three points" {
+    select.init(16, 16)
+    var pts = select.poly_new(2)
+    select.poly_set(pts, 0, 2.0, 2.0)
+    select.poly_set(pts, 1, 10.0, 10.0)
+    // Two points are a line, not an area. Refused rather than filling something
+    // arbitrary, and the selection is untouched.
+    assert_false(select.polygon(pts, select.OP_REPLACE()))
+    assert_true(select.is_empty())
+    assert_eq(select.poly_count(pts), 2)
+    // Out-of-range writes are refused, not silently wrapped.
+    assert_false(select.poly_set(pts, 2, 1.0, 1.0))
+    assert_false(select.poly_set(pts, 0 - 1, 1.0, 1.0))
+    assert_eq(select.poly_new(0), 0)
+    select.poly_free(pts)
+}
+
+// ---- boolean ops -----------------------------------------------------------
+
+test "REPLACE overwrites, it does not merge" {
+    select.init(32, 32)
+    select.rect(2.0, 2.0, 6.0, 6.0, select.OP_REPLACE())
+    select.rect(20.0, 20.0, 6.0, 6.0, select.OP_REPLACE())
+    // The first rect is GONE. A `replace` that only wrote inside the new shape
+    // would leave it, which is the whole reason the combine kernel walks the
+    // entire buffer.
+    assert_true(pixel.approx(select.cov_at(4, 4), 0.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(22, 22), 1.0, 0.0001))
+    assert_true(pixel.approx(select.area(), 36.0, 0.0001))
+}
+
+test "ADD is the union" {
+    select.init(32, 32)
+    select.rect(4.0, 4.0, 12.0, 12.0, select.OP_REPLACE())
+    select.rect(10.0, 10.0, 12.0, 12.0, select.OP_ADD())
+
+    assert_true(pixel.approx(select.cov_at(5, 5), 1.0, 0.0001))    // first only
+    assert_true(pixel.approx(select.cov_at(12, 12), 1.0, 0.0001))  // overlap
+    assert_true(pixel.approx(select.cov_at(20, 20), 1.0, 0.0001))  // second only
+    assert_true(pixel.approx(select.cov_at(25, 25), 0.0, 0.0001))  // neither
+
+    // |A| + |B| - |A and B| = 144 + 144 - 36 = 252. A union that double-counted
+    // the overlap would give 288.
+    assert_true(pixel.approx(select.area(), 252.0, 0.0001))
+    assert_eq(select.bbox_x0(), 4)
+    assert_eq(select.bbox_x1(), 21)
+}
+
+test "ADD is max(), NOT the probabilistic a+b-ab" {
+    // Both forms agree on hard masks; they differ on SOFT edges, and that
+    // difference is a real bug. Adding the same half-covered column to the
+    // selection twice must leave it at 0.5. Under a+b-ab it becomes 0.75, i.e.
+    // "add to selection" would darken every soft edge it touched again - the
+    // same accumulation bug the brush avoids by combining segments with max
+    // (csrc/wynimg_paint.c).
+    select.init(8, 8)
+    select.rect(2.5, 0.0, 1.0, 8.0, select.OP_REPLACE())
+    assert_true(pixel.approx(select.cov_at(2, 0), 0.5, 0.0001))
+    select.rect(2.5, 0.0, 1.0, 8.0, select.OP_ADD())
+    assert_true(pixel.approx(select.cov_at(2, 0), 0.5, 0.0001))
+    // and once more, to rule out "only the second add is idempotent".
+    select.rect(2.5, 0.0, 1.0, 8.0, select.OP_ADD())
+    assert_true(pixel.approx(select.cov_at(2, 0), 0.5, 0.0001))
+}
+
+test "SUBTRACT removes the overlap and leaves the rest" {
+    select.init(32, 32)
+    select.rect(4.0, 4.0, 12.0, 12.0, select.OP_REPLACE())
+    select.rect(10.0, 10.0, 12.0, 12.0, select.OP_SUBTRACT())
+
+    assert_true(pixel.approx(select.cov_at(5, 5), 1.0, 0.0001))    // kept
+    assert_true(pixel.approx(select.cov_at(12, 12), 0.0, 0.0001))  // removed
+    // Outside the FIRST rect, subtract must not ADD anything - this is the
+    // assertion that goes red if subtract is wired up as add.
+    assert_true(pixel.approx(select.cov_at(20, 20), 0.0, 0.0001))
+    // 144 - 36 = 108.
+    assert_true(pixel.approx(select.area(), 108.0, 0.0001))
+}
+
+test "SUBTRACT of a soft edge scales coverage, it does not threshold it" {
+    // d*(1-s). Where the subtracting shape covers 75% of a pixel, a fully
+    // selected pixel keeps 25%.
+    select.init(16, 16)
+    select.select_all()
+    select.rect(4.25, 0.0, 8.0, 16.0, select.OP_SUBTRACT())
+    assert_true(pixel.approx(select.cov_at(4, 8), 0.25, 0.0001))
+    assert_true(pixel.approx(select.cov_at(5, 8), 0.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(12, 8), 0.75, 0.0001))
+    assert_true(pixel.approx(select.cov_at(13, 8), 1.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(0, 8), 1.0, 0.0001))
+}
+
+test "INTERSECT keeps only the overlap" {
+    select.init(32, 32)
+    select.rect(4.0, 4.0, 12.0, 12.0, select.OP_REPLACE())
+    select.rect(10.0, 10.0, 12.0, 12.0, select.OP_INTERSECT())
+
+    assert_true(pixel.approx(select.cov_at(5, 5), 0.0, 0.0001))    // first only: dropped
+    assert_true(pixel.approx(select.cov_at(12, 12), 1.0, 0.0001))  // overlap: kept
+    assert_true(pixel.approx(select.cov_at(20, 20), 0.0, 0.0001))  // second only: dropped
+    // The overlap is [10,16) x [10,16) = 6x6 = 36.
+    assert_true(pixel.approx(select.area(), 36.0, 0.0001))
+    assert_eq(select.bbox_x0(), 10)
+    assert_eq(select.bbox_y0(), 10)
+    assert_eq(select.bbox_x1(), 15)
+    assert_eq(select.bbox_y1(), 15)
+}
+
+test "INTERSECT of two DISJOINT rects is empty, and its bbox says so" {
+    select.init(32, 32)
+    select.rect(2.0, 2.0, 6.0, 6.0, select.OP_REPLACE())
+    select.rect(20.0, 20.0, 6.0, 6.0, select.OP_INTERSECT())
+
+    assert_true(select.is_empty())
+    assert_true(pixel.approx(select.area(), 0.0, 0.0001))
+    assert_true(pixel.approx(select.peak(), 0.0, 0.0001))
+    // -1, not 0. A bbox that reported 0 for an empty selection would make every
+    // caller that uses it to skip rows process row 0 of an empty select.
+    assert_eq(select.bbox_x0(), 0 - 1)
+    assert_eq(select.bbox_y0(), 0 - 1)
+    assert_eq(select.bbox_x1(), 0 - 1)
+    assert_eq(select.bbox_y1(), 0 - 1)
+}
+
+test "an unknown op is refused and leaves the selection alone" {
+    select.init(16, 16)
+    select.select_all()
+    assert_false(select.rect(0.0, 0.0, 4.0, 4.0, 9))
+    assert_false(select.rect(0.0, 0.0, 4.0, 4.0, 0 - 1))
+    assert_true(pixel.approx(select.area(), 256.0, 0.0001))
+}
+
+// ---- invert, select-all, select-none ---------------------------------------
+
+test "select-all and select-none are the two extremes" {
+    select.init(16, 16)
+    select.select_all()
+    assert_false(select.is_empty())
+    assert_true(pixel.approx(select.area(), 256.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(0, 0), 1.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(15, 15), 1.0, 0.0001))
+    assert_eq(select.bbox_x0(), 0)
+    assert_eq(select.bbox_y1(), 15)
+
+    select.select_none()
+    assert_true(select.is_empty())
+    assert_true(pixel.approx(select.area(), 0.0, 0.0001))
+    assert_eq(select.bbox_x0(), 0 - 1)
+}
+
+test "invert swaps inside and outside" {
+    select.init(16, 16)
+    select.rect(4.0, 4.0, 4.0, 4.0, select.OP_REPLACE())
+    assert_true(pixel.approx(select.cov_at(5, 5), 1.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(1, 1), 0.0, 0.0001))
+    assert_true(pixel.approx(select.area(), 16.0, 0.0001))
+
+    select.invert()
+    assert_true(pixel.approx(select.cov_at(5, 5), 0.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(1, 1), 1.0, 0.0001))
+    // 256 - 16 = 240.
+    assert_true(pixel.approx(select.area(), 240.0, 0.0001))
+    assert_false(select.is_empty())
+}
+
+test "invert twice is the IDENTITY, bit-exactly, on PARTIAL coverage" {
+    // The interesting case is a soft edge, not a hard mask. A threshold-based
+    // "invert" round-trips hard masks perfectly and quietly hardens every
+    // feathered edge, so this compares the whole buffer with wynimg_max_diff and
+    // demands EXACTLY 0.0 - not a tolerance.
+    select.init(32, 32)
+    select.rect(4.25, 4.0, 10.5, 10.0, select.OP_REPLACE())
+    // 0.75-covered column at x=4 (the rect starts at 4.25).
+    assert_true(pixel.approx(select.cov_at(4, 5), 0.75, 0.0001))
+
+    var msk = select.handle()
+    var snp = wynimg_clone(msk)
+
+    select.invert()
+    assert_true(pixel.approx(select.cov_at(4, 5), 0.25, 0.0001))  // 1 - 0.75
+    // One invert must actually CHANGE the buffer, or "twice is the identity"
+    // would also pass for an invert that did nothing at all.
+    assert_true(wynimg_max_diff(msk, snp) > 0.5)
+
+    select.invert()
+    assert_true(pixel.approx(select.cov_at(4, 5), 0.75, 0.0001))
+    assert_true(pixel.approx(wynimg_max_diff(msk, snp), 0.0, 0.0000001))
+
+    wynimg_free(snp)
+}
+
+// ---- feather ---------------------------------------------------------------
+
+test "feather turns a HARD edge into a GRADUAL one at predictable values" {
+    // ONE box pass of radius 3 => a 7-tap average, so the ramp across a hard
+    // edge is exactly k/7 for k = 0..7. Those sevenths are the reason the test
+    // uses a single box pass: they are countable, whereas a gaussian's values
+    // are not.
+    //
+    // The rect starts at x=16. Pixel x sees (x+3) - 16 + 1 = x-12 selected
+    // samples out of 7, so:
+    //   x=12 -> 0/7 = 0.0     x=16 -> 4/7 = 0.5714
+    //   x=13 -> 1/7 = 0.1429  x=17 -> 5/7 = 0.7143
+    //   x=14 -> 2/7 = 0.2857  x=18 -> 6/7 = 0.8571
+    //   x=15 -> 3/7 = 0.4286  x=19 -> 7/7 = 1.0
+    select.init(64, 64)
+    select.rect(16.0, 16.0, 32.0, 32.0, select.OP_REPLACE())
+    // Before: a step. Nothing between 0 and 1 anywhere on the boundary.
+    assert_true(pixel.approx(select.cov_at(15, 32), 0.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(16, 32), 1.0, 0.0001))
+
+    assert_true(select.feather_box(3.0, 1))
+
+    assert_true(pixel.approx(select.cov_at(12, 32), 0.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(13, 32), 0.142857, 0.0005))
+    assert_true(pixel.approx(select.cov_at(14, 32), 0.285714, 0.0005))
+    assert_true(pixel.approx(select.cov_at(15, 32), 0.428571, 0.0005))
+    assert_true(pixel.approx(select.cov_at(16, 32), 0.571429, 0.0005))
+    assert_true(pixel.approx(select.cov_at(17, 32), 0.714286, 0.0005))
+    assert_true(pixel.approx(select.cov_at(18, 32), 0.857143, 0.0005))
+    assert_true(pixel.approx(select.cov_at(19, 32), 1.0, 0.0005))
+    // Deep interior is untouched, and the peak is still exactly 1.
+    assert_true(pixel.approx(select.cov_at(32, 32), 1.0, 0.0001))
+    assert_true(pixel.approx(select.peak(), 1.0, 0.0001))
+    // The bbox GREW by the radius: 16-3 = 13 (12 is the first zero).
+    assert_eq(select.bbox_x0(), 13)
+    assert_eq(select.bbox_y0(), 13)
+    assert_eq(select.bbox_x1(), 50)
+}
+
+test "feather approximately CONSERVES total coverage" {
+    // A normalised blur moves coverage, it does not create or destroy it. This
+    // is the assertion an unnormalised kernel fails (its area scales by the tap
+    // count) and that a blur applied twice fails too. The tolerance is 0.001 on
+    // an area of 1024 - about one part in a million.
+    select.init(64, 64)
+    select.rect(16.0, 16.0, 32.0, 32.0, select.OP_REPLACE())
+    var tot = select.area()
+    assert_true(pixel.approx(tot, 1024.0, 0.0001))       // 32*32
+
+    select.feather_box(3.0, 1)
+    assert_true(pixel.approx(select.area(), 1024.0, 0.001))
+
+    // And for the 3-pass gaussian approximation, which spreads much further.
+    select.rect(16.0, 16.0, 32.0, 32.0, select.OP_REPLACE())
+    assert_true(select.feather(4.0))
+    assert_true(pixel.approx(select.area(), 1024.0, 0.001))
+    // It is genuinely a gaussian-ish falloff, not a box: the edge pixel sits
+    // near 0.54 and the tail at 6px out is still faintly non-zero, which a
+    // single box of radius 4 (hard zero at 5px) would not be.
+    assert_true(pixel.approx(select.cov_at(16, 32), 0.5418, 0.005))
+    assert_true(select.cov_at(10, 32) > 0.0)
+    assert_true(select.cov_at(10, 32) < 0.2)
+    assert_true(pixel.approx(select.cov_at(32, 32), 1.0, 0.0001))
+}
+
+test "feather CLAMPS at the canvas edge instead of fading out" {
+    // A fully-selected document must stay fully selected. Treating outside the
+    // canvas as unselected would fade the border, which is never what a user
+    // means by "feather the selection".
+    select.init(32, 32)
+    select.select_all()
+    select.feather_box(3.0, 1)
+    assert_true(pixel.approx(select.cov_at(0, 0), 1.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(31, 31), 1.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(16, 0), 1.0, 0.0001))
+    assert_true(pixel.approx(select.area(), 1024.0, 0.0001))
+}
+
+test "a feather radius that rounds to zero is a no-op, not an error" {
+    select.init(16, 16)
+    select.rect(4.0, 4.0, 8.0, 8.0, select.OP_REPLACE())
+    // "Feather by 0.4px" is a request with a correct empty answer.
+    assert_true(select.feather_box(0.4, 1))
+    assert_true(pixel.approx(select.cov_at(4, 4), 1.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(3, 4), 0.0, 0.0001))
+    assert_true(pixel.approx(select.area(), 64.0, 0.0001))
+}
+
+// ---- grow / contract -------------------------------------------------------
+
+test "grow moves a hard boundary out by exactly N pixels" {
+    // On a HARD mask the threshold-shift approximation is exact morphological
+    // dilation in the Chebyshev metric, so the numbers are exact and the corner
+    // moves diagonally too.
+    select.init(64, 64)
+    select.rect(20.0, 20.0, 20.0, 20.0, select.OP_REPLACE())
+    assert_eq(select.bbox_x0(), 20)
+    assert_eq(select.bbox_x1(), 39)
+    assert_true(pixel.approx(select.area(), 400.0, 0.0001))
+
+    assert_true(select.grow(3))
+    assert_true(pixel.approx(select.cov_at(17, 32), 1.0, 0.0001))  // 3 out: in
+    assert_true(pixel.approx(select.cov_at(16, 32), 0.0, 0.0001))  // 4 out: still out
+    assert_true(pixel.approx(select.cov_at(17, 17), 1.0, 0.0001))  // diagonal corner
+    assert_true(pixel.approx(select.cov_at(32, 32), 1.0, 0.0001))  // interior intact
+    // A 26x26 square: (20-3) .. (39+3).
+    assert_eq(select.bbox_x0(), 17)
+    assert_eq(select.bbox_y0(), 17)
+    assert_eq(select.bbox_x1(), 42)
+    assert_eq(select.bbox_y1(), 42)
+    assert_true(pixel.approx(select.area(), 676.0, 0.0001))        // 26*26
+}
+
+test "contract moves a hard boundary in by exactly N pixels" {
+    select.init(64, 64)
+    select.rect(20.0, 20.0, 20.0, 20.0, select.OP_REPLACE())
+    assert_true(select.contract(3))
+    assert_true(pixel.approx(select.cov_at(23, 32), 1.0, 0.0001))  // 3 in: kept
+    assert_true(pixel.approx(select.cov_at(22, 32), 0.0, 0.0001))  // 2 in: eroded
+    assert_true(pixel.approx(select.cov_at(32, 32), 1.0, 0.0001))  // centre kept
+    // 14x14 = 196: the erosion is exact, not approximate, on a hard mask.
+    assert_eq(select.bbox_x0(), 23)
+    assert_eq(select.bbox_x1(), 36)
+    assert_true(pixel.approx(select.area(), 196.0, 0.0001))
+}
+
+test "contracting past the shape's own size empties it" {
+    select.init(32, 32)
+    select.rect(10.0, 10.0, 4.0, 4.0, select.OP_REPLACE())
+    // A 4x4 block eroded by 3 has nothing left. Empty, not negative, and not a
+    // stray sliver.
+    assert_true(select.contract(3))
+    assert_true(select.is_empty())
+    assert_eq(select.bbox_x0(), 0 - 1)
+}
+
+test "grow(0) is a no-op and a negative amount is refused" {
+    select.init(32, 32)
+    select.rect(8.0, 8.0, 8.0, 8.0, select.OP_REPLACE())
+    assert_true(select.grow(0))
+    assert_true(pixel.approx(select.area(), 64.0, 0.0001))
+    // grow and contract each take a magnitude; the direction is the function
+    // name, so a negative here is a caller bug rather than a silent reversal.
+    assert_false(select.grow(0 - 1))
+    assert_false(select.contract(0 - 1))
+    assert_true(pixel.approx(select.area(), 64.0, 0.0001))
+}
+
+// ---- integration with the coverage-producing tools -------------------------
+
+test "clip() multiplies a real BRUSH coverage buffer by the selection" {
+    // THE WHOLE POINT OF COVERAGE-AS-SELECTION, end to end: the buffer here is
+    // produced by wynimg_stroke_seg - the brush's own kernel - clipped by one
+    // call, and then composited by wynimg_stroke_apply, the brush's own apply.
+    // No selection-specific compositing exists, and this is the test that says
+    // so in pixels.
+    var buf = wynimg_new(64, 64)
+    var bse = wynimg_clone(buf)
+    var cvg = wynimg_new(64, 64)
+    wynimg_stroke_seg(cvg, 8.0, 32.0, 56.0, 32.0, 6.0, 1.0)
+    // The stroke covers both halves before clipping.
+    assert_true(pixel.approx(wynimg_get(cvg, pixel.px_index(64, 20, 32, 0)), 1.0, 0.0001))
+    assert_true(pixel.approx(wynimg_get(cvg, pixel.px_index(64, 44, 32, 0)), 1.0, 0.0001))
+
+    select.init(64, 64)
+    select.rect(0.0, 0.0, 32.0, 64.0, select.OP_REPLACE())
+    assert_true(select.clip(cvg))
+
+    assert_true(pixel.approx(wynimg_get(cvg, pixel.px_index(64, 20, 32, 0)), 1.0, 0.0001))
+    assert_true(pixel.approx(wynimg_get(cvg, pixel.px_index(64, 44, 32, 0)), 0.0, 0.0001))
+
+    // And through the real compositing kernel: opaque red inside, untouched out.
+    wynimg_stroke_apply(buf, bse, cvg, 1.0, 0.0, 0.0, 1.0, 0)
+    assert_true(pixel.approx(wynimg_pick(buf, 20, 32, 3), 1.0, 0.0001))
+    assert_true(pixel.approx(wynimg_pick(buf, 20, 32, 0), 1.0, 0.0001))
+    assert_true(pixel.approx(wynimg_pick(buf, 44, 32, 3), 0.0, 0.0001))
+
+    wynimg_free(buf)
+    wynimg_free(bse)
+    wynimg_free(cvg)
+}
+
+test "a FEATHERED selection clips a stroke to PARTIAL alpha" {
+    // The reason a selection is coverage and not a rectangle, in one assertion:
+    // a soft selection edge produces a soft stroke edge with no extra code, and
+    // the alpha that lands is the product of the two coverages.
+    var cvg = wynimg_new(32, 32)
+    wynimg_stroke_seg(cvg, 0.0, 16.0, 31.0, 16.0, 8.0, 1.0)
+    select.init(32, 32)
+    select.rect(0.0, 0.0, 16.0, 32.0, select.OP_REPLACE())
+    select.feather_box(3.0, 1)
+    // The rect spans [0,16), so column 15 is the LAST selected one. Its 7-tap
+    // window covers samples 12..18, of which 12..15 are inside: 4/7 = 0.5714.
+    // Column 16 sees only 13..15: 3/7 = 0.4286.
+    assert_true(pixel.approx(select.cov_at(15, 16), 0.571429, 0.0005))
+    assert_true(pixel.approx(select.cov_at(16, 16), 0.428571, 0.0005))
+    select.clip(cvg)
+    assert_true(pixel.approx(wynimg_get(cvg, pixel.px_index(32, 15, 16, 0)),
+                             0.571429, 0.0005))
+    assert_true(pixel.approx(wynimg_get(cvg, pixel.px_index(32, 16, 16, 0)),
+                             0.428571, 0.0005))
+    assert_true(pixel.approx(wynimg_get(cvg, pixel.px_index(32, 4, 16, 0)),
+                             1.0, 0.0001))
+    wynimg_free(cvg)
+}
+
+// ---- lifecycle and safety --------------------------------------------------
+
+test "with NO selection every op is a safe no-op" {
+    // The editor has to be able to run before a selection exists, and a caller
+    // must be able to treat "no selection" as "no clipping" without a special
+    // case. So the null path returns false / 0 / empty everywhere rather than
+    // crashing or silently selecting everything.
+    select.release()
+    assert_false(select.active())
+    assert_true(select.is_empty())
+    assert_true(pixel.approx(select.area(), 0.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(0, 0), 0.0, 0.0001))
+    assert_eq(select.bbox_x0(), 0 - 1)
+
+    assert_false(select.select_all())
+    assert_false(select.select_none())
+    assert_false(select.invert())
+    assert_false(select.rect(0.0, 0.0, 4.0, 4.0, select.OP_REPLACE()))
+    assert_false(select.circle(2.0, 2.0, 1.0, select.OP_REPLACE()))
+    assert_false(select.feather(2.0))
+    assert_false(select.grow(2))
+    assert_false(select.clip(0))
+}
+
+test "a fresh selection selects NOTHING, not everything" {
+    // "No selection object" and "nothing selected" are deliberately the same
+    // observable state. The alternative convention - an absent selection means
+    // the whole document - is the classic source of a tool that silently edits
+    // everything.
+    var msk = select.init(24, 16)
+    assert_true(msk != 0)
+    assert_true(select.active())
+    assert_true(select.is_empty())
+    assert_eq(select.doc_w(), 24)
+    assert_eq(select.doc_h(), 16)
+    assert_eq(select.init(0, 16), 0)
+    assert_eq(select.init(16, 0 - 1), 0)
+}
+
+test "a STALE mask handle is a no-op, not a use-after-free" {
+    // Same generation-tagged handle discipline as every other buffer here: Wyn
+    // cannot be stopped from holding a freed handle, so freeing must make every
+    // later use resolve to NULL rather than read freed memory.
+    var msk = select.new_mask(8, 8)
+    assert_true(select.mask_all(msk))
+    assert_true(pixel.approx(select.mask_area(msk), 64.0, 0.0001))
+    assert_eq(wynimg_alive(msk), 1)
+
+    select.free_mask(msk)
+    assert_eq(wynimg_alive(msk), 0)
+    assert_false(select.mask_all(msk))
+    assert_false(select.mask_none(msk))
+    assert_true(pixel.approx(select.mask_area(msk), 0.0, 0.0001))
+    assert_true(pixel.approx(select.mask_at(msk, 0, 0), 0.0, 0.0001))
+    // Freeing twice is a no-op, not a double free.
+    select.free_mask(msk)
+}
+
+test "a FAINT selection is not empty, and its bbox includes it" {
+    // is_empty() must mean "no coverage at all", not "not much coverage". A
+    // quarter-covered sliver is a real selection: a caller that treated it as
+    // empty and skipped the document would silently drop the user's work, and a
+    // bbox that excluded it would clip every antialiased and feathered border.
+    //
+    // This is the assertion that a threshold hiding in is_empty() or bbox()
+    // fails, and it is the ONLY one that does - a mutation putting the
+    // is_empty() test at 0.9 passed every other test in this file.
+    select.init(16, 16)
+    // A rect one quarter of a pixel wide: column 4 gets exactly 0.25 and no
+    // pixel anywhere reaches 0.5.
+    select.rect(4.5, 0.0, 0.25, 16.0, select.OP_REPLACE())
+    assert_true(pixel.approx(select.cov_at(4, 8), 0.25, 0.0001))
+    assert_true(pixel.approx(select.peak(), 0.25, 0.0001))
+    assert_false(select.is_empty())
+    assert_true(pixel.approx(select.area(), 4.0, 0.0001))   // 0.25 * 16
+    assert_eq(select.bbox_x0(), 4)
+    assert_eq(select.bbox_x1(), 4)
+    assert_eq(select.bbox_y0(), 0)
+    assert_eq(select.bbox_y1(), 15)
+
+    // The same at the far tail of a gaussian feather, where coverage is a few
+    // thousandths: still a selection, still inside the bbox.
+    select.init(64, 64)
+    select.rect(30.0, 30.0, 4.0, 4.0, select.OP_REPLACE())
+    select.feather(4.0)
+    assert_false(select.is_empty())
+    assert_true(select.peak() < 0.5)          // the block is smaller than the blur
+    assert_true(select.cov_at(20, 32) > 0.0)
+    assert_true(select.cov_at(20, 32) < 0.02)
+    assert_true(select.bbox_x0() <= 20)
+}
+
+test "coverage reads outside the document are 0, not garbage" {
+    select.init(16, 16)
+    select.select_all()
+    assert_true(pixel.approx(select.cov_at(0 - 1, 0), 0.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(0, 0 - 1), 0.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(16, 0), 0.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(0, 16), 0.0, 0.0001))
+    assert_true(pixel.approx(select.cov_at(15, 15), 1.0, 0.0001))
+}
+
+test "combining mismatched sizes is refused, not truncated" {
+    var msk = select.new_mask(8, 8)
+    select.mask_all(msk)
+    select.init(16, 16)
+    // A silent partial combine here would clip a selection to the top-left
+    // corner of the document and look almost right.
+    assert_false(select.mask_combine(select.handle(), msk, select.OP_ADD()))
+    assert_true(select.is_empty())
+    assert_false(select.clip(msk))
+    select.free_mask(msk)
+}
+
+test "op_name covers every op" {
+    assert_eq(select.op_name(select.OP_REPLACE()), "replace")
+    assert_eq(select.op_name(select.OP_ADD()), "add")
+    assert_eq(select.op_name(select.OP_SUBTRACT()), "subtract")
+    assert_eq(select.op_name(select.OP_INTERSECT()), "intersect")
+    assert_eq(select.op_name(9), "?")
+}
