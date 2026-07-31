@@ -1,6 +1,14 @@
 *.wyn.c
 *.wyn.out
 *.out
+# ...but wynjs's expected-output FIXTURES are source, not build output. They
+# happen to end in .out and the blanket rule above was swallowing all 20 of them,
+# so the repo shipped every .js case with no way to know what it should print:
+# a fresh clone could not run wynjs's suite at all. The runner reads these files
+# (tests/test_main.wyn: `want = File.read(want_path)`), and each one is generated
+# from REAL node output, which is the only reason the suite can detect a wrong
+# EXPECTATION rather than just a wrong result.
+!wynjs/tests/cases/*.out
 *.dSYM/
 .DS_Store
 # compiled example binaries (extensionless, next to their .wyn source)
