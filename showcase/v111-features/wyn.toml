@@ -1,4 +1,0 @@
-[project]
-name = "v111-features"
-version = "1.11.0"
-entry = "src/main.wyn"
