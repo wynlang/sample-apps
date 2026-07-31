@@ -42,7 +42,7 @@ fn main() -> int {
 
     // A valid call needs at least one input and an output.
     if args.len() - first < 2 {
-        println("usage: cli <layer.png> [more.png ...] <out.png>")
+        print("usage: cli <layer.png> [more.png ...] <out.png>")
         return 1
     }
 
@@ -58,7 +58,7 @@ fn main() -> int {
         // A missing, unreadable or non-PNG file yields a null handle, whose
         // width reads back as 0. Reported, not crashed on.
         if wynimg_width(buf) == 0 {
-            println("error: cannot read " + args[i])
+            print("error: cannot read ${args[i]}")
             return 1
         }
         if w == 0 {
@@ -69,17 +69,11 @@ fn main() -> int {
             // any layer that mismatches, which would produce a partial
             // composite that still exits 0. Fail loudly instead.
             if wynimg_width(buf) != w {
-                println("error: " + args[i] + " is "
-                        + wynimg_width(buf).to_string() + "x"
-                        + wynimg_height(buf).to_string()
-                        + ", expected " + w.to_string() + "x" + h.to_string())
+                print("error: ${args[i]} is ${wynimg_width(buf)}x${wynimg_height(buf)}, expected ${w}x${h}")
                 return 1
             }
             if wynimg_height(buf) != h {
-                println("error: " + args[i] + " is "
-                        + wynimg_width(buf).to_string() + "x"
-                        + wynimg_height(buf).to_string()
-                        + ", expected " + w.to_string() + "x" + h.to_string())
+                print("error: ${args[i]} is ${wynimg_width(buf)}x${wynimg_height(buf)}, expected ${w}x${h}")
                 return 1
             }
         }
@@ -88,10 +82,9 @@ fn main() -> int {
     }
 
     if render.compose_to_png(w, h, out_path) == 1 {
-        println("wrote " + out_path + " (" + w.to_string() + "x" + h.to_string()
-                + ", " + layer.count().to_string() + " layers)")
+        print("wrote ${out_path} (${w}x${h}, ${layer.count()} layers)")
         return 0
     }
-    println("error: composite failed")
+    print("error: composite failed")
     return 1
 }

@@ -224,7 +224,7 @@ pub fn accept_one(s: int) -> int {
 
 pub fn listen(port: int) -> int {
     var s = web.listen(port)
-    println("wyncanvas server on http://localhost:" + port.to_string())
+    print("wyncanvas server on http://localhost:${port}")
     return s
 }
 

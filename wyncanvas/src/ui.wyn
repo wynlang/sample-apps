@@ -2153,7 +2153,7 @@ fn click_label(ui: Ui, label: string) -> Ui {
         }
         i = i + 1
     }
-    println("  no widget labelled " + label)
+    print("  no widget labelled ${label}")
     return ui
 }
 
@@ -2180,14 +2180,11 @@ fn win_y_of_doc(docy: int) -> int {
 fn print_px(x: int, y: int) {
     if g_dirty == 1 { refresh(0) }
     if g_last_comp == 0 {
-        println("  no composite")
+        print("  no composite")
         return
     }
-    println("  px(" + x.to_string() + "," + y.to_string() + ")="
-            + rounded3(wynimg_pick(g_last_comp, x, y, 0)) + ","
-            + rounded3(wynimg_pick(g_last_comp, x, y, 1)) + ","
-            + rounded3(wynimg_pick(g_last_comp, x, y, 2)) + " a="
-            + rounded3(wynimg_pick(g_last_comp, x, y, 3)))
+    var _rgb = "${rounded3(wynimg_pick(g_last_comp, x, y, 0))},${rounded3(wynimg_pick(g_last_comp, x, y, 1))},${rounded3(wynimg_pick(g_last_comp, x, y, 2))}"
+    print("  px(${x},${y})=${_rgb} a=${rounded3(wynimg_pick(g_last_comp, x, y, 3))}")
 }
 
 // A scripted stroke in DOCUMENT coordinates, driven through the WINDOW path.
@@ -2243,13 +2240,8 @@ fn run_action(ui: Ui, act: string) -> Ui {
         // record a request and the frame loop performs the I/O (see the header).
         // So `click:Save -> msg=ready req=2` is the correct observation, and the
         // proof that the save happened is the file, one frame later.
-        println("  click:" + label + " -> msg=" + g_msg
-                + " req=" + g_req.to_string()
-                + " tool=" + paint.tool_name(paint.tool())
-                + " layers=" + layer.count().to_string()
-                + " active=" + g_active.to_string()
-                + " hist=" + history.depth().to_string()
-                + " zoom=" + view.zoom().to_string() + "%")
+        var _st = "tool=${paint.tool_name(paint.tool())} layers=${layer.count()} active=${g_active}"
+        print("  click:${label} -> msg=${g_msg} req=${g_req} ${_st} hist=${history.depth()} zoom=${view.zoom()}%")
         return u
     }
 
@@ -2257,13 +2249,12 @@ fn run_action(ui: Ui, act: string) -> Ui {
     if act.starts_with("stroke:") {
         var parts = act.substring(7, act.len()).split(":")
         if parts.len() < 4 {
-            println("  stroke needs x0:y0:x1:y1")
+            print("  stroke needs x0:y0:x1:y1")
             return ui
         }
         do_stroke(parts[0].to_int(), parts[1].to_int(),
                   parts[2].to_int(), parts[3].to_int())
-        println("  " + act + " -> " + g_msg
-                + " hist=" + history.depth().to_string())
+        print("  ${act} -> ${g_msg} hist=${history.depth()}")
         return ui
     }
 
@@ -2282,18 +2273,15 @@ fn run_action(ui: Ui, act: string) -> Ui {
     if act.starts_with("screen:") {
         var sp = act.substring(7, act.len()).split(":")
         if sp.len() < 2 {
-            println("  screen needs docx:docy")
+            print("  screen needs docx:docy")
             return ui
         }
         if g_dirty == 1 { refresh(0) }
         paint(ui)
         var wx2 = win_x_of_doc(sp[0].to_int())
         var wy2 = win_y_of_doc(sp[1].to_int())
-        println("  screen doc(" + sp[0] + "," + sp[1] + ") -> win("
-                + wx2.to_string() + "," + wy2.to_string() + ") rgb="
-                + gui.Win_pixel_at(g_win, wx2, wy2, 0).to_string() + ","
-                + gui.Win_pixel_at(g_win, wx2, wy2, 1).to_string() + ","
-                + gui.Win_pixel_at(g_win, wx2, wy2, 2).to_string())
+        var _px = "${gui.Win_pixel_at(g_win, wx2, wy2, 0)},${gui.Win_pixel_at(g_win, wx2, wy2, 1)},${gui.Win_pixel_at(g_win, wx2, wy2, 2)}"
+        print("  screen doc(${sp[0]},${sp[1]}) -> win(${wx2},${wy2}) rgb=${_px}")
         return ui
     }
 
@@ -2301,7 +2289,7 @@ fn run_action(ui: Ui, act: string) -> Ui {
     if act.starts_with("px:") {
         var pp = act.substring(3, act.len()).split(":")
         if pp.len() < 2 {
-            println("  px needs x:y")
+            print("  px needs x:y")
             return ui
         }
         print_px(pp[0].to_int(), pp[1].to_int())
@@ -2313,18 +2301,14 @@ fn run_action(ui: Ui, act: string) -> Ui {
     if act.starts_with("hsv:") {
         var hp = act.substring(4, act.len()).split(":")
         if hp.len() < 3 {
-            println("  hsv needs h:s:v")
+            print("  hsv needs h:s:v")
             return ui
         }
         paint.set_hsv(hp[0].to_float(), hp[1].to_float(), hp[2].to_float())
-        println("  hsv -> " + rounded(paint.hue()) + "," + rounded(paint.sat())
-                + "," + rounded(paint.val())
-                + " srgb=" + rounded3(paint.color_srgb(0)) + ","
-                + rounded3(paint.color_srgb(1)) + ","
-                + rounded3(paint.color_srgb(2))
-                + " linear=" + rounded3(paint.color_linear(0)) + ","
-                + rounded3(paint.color_linear(1)) + ","
-                + rounded3(paint.color_linear(2)))
+        var _hsv = "${rounded(paint.hue())},${rounded(paint.sat())},${rounded(paint.val())}"
+        var _srgb = "${rounded3(paint.color_srgb(0))},${rounded3(paint.color_srgb(1))},${rounded3(paint.color_srgb(2))}"
+        var _lin = "${rounded3(paint.color_linear(0))},${rounded3(paint.color_linear(1))},${rounded3(paint.color_linear(2))}"
+        print("  hsv -> ${_hsv} srgb=${_srgb} linear=${_lin}")
         return ui
     }
 
@@ -2333,13 +2317,12 @@ fn run_action(ui: Ui, act: string) -> Ui {
     if act.starts_with("pickat:") {
         var qp = act.substring(7, act.len()).split(":")
         if qp.len() < 2 {
-            println("  pickat needs sx:sy")
+            print("  pickat needs sx:sy")
             return ui
         }
         canvas_press(SV_X() + qp[0].to_int(), SV_Y() + qp[1].to_int())
         canvas_release(SV_X() + qp[0].to_int(), SV_Y() + qp[1].to_int())
-        println("  " + act + " -> hsv=" + rounded(paint.hue()) + ","
-                + rounded(paint.sat()) + "," + rounded(paint.val()))
+        print("  ${act} -> hsv=${rounded(paint.hue())},${rounded(paint.sat())},${rounded(paint.val())}")
         return ui
     }
 
@@ -2348,7 +2331,7 @@ fn run_action(ui: Ui, act: string) -> Ui {
         var yp = act.substring(8, act.len()).to_int()
         canvas_press(HUE_X() + HUE_W() / 2, HUE_Y() + yp)
         canvas_release(HUE_X() + HUE_W() / 2, HUE_Y() + yp)
-        println("  " + act + " -> hue=" + rounded(paint.hue()))
+        print("  ${act} -> hue=${rounded(paint.hue())}")
         return ui
     }
 
@@ -2356,14 +2339,13 @@ fn run_action(ui: Ui, act: string) -> Ui {
     if act.starts_with("brush:") {
         var bp = act.substring(6, act.len()).split(":")
         if bp.len() < 3 {
-            println("  brush needs radius:hardness:alpha")
+            print("  brush needs radius:hardness:alpha")
             return ui
         }
         paint.set_radius(bp[0].to_float())
         paint.set_hardness(bp[1].to_float())
         paint.set_alpha(bp[2].to_float())
-        println("  brush -> r=" + rounded(paint.radius()) + " h="
-                + rounded(paint.hardness()) + " a=" + rounded(paint.alpha()))
+        print("  brush -> r=${rounded(paint.radius())} h=${rounded(paint.hardness())} a=${rounded(paint.alpha())}")
         return ui
     }
 
@@ -2381,8 +2363,7 @@ fn run_action(ui: Ui, act: string) -> Ui {
         if tn == "mellipse" { on_tool_mellipse(0) }
         if tn == "lasso" { on_tool_lasso(0) }
         if tn == "text" { on_tool_text(0) }
-        println("  tool -> " + paint.tool_name(paint.tool())
-                + " sel=" + sel_tool_word())
+        print("  tool -> ${paint.tool_name(paint.tool())} sel=${sel_tool_word()}")
         return ui
     }
 
@@ -2398,7 +2379,7 @@ fn run_action(ui: Ui, act: string) -> Ui {
     if act.starts_with("text:") {
         var tp = act.substring(5, act.len()).split(":")
         if tp.len() < 3 {
-            println("  text needs x:y:string")
+            print("  text needs x:y:string")
             return ui
         }
         on_tool_text(0)
@@ -2407,9 +2388,7 @@ fn run_action(ui: Ui, act: string) -> Ui {
             commit_text(tp[2])
             g_req = REQ_NONE
         }
-        println("  " + act + " -> " + g_msg
-                + " hist=" + history.depth().to_string()
-                + " undo=" + history.undo_label())
+        print("  ${act} -> ${g_msg} hist=${history.depth()} undo=${history.undo_label()}")
         return ui
     }
 
@@ -2417,7 +2396,7 @@ fn run_action(ui: Ui, act: string) -> Ui {
     // stepper clicks.
     if act.starts_with("textpx:") {
         g_text_px = act.substring(7, act.len()).to_float()
-        println("  textpx -> " + rounded(g_text_px))
+        print("  textpx -> ${rounded(g_text_px)}")
         return ui
     }
 
@@ -2425,9 +2404,7 @@ fn run_action(ui: Ui, act: string) -> Ui {
     // call, so a scripted filter proves the button's path and not a parallel one.
     if act.starts_with("filter:") {
         run_filter(act.substring(7, act.len()))
-        println("  " + act + " -> " + g_msg
-                + " hist=" + history.depth().to_string()
-                + " undo=" + history.undo_label())
+        print("  ${act} -> ${g_msg} hist=${history.depth()} undo=${history.undo_label()}")
         return ui
     }
 
@@ -2439,16 +2416,12 @@ fn run_action(ui: Ui, act: string) -> Ui {
     if act.starts_with("marquee:") {
         var qq = act.substring(8, act.len()).split(":")
         if qq.len() < 4 {
-            println("  marquee needs x0:y0:x1:y1")
+            print("  marquee needs x0:y0:x1:y1")
             return ui
         }
         do_marquee(qq[0].to_int(), qq[1].to_int(),
                    qq[2].to_int(), qq[3].to_int())
-        println("  " + act + " -> " + g_msg + " area=" + rounded(select.area())
-                + " bbox=" + select.bbox_x0().to_string() + ","
-                + select.bbox_y0().to_string() + ","
-                + select.bbox_x1().to_string() + ","
-                + select.bbox_y1().to_string())
+        print("  ${act} -> ${g_msg} area=${rounded(select.area())} bbox=${select.bbox_x0()},${select.bbox_y0()},${select.bbox_x1()},${select.bbox_y1()}")
         return ui
     }
 
@@ -2459,7 +2432,7 @@ fn run_action(ui: Ui, act: string) -> Ui {
         if so == "add" { g_sel_op = select.OP_ADD() }
         if so == "subtract" { g_sel_op = select.OP_SUBTRACT() }
         if so == "intersect" { g_sel_op = select.OP_INTERSECT() }
-        println("  selop -> " + select.op_name(g_sel_op))
+        print("  selop -> ${select.op_name(g_sel_op)}")
         return ui
     }
 
@@ -2525,8 +2498,7 @@ fn run_action(ui: Ui, act: string) -> Ui {
             select.feather(sc.substring(8, sc.len()).to_float())
             g_msg = "feathered"
         }
-        println("  " + act + " -> " + g_msg + " area=" + rounded(select.area())
-                + " empty=" + select.is_empty().to_string())
+        print("  ${act} -> ${g_msg} area=${rounded(select.area())} empty=${select.is_empty()}")
         return ui
     }
 
@@ -2537,20 +2509,17 @@ fn run_action(ui: Ui, act: string) -> Ui {
     if act.starts_with("selat:") {
         var sa = act.substring(6, act.len()).split(":")
         if sa.len() < 2 {
-            println("  selat needs x:y")
+            print("  selat needs x:y")
             return ui
         }
-        println("  selat(" + sa[0] + "," + sa[1] + ")="
-                + rounded3(select.cov_at(sa[0].to_int(), sa[1].to_int())))
+        print("  selat(${sa[0]},${sa[1]})=${rounded3(select.cov_at(sa[0].to_int(), sa[1].to_int()))}")
         return ui
     }
 
     // zoom:percent - an exact scale, so a script can test one.
     if act.starts_with("zoom:") {
         view.set_zoom(act.substring(5, act.len()).to_int())
-        println("  zoom -> " + view.zoom().to_string() + "% origin="
-                + view.origin_x().to_string() + ","
-                + view.origin_y().to_string())
+        print("  zoom -> ${view.zoom()}% origin=${view.origin_x()},${view.origin_y()}")
         return ui
     }
 
@@ -2559,7 +2528,7 @@ fn run_action(ui: Ui, act: string) -> Ui {
     if act.starts_with("pan:") {
         var np = act.substring(4, act.len()).split(":")
         if np.len() < 2 {
-            println("  pan needs dx:dy")
+            print("  pan needs dx:dy")
             return ui
         }
         var keep = paint.tool()
@@ -2570,10 +2539,7 @@ fn run_action(ui: Ui, act: string) -> Ui {
         canvas_drag(cx + np[0].to_int(), cy + np[1].to_int())
         canvas_release(cx + np[0].to_int(), cy + np[1].to_int())
         paint.set_tool(keep)
-        println("  pan -> " + view.pan_x().to_string() + ","
-                + view.pan_y().to_string() + " origin="
-                + view.origin_x().to_string() + ","
-                + view.origin_y().to_string())
+        print("  pan -> ${view.pan_x()},${view.pan_y()} origin=${view.origin_x()},${view.origin_y()}")
         return ui
     }
 
@@ -2581,15 +2547,12 @@ fn run_action(ui: Ui, act: string) -> Ui {
     if act.starts_with("map:") {
         var mp = act.substring(4, act.len()).split(":")
         if mp.len() < 2 {
-            println("  map needs x:y")
+            print("  map needs x:y")
             return ui
         }
         var wx = mp[0].to_int()
         var wy = mp[1].to_int()
-        println("  map win(" + wx.to_string() + "," + wy.to_string()
-                + ") -> doc(" + rounded3(view.screen_to_doc_x(wx.to_float()))
-                + "," + rounded3(view.screen_to_doc_y(wy.to_float()))
-                + ") hits=" + view.hits_doc(wx, wy).to_string())
+        print("  map win(${wx},${wy}) -> doc(${rounded3(view.screen_to_doc_x(wx.to_float()))},${rounded3(view.screen_to_doc_y(wy.to_float()))}) hits=${view.hits_doc(wx, wy)}")
         return ui
     }
 
@@ -2597,14 +2560,12 @@ fn run_action(ui: Ui, act: string) -> Ui {
     if act.starts_with("eyedrop:") {
         var kp = act.substring(8, act.len()).split(":")
         if kp.len() < 2 {
-            println("  eyedrop needs x:y")
+            print("  eyedrop needs x:y")
             return ui
         }
         paint.set_tool(paint.TOOL_PICK())
         canvas_press(win_x_of_doc(kp[0].to_int()), win_y_of_doc(kp[1].to_int()))
-        println("  " + act + " -> hsv=" + rounded(paint.hue()) + ","
-                + rounded(paint.sat()) + "," + rounded(paint.val())
-                + "  " + g_msg)
+        print("  ${act} -> hsv=${rounded(paint.hue())},${rounded(paint.sat())},${rounded(paint.val())}  ${g_msg}")
         return ui
     }
 
@@ -2612,13 +2573,12 @@ fn run_action(ui: Ui, act: string) -> Ui {
     if act.starts_with("fill:") {
         var fp = act.substring(5, act.len()).split(":")
         if fp.len() < 2 {
-            println("  fill needs x:y")
+            print("  fill needs x:y")
             return ui
         }
         paint.set_tool(paint.TOOL_FILL())
         canvas_press(win_x_of_doc(fp[0].to_int()), win_y_of_doc(fp[1].to_int()))
-        println("  " + act + " -> " + g_msg + " hist="
-                + history.depth().to_string())
+        print("  ${act} -> ${g_msg} hist=${history.depth()}")
         return ui
     }
 
@@ -2627,8 +2587,7 @@ fn run_action(ui: Ui, act: string) -> Ui {
     if act.starts_with("active:") {
         g_active = act.substring(7, act.len()).to_int()
         clamp_active()
-        println("  active -> " + g_active.to_string() + " ("
-                + layer.name(g_active) + ")")
+        print("  active -> ${g_active} (${layer.name(g_active)})")
         return ui
     }
 
@@ -2641,40 +2600,32 @@ fn run_action(ui: Ui, act: string) -> Ui {
             if g_row_layer[j] == top { on_layer_row(g_row_ids[j]) }
             j = j + 1
         }
-        println("  toggle_top -> visible(" + top.to_string() + ")="
-                + layer.visible(top).to_string()
-                + " history.depth=" + history.depth().to_string())
+        print("  toggle_top -> visible(${top})=${layer.visible(top)} history.depth=${history.depth()}")
         return ui
     }
     if act == "undo" {
         on_undo(0)
-        println("  undo -> can_undo=" + history.can_undo().to_string()
-                + " can_redo=" + history.can_redo().to_string()
-                + " layers=" + layer.count().to_string()
-                + " msg=" + g_msg)
+        print("  undo -> can_undo=${history.can_undo()} can_redo=${history.can_redo()} layers=${layer.count()} msg=${g_msg}")
         return ui
     }
     if act == "redo" {
         on_redo(0)
-        println("  redo -> can_undo=" + history.can_undo().to_string()
-                + " can_redo=" + history.can_redo().to_string()
-                + " layers=" + layer.count().to_string()
-                + " msg=" + g_msg)
+        print("  redo -> can_undo=${history.can_undo()} can_redo=${history.can_redo()} layers=${layer.count()} msg=${g_msg}")
         return ui
     }
     if act == "zoom_in" {
         on_zoom_in(0)
-        println("  zoom_in -> " + view.zoom().to_string() + "%")
+        print("  zoom_in -> ${view.zoom()}%")
         return ui
     }
     if act == "zoom_out" {
         on_zoom_out(0)
-        println("  zoom_out -> " + view.zoom().to_string() + "%")
+        print("  zoom_out -> ${view.zoom()}%")
         return ui
     }
     if act == "fit" {
         on_zoom_fit(0)
-        println("  fit -> " + view.zoom().to_string() + "%")
+        print("  fit -> ${view.zoom()}%")
         return ui
     }
     // save / open take the path from the environment, so a script can name a
@@ -2684,14 +2635,12 @@ fn run_action(ui: Ui, act: string) -> Ui {
     // and neither is a second code path that could disagree with the button.
     if act == "save" {
         save_doc(System.env("WYNCANVAS_SAVE"))
-        println("  save -> " + g_msg)
+        print("  save -> ${g_msg}")
         return ui
     }
     if act == "open" {
         open_doc(System.env("WYNCANVAS_OPEN"))
-        println("  open -> " + g_msg + " doc=" + g_doc_w.to_string() + "x"
-                + g_doc_h.to_string() + " layers=" + layer.count().to_string()
-                + " zoom=" + view.zoom().to_string() + "%")
+        print("  open -> ${g_msg} doc=${g_doc_w}x${g_doc_h} layers=${layer.count()} zoom=${view.zoom()}%")
         return ui
     }
 
@@ -2700,32 +2649,25 @@ fn run_action(ui: Ui, act: string) -> Ui {
     // two processes and an environment variable per file.
     if act.starts_with("saveas:") {
         save_doc(act.substring(7, act.len()))
-        println("  " + act + " -> " + g_msg)
+        print("  ${act} -> ${g_msg}")
         return ui
     }
     if act.starts_with("openas:") {
         open_doc(act.substring(7, act.len()))
-        println("  " + act + " -> " + g_msg + " doc=" + g_doc_w.to_string() + "x"
-                + g_doc_h.to_string() + " layers=" + layer.count().to_string()
-                + " active=" + g_active.to_string()
-                + " hist=" + history.depth().to_string())
+        print("  ${act} -> ${g_msg} doc=${g_doc_w}x${g_doc_h} layers=${layer.count()} active=${g_active} hist=${history.depth()}")
         return ui
     }
     if act == "layers" {
         // The whole stack, bottom-up, as the compositor sees it.
         var i = 0
         while i < layer.count() {
-            println("  L" + i.to_string() + " " + layer.name(i)
-                    + " vis=" + layer.visible(i).to_string()
-                    + " mode=" + pixel.blend_name(layer.blend_mode(i))
-                    + " op=" + rounded(layer.opacity(i))
-                    + " buf=" + layer.buffer(i).to_string())
+            print("  L${i} ${layer.name(i)} vis=${layer.visible(i)} mode=${pixel.blend_name(layer.blend_mode(i))} op=${rounded(layer.opacity(i))} buf=${layer.buffer(i)}")
             i = i + 1
         }
-        println("  active=" + g_active.to_string())
+        print("  active=${g_active}")
         return ui
     }
-    println("  unknown action: " + act)
+    print("  unknown action: ${act}")
     return ui
 }
 
@@ -2733,7 +2675,7 @@ fn main() -> int {
     // A GUI program that may run headless has to be able to find that out and
     // exit cleanly rather than crash on the first draw call.
     if gui.Win_available() == 0 {
-        println("no display backend available")
+        print("no display backend available")
         return 0
     }
 
@@ -2747,12 +2689,12 @@ fn main() -> int {
 
     g_win = gui.Win_window("WynCanvas", WIN_W(), WIN_H())
     if g_win < 0 {
-        println("could not open a window")
+        print("could not open a window")
         return 1
     }
     g_font = gui.Win_font_default(14)
     if g_font < 0 {
-        println("no font available")
+        print("no font available")
         gui.Win_close(g_win)
         return 1
     }
@@ -2762,7 +2704,7 @@ fn main() -> int {
     // prints as a decimal address ("4344711438"). The bare spelling emits
     // `const char*` and is correct. Reported; applies to every string-returning
     // extern, so `Win_event_text` inside widgets.wyn is called bare there too.
-    println("backend: " + Win_backend_name())
+    print("backend: ${Win_backend_name()}")
 
     // The view transform needs the viewport rectangle and the document size
     // before anything can be mapped through it.
@@ -2802,7 +2744,7 @@ fn main() -> int {
     // Drive the real handlers before entering the loop (see run_action).
     var script = System.env("WYNCANVAS_SCRIPT")
     if script != "" {
-        println("script:")
+        print("script:")
         var acts = script.split(",")
         var s = 0
         while s < acts.len() {
