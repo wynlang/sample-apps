@@ -1333,32 +1333,19 @@ fn canvas_press(mx: int, my: int) {
     var dx = view.screen_to_doc_x(mx.to_float())
     var dy = view.screen_to_doc_y(my.to_float())
 
-    // THE SELECTION GATES THE PIXEL TOOLS - and this is a REFUSAL at the press,
-    // not a clip of the coverage, which is a stated limitation rather than an
-    // oversight. The reason is a boundary this change cannot cross.
+    // THE SELECTION ALSO GATES THE PRESS, on top of the coverage clip that
+    // src/paint.wyn now applies in `apply_cov()`.
     //
-    // The correct clip is one call - `select.clip(cov)` between
-    // `wynimg_stroke_seg` and `wynimg_stroke_apply` in src/paint.wyn's `seg`, and
-    // the same before the apply in `fill_at`. src/select.wyn's header says
-    // exactly that, and it is right. But the coverage buffer is `paint.wyn`'s
-    // private `s_cov`, and paint.wyn is not this change's file to edit.
+    // The two are not redundant, they answer different questions. The clip makes a
+    // stroke that crosses the boundary get CUT at it (including at a feathered
+    // edge, exactly). This gate makes a press that begins on an unselected pixel do
+    // nothing AT ALL - no stroke, no history entry - rather than begin a stroke
+    // every dab of which is clipped away to nothing. Without the gate the user gets
+    // an undo entry for a gesture that changed no pixels, which reads as a bug.
     //
-    // WHY NOT DO IT AFTER THE FACT, which was tried and rejected: reconstructing
-    // `layer = before*(1-sel) + after*sel` from outside needs a masked lerp
-    // between two BUFFERS, and no such kernel exists. The nearest available
-    // composition (zero the alpha inside the selection with an erase-mode apply,
-    // then source-over the unclipped result through the selection as a mask) is
-    // exact for a HARD selection but wrong at a feathered edge - source-over
-    // cannot lower alpha, so an ERASER inside a soft-edged selection would leave
-    // the alpha it was asked to remove. A filter that is right for a hard mask
-    // and quietly wrong for a soft one is the kind of thing this project
-    // documents rather than ships.
-    //
-    // So: with a selection active, a press on an UNSELECTED pixel does nothing at
-    // all - which is the property that matters most, because it is the one that
-    // makes "the selection protects the rest of the layer" true. A stroke that
-    // STARTS inside and is dragged out is not clipped at the boundary; the README
-    // says so.
+    // TOOL_PICK is exempt because the eyedropper reads the composite rather than
+    // writing to the layer, so a selection has no business restricting where you
+    // can sample from.
     if select.is_empty() == false {
         if t != paint.TOOL_PICK() {
             if select.cov_at(dx.to_int(), dy.to_int()) <= 0.0 {

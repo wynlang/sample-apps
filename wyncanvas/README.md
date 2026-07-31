@@ -12,19 +12,18 @@ delete / reorder / opacity / blend-mode / visibility, **coverage selections**
 sharpen, saturation, levels, curves, invert) applied to the active layer through
 the selection, and a **text tool** - every one of them a single undoable command.
 
-**Not implemented:** vectors, PSD, transform tools, layer groups.
+**Not implemented:** vectors, PSD, layer groups.
 
 Honest limitations of what *is* implemented:
 
-- **A stroke is gated by the selection at the press, not clipped at the boundary.**
-  Pressing on an unselected pixel does nothing (and records nothing), so a
-  selection genuinely protects the rest of the layer - but a stroke that STARTS
-  inside a selection and is dragged out is not cut off at the edge. The correct
-  fix is one line - `select.clip(cov)` between `wynimg_stroke_seg` and
-  `wynimg_stroke_apply` inside `src/paint.wyn`'s `seg` - and it is not done here
-  because that coverage buffer is `paint.wyn`'s private state. Filters and text
-  ARE fully clipped, including at a feathered edge, because they take a coverage
-  mask directly.
+- **A stroke is clipped by the selection at the boundary.** (Was: gated only at
+  the press.) The clip happens in `apply_cov()`, the single choke point that
+  `begin`, every `seg` and the commit path all run through, so there is no third
+  path to forget. It runs on a COPY of the coverage buffer - clipping `s_cov` in
+  place would decay a feathered edge geometrically over a slow drag (0.5, 0.25,
+  0.125...) because every apply re-reads the whole buffer. An empty selection means
+  "paint everywhere", not an all-zeros mask that would silently make the brush a
+  no-op.
 - **The marquee shows a bounding box, not marching ants.** An ellipse selection
   outlines the box it is inscribed in. Drawing the true boundary means scanning the
   coverage buffer for edge pixels every frame from Wyn - one FFI call per pixel,
@@ -40,9 +39,11 @@ Honest limitations of what *is* implemented:
 - **Filter parameters are fixed, not slider-driven** (blur radius 4, sharpen 0.8,
   saturation 1.4/0.6, levels 0.05/0.95/1.2, gamma curve 1.6). The toolkit has no
   slider widget.
-- A layer's MASK is not captured by the delete/undo record (there is no eleventh
-  entry column for it), so undoing a delete restores the pixels and properties but
-  not the mask. `.wync` save/load *does* preserve masks.
+- A layer's MASK now survives delete/undo: the entry gained an eleventh column
+  (`h_m`) written through the same single writer as the other ten, so they stay the
+  same length by construction. It is a real column rather than a seat in `h_b`,
+  because `h_b` holds the OP_PIXELS "after" snapshot that `discard_above` frees -
+  a mask parked there would be freed while the layer still referenced it.
 - A `.wync` file does not store the selection.
 
 ### What "the brush works" means here, and how it is checked
@@ -237,6 +238,7 @@ Symptom / minimal-repro / root-cause records live with the upstream compiler iss
 | `src/filter.wyn` | Blur / sharpen / levels / curves / saturation |
 | `src/text.wyn` | Text as coverage, through the brush kernel |
 | `src/project.wyn` | `.wync` layered save / load |
+| `src/xform.wyn` | Scale / rotate / flip / crop / canvas resize / affine |
 | `src/ui.wyn` | Native SDL3 editor window: layout, paint, dispatch |
 | `verify_ui.sh` | 132 headless pixel assertions against the built editor |
 | `tests/golden/` | Reference images (see its README) |
