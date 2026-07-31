@@ -88,20 +88,11 @@ import layer
 import history
 import render
 
-// SELECT MUST BE IMPORTED BEFORE SERVER, and that is a live compiler bug, not a
-// style choice. src/select.wyn has `pub fn handle() -> int` (the current
-// selection's coverage handle) and src/server.wyn has `pub fn handle(req: string)`
-// plus an UNQUALIFIED internal call to it. With server first, that internal call
-// is emitted as `handle_string(req)` - an overload-mangled name that is never
-// defined - and the build dies with "call to undeclared function 'handle_string'"
-// pointing at a line in server.wyn that this file never touched.
-//
-// Minimised to three files: module A with `pub fn handle(s: string)` and a second
-// pub fn calling it unqualified, module B with `pub fn handle()`, and an importer
-// of both. `import a` then `import b` fails; `import b` then `import a` compiles
-// and runs. The mangling only appears when the two signatures DIFFER in arity -
-// two same-arity `handle`s are fine - so it is the arity-disambiguation path
-// leaking a mangled callee into the wrong module. Reported upstream.
+// select and server both export a `pub fn handle` of different arity
+// (select's coverage handle vs server's request handler). That used to require a
+// specific import order to compile - a cross-module overload-mangling bug that
+// emitted an undefined `handle_string` into one module's own internal call. Fixed
+// upstream (wynlang/wyn #239); the order is now free.
 import select
 import server
 import paint
