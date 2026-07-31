@@ -24,21 +24,25 @@ Honest limitations of what *is* implemented:
   0.125...) because every apply re-reads the whole buffer. An empty selection means
   "paint everywhere", not an all-zeros mask that would silently make the brush a
   no-op.
-- **The marquee shows a bounding box, not marching ants.** An ellipse selection
-  outlines the box it is inscribed in. Drawing the true boundary means scanning the
-  coverage buffer for edge pixels every frame from Wyn - one FFI call per pixel,
-  which is the "one `Win_rect` per pixel" mistake `src/ui.wyn`'s header rejects.
-  A live lasso drag DOES draw its exact path, because a lasso's path is its
-  outline.
+- The marquee draws **marching ants**: the selection's real boundary, so an
+  ellipse shows an ellipse and a feathered edge fades. The per-pixel-FFI objection
+  that made this look infeasible was an argument against doing it in *Wyn* - the
+  scan is one call into C (`wynimg_sel_outline`), and the result reaches the screen
+  as a second texture, one upload and one blit, rebuilt only when the selection
+  changes. A live lasso drag still draws its exact path as it goes.
 - **Selection changes are not undoable.** A selection is not part of the document;
   putting it in the undo log would mean Undo after "blur the selection" popped the
   selection change first and left the blur on screen.
 - **The text tool types into a toolbar field, not onto the canvas.** Pick Text,
   type, then click to place. The toolkit's `Ui_events` drains the key queue, so an
   on-canvas caret keeping its own buffer would see no keystrokes.
-- **Filter parameters are fixed, not slider-driven** (blur radius 4, sharpen 0.8,
-  saturation 1.4/0.6, levels 0.05/0.95/1.2, gamma curve 1.6). The toolkit has no
-  slider widget.
+- Filter parameters are **slider-driven**: one strength control at the bottom of
+  the right panel, 0-200%, and each filter maps it onto its own units. At 100%
+  every filter does exactly what it did when the values were hardcoded (blur
+  radius 4, sharpen 0.8, saturation 1.4/0.6, levels 0.05/0.95/1.2, gamma 1.6), so
+  the default click is unchanged and the slider only adds reach. Invert has no
+  strength - it is its own opposite, and a partial blend would stop "Inv" twice
+  from returning the original.
 - A layer's MASK now survives delete/undo: the entry gained an eleventh column
   (`h_m`) written through the same single writer as the other ten, so they stay the
   same length by construction. It is a real column rather than a seat in `h_b`,

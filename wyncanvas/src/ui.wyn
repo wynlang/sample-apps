@@ -181,6 +181,51 @@ var g_ants_w = 0
 var g_ants_h = 0
 var g_ants_stamp = -1.0
 var g_ants_ready = 0
+
+// ---- filter strength -------------------------------------------------------
+//
+// Filter parameters used to be hardcoded, and the reason recorded here was that
+// "the toolkit has no slider widget". That is no longer true - repos/gui grew
+// Ui_slider, Ui_val and Ui_set_range - so the values are now driven by one
+// control instead of frozen at the value a single click should mean.
+//
+// ONE slider, not one per parameter. A blur radius, a sharpen amount and a
+// saturation multiplier are different quantities in different units, and a
+// separate control for each would be five sliders in a 250px panel for a demo
+// that has four filter buttons. So this is a STRENGTH in percent, and each
+// filter maps it onto its own sensible range - which is also what makes the
+// mapping testable: `strength_frac()` is one number and each filter's use of it
+// is one line.
+//
+// The slider stores an INT (the toolkit's val/vmin/vmax are ints) while every
+// filter parameter is a float, so the conversion happens in exactly one place.
+var g_strength_id = -1
+var g_strength = 100
+
+fn on_strength(id: int) {
+    // The handler cannot read the Ui (a handler receives only an id), so the
+    // frame loop copies the value across - see the note where it does.
+    g_msg = "strength ${g_strength}%"
+}
+
+// The slider as a fraction, 0.0 at the low end and 1.0 at 100%.
+//
+// The clamp is DEFENSIVE AND CURRENTLY UNREACHABLE, which is worth saying out
+// loud rather than leaving as a comment that implies otherwise: the widget
+// already clamps to its own 0..200 range (`strength:500` comes back as 200), so
+// nothing can get here out of bounds today. Mutation-testing confirms it -
+// widening the bound to 99.0 fails no test.
+//
+// It stays because the range lives in build_form and the arithmetic lives here,
+// and the two can drift: the day someone widens the slider to 0..1000, a filter
+// receiving a 10x radius is a hang, not a wrong picture. A guard whose cost is
+// two comparisons and whose absence is a hang is worth keeping unproven.
+fn strength_frac() -> float {
+    var f = g_strength.to_float() / 100.0
+    if f < 0.0 { f = 0.0 }
+    if f > 2.0 { f = 2.0 }
+    return f
+}
 var g_tex_w = 0
 var g_tex_h = 0
 
@@ -732,20 +777,35 @@ fn run_filter(what: string) {
 
     var m = mask_for_ops()
     var ok = false
-    // Radii and amounts are fixed rather than slider-driven: the toolkit has no
-    // slider, and a stepper per filter parameter would be twelve more buttons
-    // for no gain in what this proves. The values are the ones a single click
-    // should mean - a blur you can see, a sharpen that does not ring.
-    if what == "blur"      { ok = filter.gaussian(buf, 4.0, m) }
-    if what == "sharpen"   { ok = filter.sharpen(buf, 0.8, m) }
-    if what == "saturate"  { ok = filter.saturation(buf, 1.4, m) }
-    if what == "desaturate" { ok = filter.saturation(buf, 0.6, m) }
-    if what == "levels"    { ok = filter.levels(buf, 0.05, 0.95, 1.2, m) }
+
+    // EVERY PARAMETER IS THE STRENGTH SLIDER, mapped onto that filter's own
+    // units. At 100% each of these is the value it was hardcoded to before, so
+    // the default click does exactly what it always did and the slider only adds
+    // reach - which is the property that keeps the golden tests meaningful.
+    //
+    // Each mapping is one line, and each is chosen so the ends are useful rather
+    // than merely different: a blur that can go from a whisper to obvious, a
+    // sharpen that stops short of ringing, a saturation that reaches full grey
+    // at 0% instead of inverting.
+    var k = strength_frac()
+    if what == "blur"      { ok = filter.gaussian(buf, 4.0 * k, m) }
+    if what == "sharpen"   { ok = filter.sharpen(buf, 0.8 * k, m) }
+    // Saturation is a MULTIPLIER around 1.0, not a scale of the amount: scaling
+    // 1.4 by k would make 0% mean "multiply by 0" (full grey) for saturate and
+    // "multiply by 0" again for desaturate, so the two buttons would agree at
+    // the low end. Interpolating away from 1.0 keeps them opposites everywhere.
+    if what == "saturate"  { ok = filter.saturation(buf, 1.0 + 0.4 * k, m) }
+    if what == "desaturate" { ok = filter.saturation(buf, 1.0 - 0.4 * k, m) }
+    // Levels: the black/white points close in on the histogram as strength rises
+    // and gamma lifts with it. At 0% this is the identity (0, 1, 1.0).
+    if what == "levels"    { ok = filter.levels(buf, 0.05 * k, 1.0 - 0.05 * k, 1.0 + 0.2 * k, m) }
+    // Invert has no strength - it is its own opposite - and pretending otherwise
+    // with a partial blend would make "Inv" twice not equal the original.
     if what == "invert"    { ok = filter.invert(buf, m) }
     if what == "curve" {
         // A curve is a buffer too, so it must be freed on BOTH paths - which is
         // why this filter is the one with its own block rather than a one-liner.
-        var c = filter.gamma_curve(32, 1.6)
+        var c = filter.gamma_curve(32, 1.0 + 0.6 * k)
         if c == 0 {
             wynimg_free(before)
             g_msg = "out of memory"
@@ -1626,6 +1686,51 @@ fn paint_button(ui: Ui, i: int) {
                  235, 235, 240)
 }
 
+// A slider: track, filled portion, thumb, and its value as text.
+//
+// WHY THIS FILE HAS TO DRAW IT. WynCanvas does not call widgets.Ui_draw - that
+// function clears and presents its own frame, which would erase the document (see
+// this file's header). So every widget kind it uses must be painted here, and a
+// kind with no case is INVISIBLE while still being hit-testable and draggable:
+// the slider would work perfectly and show nothing.
+//
+// The geometry comes from the toolkit (Ui_slider_thumb_x), never recomputed here.
+// A second copy of the thumb formula would drift from the one that decides what a
+// click MEANS, and the symptom would be a thumb that sits beside the value it
+// reports.
+fn paint_slider(ui: Ui, i: int) {
+    var x = widgets.Ui_x_at(ui, i)
+    var y = widgets.Ui_y_at(ui, i)
+    var w = widgets.Ui_w_at(ui, i)
+    var h = widgets.Ui_h_at(ui, i)
+    var id = widgets.Ui_id_at(ui, i)
+
+    var cy = y + h / 2
+    // The track, inset by the thumb's half-width so the thumb never overhangs it.
+    gui.Win_rect(g_win, x + 6, cy - 2, w - 12, 4, 40, 40, 48)
+
+    var tx = widgets.Ui_slider_thumb_x(ui, id)
+    // The filled part, left of the thumb: it is what makes the value readable at
+    // a glance without reading the number.
+    if tx > x + 6 {
+        gui.Win_rect(g_win, x + 6, cy - 2, tx - x - 6, 4, 70, 110, 170)
+    }
+
+    // The thumb, brighter while it is the one being dragged or hovered.
+    var tr = 200
+    var tg = 200
+    var tb = 212
+    if widgets.Ui_hot(ui) == id { tr = 235 tg = 235 tb = 245 }
+    gui.Win_rect(g_win, tx - 5, cy - 8, 10, 16, tr, tg, tb)
+    gui.Win_rect_outline(g_win, tx - 5, cy - 8, 10, 16, 20, 20, 26)
+
+    // The value, to the right of the track. Text rather than a tooltip because a
+    // filter strength is a number you set deliberately, not one you discover.
+    var lbl = "${widgets.Ui_val(ui, id)}%"
+    gui.Win_text(g_win, g_font, lbl, x + w - gui.Win_text_width(g_font, lbl),
+                 y - 14, 200, 200, 212)
+}
+
 fn paint_entry(ui: Ui, i: int) {
     var x = widgets.Ui_x_at(ui, i)
     var y = widgets.Ui_y_at(ui, i)
@@ -2060,6 +2165,9 @@ fn paint(ui: Ui) {
             }
         }
         if kind == 3 { paint_entry(ui, i) }
+        // KIND_SLIDER. Without this case the slider is hit-testable, draggable
+        // and completely invisible.
+        if kind == 8 { paint_slider(ui, i) }
         if kind == 0 {
             gui.Win_text(g_win, g_font, widgets.Ui_label_at(ui, i),
                          widgets.Ui_x_at(ui, i), widgets.Ui_y_at(ui, i),
@@ -2140,13 +2248,29 @@ fn build_form(win: int, font: int) -> Ui {
                            on_blend_next)
 
     // Filters, in the toolbar's second row. Abbreviated labels because seven
-    // filters at full width would not fit, and each is one click with fixed
-    // parameters - see run_filter for why fixed and not slider-driven.
+    // filters at full width would not fit; their PARAMETERS come from the
+    // strength slider below the layer list - see run_filter for the mapping.
     var fy = 9
     ui = widgets.Ui_button(ui, "Blur", 1004, fy, 40, 28, on_flt_blur)
     ui = widgets.Ui_button(ui, "Shrp", 1046, fy, 40, 28, on_flt_sharpen)
     ui = widgets.Ui_button(ui, "Sat+", 1088, fy, 40, 28, on_flt_saturate)
     ui = widgets.Ui_button(ui, "Inv", 1130, fy, 36, 28, on_flt_invert)
+
+    // Filter strength, at the BOTTOM of the right panel.
+    //
+    // Below the layer list rather than in the toolbar, because the toolbar's
+    // second row is full: the filter buttons end at x=1166 and the window is
+    // 1180 wide. paint_layers already truncates a row that would run past
+    // VIEW_Y()+VIEW_H(), so reserving the last band costs no layer rows that were
+    // being drawn.
+    //
+    // 0..200% in steps of 5: 100% reproduces exactly the values that used to be
+    // hardcoded, and the range reaches past it because "more than the default"
+    // is the request a fixed parameter cannot answer.
+    var stry = VIEW_Y() + VIEW_H() - 34
+    ui = widgets.Ui_slider(ui, PANEL_X() + 8, stry, PANEL_W() - 16, 20,
+                           0, 200, 5, g_strength, on_strength)
+    g_strength_id = widgets.Ui_last_id(ui)
 
     // Selection commands, under the tool palette. `All`/`Non`/`Inv` are the three
     // a user reaches for constantly and none of them is a drag.
@@ -2560,6 +2684,54 @@ fn run_action(ui: Ui, act: string) -> Ui {
         return ui
     }
 
+    // winpx:x:y - a raw WINDOW pixel, in window coordinates.
+    //
+    // `screen:` already reports a pixel, but it takes DOCUMENT coordinates and
+    // maps them through `view`, so it can only reach the canvas. Chrome - a
+    // button, a slider, the panel - has no document coordinate, and a widget that
+    // is hit-testable but never DRAWN is invisible to every state assertion. This
+    // is the only way to prove something reached the screen.
+    if act.starts_with("winpx:") {
+        var wp = act.substring(6, act.len()).split(":")
+        if wp.len() < 2 {
+            print("  winpx needs x:y")
+            return ui
+        }
+        // Paint first, exactly as `screen:` does. The script runs BEFORE the
+        // frame loop's own paint, so probing without this reads an unpainted
+        // framebuffer and every pixel comes back 0,0,0 - which looks like "the
+        // widget is invisible" and is really "nothing has been drawn yet".
+        if g_dirty == 1 { refresh(0) }
+        paint(ui)
+        var wpx = wp[0].to_int()
+        var wpy = wp[1].to_int()
+        print("  winpx(${wpx},${wpy})=${gui.Win_pixel_at(g_win, wpx, wpy, 0)},${gui.Win_pixel_at(g_win, wpx, wpy, 1)},${gui.Win_pixel_at(g_win, wpx, wpy, 2)}")
+        return ui
+    }
+
+    // sliderx:N - where the toolkit says the strength thumb is, so a test can
+    // probe the thumb rather than guessing its pixel from the range.
+    if act.starts_with("sliderx") {
+        if g_strength_id < 0 {
+            print("  sliderx -> no slider")
+            return ui
+        }
+        print("  sliderx -> thumb=${widgets.Ui_slider_thumb_x(ui, g_strength_id)} val=${widgets.Ui_val(ui, g_strength_id)}")
+        return ui
+    }
+
+    // strength:N - set the filter-strength slider, so a headless run can prove
+    // that a filter's parameters actually follow it.
+    if act.starts_with("strength:") {
+        var sv = act.substring(9, act.len()).to_int()
+        if g_strength_id >= 0 {
+            ui = widgets.Ui_set_val(ui, g_strength_id, sv)
+            g_strength = widgets.Ui_val(ui, g_strength_id)
+        }
+        print("  strength -> ${g_strength}% frac=${rounded3(strength_frac())}")
+        return ui
+    }
+
     // sel:all|none|invert|feather:N - the whole-document commands, through the
     // same handlers the buttons call.
     if act.starts_with("sel:") {
@@ -2834,6 +3006,16 @@ fn main() -> int {
     var n = 0
     while widgets.Ui_running(ui) == 1 {
         ui = widgets.Ui_events(ui)
+
+        // The strength slider's value, copied out each frame.
+        //
+        // A handler receives only a widget id and cannot reach the Ui, so
+        // on_strength cannot read its own slider - the same constraint that makes
+        // Open/Save deferred requests in this file. Reading it here instead is one
+        // line and always current, including mid-drag.
+        if g_strength_id >= 0 {
+            g_strength = widgets.Ui_val(ui, g_strength_id)
+        }
 
         // Keyboard shortcuts, read straight after Ui_events: the toolkit has just
         // settled focus and recorded whatever no widget claimed. Before the
