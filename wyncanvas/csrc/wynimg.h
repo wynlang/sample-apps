@@ -112,6 +112,50 @@ long long wynimg_brightness(void* buf, double amount);
 // so a dimension mismatch can never masquerade as a pass.
 double wynimg_max_diff(void* a, void* b);
 
+// ---------------------------------------------------------------------------
+// The brush (csrc/wynimg_paint.c).
+//
+// wynimg_stroke_seg sweeps ONE capsule per call and is the primitive text
+// rendering and selection clipping use. The DAB engine below is the brush: it
+// places stamps at a fixed arc length along the path, which is what lets a dab
+// carry a pressure, an angle, an aspect and a scatter offset of its own. A swept
+// capsule has no dabs to give those to.
+//
+// There is one live dab run at a time, and its state (the arc-length carry and
+// the dab index) lives in C. src/paint.wyn holds exactly one stroke, and the
+// alternative - hand the carry back to Wyn each call - needs a multi-value
+// return, which does not survive a Wyn module boundary here.
+// ---------------------------------------------------------------------------
+
+// Sets the brush for subsequent dab runs. `spacing` is a fraction of the dab
+// radius (0.25 = four dabs per radius); `angle_deg` and `aspect` (minor/major)
+// give a calligraphic nib; `scatter` is a fraction of the radius; `seed` makes
+// the scatter reproducible - the same seed paints the same stroke, which is the
+// only way a randomised brush can be tested. Values are clamped, not refused.
+long long wynimg_brush_set(double radius, double hardness, double spacing,
+                           double angle_deg, double aspect,
+                           double scatter, long long seed);
+
+// Catmull-Rom smoothing of the INPUT PATH. OFF by default, deliberately: it
+// moves where the dabs land, so switching it on by default would change the
+// geometry every existing test describes. See the INPUT-PATH
+// SMOOTHING note in csrc/wynimg_paint.c.
+long long wynimg_brush_smoothing(long long on);
+
+// Begins a dab run at (x,y) with pressure `press` (0..1) and stamps the first
+// dab. 1 ok, 0 refused (null/stale buffer, or radius 0).
+long long wynimg_dab_begin(void* strokep, double x, double y, double press);
+
+// Extends the run to (x,y), stamping a dab every `spacing * radius` px of arc
+// length and CARRYING the remainder to the next call. Returns the number of dabs
+// stamped this call - 0 is normal for a segment shorter than the spacing.
+long long wynimg_dab_seg(void* strokep, double x, double y, double press);
+
+// Read-only run state, so a test can assert the carry is real rather than
+// inferring it from pixels.
+double    wynimg_dab_carry(void);
+long long wynimg_dab_count(void);
+
 // Writes a complete HTTP 200 response carrying the bytes of `path` to an
 // already-accepted socket. Returns 1 on success, 0 if the file cannot be read
 // or the socket write fails.

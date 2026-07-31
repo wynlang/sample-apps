@@ -40,6 +40,36 @@ import pixel
 import layer
 import history
 
+// ---- the dab engine (csrc/wynimg_paint.c) ----------------------------------
+//
+// Declared HERE rather than in src/pixel.wyn, following src/text.wyn: these are
+// the brush's own kernel and nothing else calls them, so the declaration lives
+// with the only caller.
+//
+// WHY A DAB ENGINE AT ALL, given that wynimg_stroke_seg already sweeps a capsule
+// per call. Because a brush is a STAMP repeated along the path. Pressure, a
+// calligraphic angle and a scatter offset are properties of an individual dab,
+// and a single swept capsule has no dabs to give them to. The capsule kernel is
+// still the right primitive for src/text.wyn and src/select.wyn, and it is what a
+// dense round hard brush degenerates to.
+//
+// Dabs land every `spacing * radius` px of ARC LENGTH, and the leftover distance
+// is carried from one input segment to the next. Both halves matter: place one
+// dab per input sample and the stroke's look becomes a property of the pointer's
+// report rate; drop the carry and every interior input point is stamped twice.
+//
+// The run state (the arc-length carry, the dab index) lives in C. There is one
+// live stroke, and returning two values across a Wyn module boundary does not
+// work here.
+extern fn wynimg_brush_set(radius: float, hardness: float, spacing: float,
+                           angle_deg: float, aspect: float,
+                           scatter: float, seed: int) -> int;
+extern fn wynimg_brush_smoothing(on: int) -> int;
+extern fn wynimg_dab_begin(stroke: int, x: float, y: float, press: float) -> int;
+extern fn wynimg_dab_seg(stroke: int, x: float, y: float, press: float) -> int;
+extern fn wynimg_dab_carry() -> float;
+extern fn wynimg_dab_count() -> int;
+
 // ---- tools ----------------------------------------------------------------
 //
 // The tool changes what a drag DOES, not how it is tracked, so it is one int
@@ -123,6 +153,92 @@ pub fn set_tolerance(t: float) {
     p_tol = v
 }
 
+// ---- dab-engine parameters -------------------------------------------------
+//
+// These are the knobs that only exist because a stroke is a chain of DABS rather
+// than one swept capsule: a dab can carry an angle, an aspect and a scatter
+// offset; a capsule cannot. See the note in src/pixel.wyn.
+//
+// The defaults are chosen so a caller who sets none of them paints what the
+// pre-dab brush painted: 25% spacing is dense enough that consecutive dabs
+// overlap heavily and their union is a capsule to within the antialiased rim,
+// aspect 1 is round, and scatter 0 puts every dab exactly on the path.
+
+var p_spacing = 0.25
+var p_angle = 0.0
+var p_aspect = 1.0
+var p_scatter = 0.0
+var p_seed = 1
+var p_smooth = 0
+
+pub fn spacing() -> float { return p_spacing }
+
+// Spacing is a fraction of the dab RADIUS, not an absolute distance, so
+// changing the brush size does not change the stroke's character. Clamped rather
+// than refused: 0 would be infinitely many dabs and a hung editor, and past ~4
+// radii the line is dots and the value stops meaning anything.
+pub fn set_spacing(s: float) {
+    var v = s
+    if v < 0.01 { v = 0.01 }
+    if v > 4.0 { v = 4.0 }
+    p_spacing = v
+}
+
+pub fn angle() -> float { return p_angle }
+pub fn set_angle(a: float) {
+    var v = a
+    while v >= 360.0 { v = v - 360.0 }
+    while v < 0.0 { v = v + 360.0 }
+    p_angle = v
+}
+
+pub fn aspect() -> float { return p_aspect }
+
+// aspect = minor/major. 1 is round; 0.2 is a calligraphic nib five times longer
+// than it is wide. Values above 1 are the same nib rotated 90 degrees, so they
+// are clamped instead of being a second way to spell the same brush.
+pub fn set_aspect(a: float) {
+    var v = a
+    if v < 0.05 { v = 0.05 }
+    if v > 1.0 { v = 1.0 }
+    p_aspect = v
+}
+
+pub fn scatter() -> float { return p_scatter }
+pub fn set_scatter(s: float) {
+    var v = s
+    if v < 0.0 { v = 0.0 }
+    if v > 4.0 { v = 4.0 }
+    p_scatter = v
+}
+
+pub fn seed() -> int { return p_seed }
+
+// The scatter seed. A randomised brush whose output cannot be reproduced cannot
+// be tested, and worse, cannot be undone-and-redone into the same pixels: the
+// stroke would change under the user. So scatter is a hash of (seed, dab index),
+// never a call to rand().
+pub fn set_seed(s: int) { p_seed = s }
+
+pub fn smoothing() -> bool { return p_smooth == 1 }
+
+// Catmull-Rom smoothing of the INPUT path, OFF by default. It moves where dabs
+// land, so it is a behaviour change and not a free improvement - see the note at
+// the INPUT-PATH SMOOTHING note in csrc/wynimg_paint.c.
+pub fn set_smoothing(on: bool) {
+    if on { p_smooth = 1 } else { p_smooth = 0 }
+}
+
+// Pushes the brush parameters into the C engine. Called at begin() rather than
+// from every setter, so a stroke's shape is fixed for its whole duration: a
+// slider dragged mid-stroke must not make the second half of one line a
+// different brush from the first.
+fn push_brush() {
+    wynimg::brush_set(p_radius, p_hardness, p_spacing,
+                      p_angle, p_aspect, p_scatter, p_seed)
+    wynimg::brush_smoothing(p_smooth)
+}
+
 pub fn hue() -> float { return p_h }
 pub fn sat() -> float { return p_s }
 pub fn val() -> float { return p_v }
@@ -183,6 +299,13 @@ pub fn stroke_segments() -> int { return s_segs }
 // immediately as a zero-length segment - which the distance-field kernel handles
 // as a point, giving a symmetric dab.
 pub fn begin(lid: int, x: float, y: float) -> int {
+    return begin_p(lid, x, y, 1.0)
+}
+
+// begin with an explicit PRESSURE, 0..1. `begin` is the pressure-1 case, kept as
+// its own name because every mouse (as opposed to stylus) event is that case and
+// src/ui.wyn should not have to invent a 1.0.
+pub fn begin_p(lid: int, x: float, y: float, press: float) -> int {
     if s_active == 1 { cancel() }
     var buf = layer.buffer(lid)
     if buf == 0 { return 0 }
@@ -203,30 +326,56 @@ pub fn begin(lid: int, x: float, y: float) -> int {
     s_lx = x
     s_ly = y
     s_segs = 0
-    seg(x, y)
-    return 1
+
+    // The brush shape is frozen for the whole stroke, and the dab run's
+    // arc-length cursor is reset here and ONLY here.
+    push_brush()
+    wynimg::dab_begin(s_cov, x, y, press)
+    s_segs = 1
+    return apply_cov()
 }
 
-// Extends the stroke to (x,y). The kernel is given the PREVIOUS position too, so
-// a fast drag paints a continuous capsule rather than a dotted line - which is
-// the whole reason the stroke API is "extend to" rather than "stamp at".
 pub fn seg(x: float, y: float) -> int {
+    return seg_p(x, y, 1.0)
+}
+
+// Extends the stroke to (x,y) at pressure `press`.
+//
+// The dab engine keeps the previous position AND the leftover arc length, so a
+// fast drag lays a continuous line of dabs and a slow one does not pile them up -
+// the stroke's look is a property of the brush, not of the pointer's report rate.
+// That is the whole reason the API is "extend to" rather than "stamp at".
+pub fn seg_p(x: float, y: float, press: float) -> int {
     if s_active == 0 { return 0 }
-    var buf = layer.buffer(s_layer)
-    if buf == 0 { return 0 }
-
-    var erase = 0
-    if p_tool == TOOL_ERASER() { erase = 1 }
-
-    wynimg::stroke_seg(s_cov, s_lx, s_ly, x, y, p_radius, p_hardness)
-    var ok = wynimg::stroke_apply(buf, s_base, s_cov,
-                                  color_linear(0), color_linear(1),
-                                  color_linear(2), p_alpha, erase)
+    if layer.buffer(s_layer) == 0 { return 0 }
+    wynimg::dab_seg(s_cov, x, y, press)
     s_lx = x
     s_ly = y
     s_segs = s_segs + 1
-    return ok
+    return apply_cov()
 }
+
+// Rebuilds the layer as base + colour*coverage. Shared by begin and seg so the
+// live preview during a drag is produced by the identical code as the commit -
+// there is no separate preview renderer that can disagree.
+fn apply_cov() -> int {
+    var buf = layer.buffer(s_layer)
+    if buf == 0 { return 0 }
+    var erase = 0
+    if p_tool == TOOL_ERASER() { erase = 1 }
+    return wynimg::stroke_apply(buf, s_base, s_cov,
+                                color_linear(0), color_linear(1),
+                                color_linear(2), p_alpha, erase)
+}
+
+// Dabs stamped so far this stroke - distinct from stroke_segments(), which counts
+// INPUT samples. The two diverging is the point of spacing: a 200px drag reported
+// as 2 samples and as 50 samples must produce the same dab count.
+pub fn stroke_dabs() -> int { return wynimg::dab_count() }
+
+// Arc length still to travel before the next dab. Exposed so a test can assert
+// the carry is real rather than inferring it from pixels.
+pub fn stroke_carry() -> float { return wynimg::dab_carry() }
 
 // Ends the stroke and records it as ONE undo entry.
 //

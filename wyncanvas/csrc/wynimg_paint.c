@@ -95,20 +95,39 @@ static double seg_dist(double px, double py,
     return sqrt(dx * dx + dy * dy);
 }
 
+// Quintic smootherstep, 0 at 0 and 1 at 1 with BOTH first and second
+// derivatives zero at each end.
+//
+// WHY QUINTIC AND NOT THE CUBIC SMOOTHSTEP. A cubic has zero slope at the ends
+// but a jump in its SECOND derivative there, and human vision differentiates
+// twice: a curvature step reads as a thin bright/dark ring - Mach banding - at
+// the inner edge of a soft brush, which is exactly the "banding" a soft brush is
+// judged on. The quintic removes that discontinuity, at the cost of two extra
+// multiplies per pixel. Both hit 0 and 1 exactly, so the endpoint guarantees
+// below are unchanged.
+static double smoother(double c) {
+    return c * c * c * (c * (c * 6.0 - 15.0) + 10.0);
+}
+
 // Coverage at distance `d` for a brush of `radius` whose inner `hardness`
-// fraction is solid. Smoothstepped across the falloff so the edge has no
-// visible banding; hardness 1 still gets a one-pixel antialiased rim, because a
-// hard-edged disc in a float buffer is a staircase.
+// fraction is solid.
+//
+// TWO EXACT VALUES ARE PART OF THE CONTRACT, and tests assert them: coverage is
+// EXACTLY 1.0 anywhere in the solid core (so a hardness-1 dab centre is 1.0, not
+// 0.9999) and EXACTLY 0.0 at or beyond `radius` (so a brush cannot tint pixels
+// outside its own footprint). Everything between is the smootherstep.
+//
+// hardness 1 still gets a half-pixel antialiased rim, because a hard-edged disc
+// in a float buffer is a staircase.
 static double falloff(double d, double radius, double hardness) {
     if (radius <= 0.0) return 0.0;
+    if (d >= radius) return 0.0;                      // EXACTLY 0 past the rim
     double inner = radius * clamp01d(hardness);
     if (inner > radius - 0.5) inner = radius - 0.5;   // always antialias the rim
     if (inner < 0.0) inner = 0.0;
-    if (d <= inner) return 1.0;
-    if (d >= radius) return 0.0;
+    if (d <= inner) return 1.0;                       // EXACTLY 1 in the core
     double t = (d - inner) / (radius - inner);        // 0 at inner, 1 at rim
-    double c = 1.0 - t;
-    return c * c * (3.0 - 2.0 * c);                   // smoothstep
+    return smoother(1.0 - t);
 }
 
 // Accumulates one segment of a stroke into the coverage buffer `stroke`
@@ -148,6 +167,335 @@ long long wynimg_stroke_seg(void* strokep,
         }
     }
     return 1;
+}
+
+// ---------------------------------------------------------------------------
+// THE DAB ENGINE.
+//
+// wynimg_stroke_seg above is the primitive: one capsule, exactly as wide as the
+// radius, drawn in one pass. It is still what src/text.wyn and src/select.wyn
+// want, and it is what a hard round brush degenerates to. It cannot express a
+// brush, though, because a brush is a STAMP repeated along the path: a
+// calligraphic nib, a scattered spray and a pressure taper are all properties of
+// individual dabs, and a single swept capsule has no dabs to give them to.
+//
+// SPACING, AND WHY THE LEFTOVER MUST CROSS SEGMENT BOUNDARIES.
+//
+// Dabs are placed every `spacing * radius` pixels ALONG THE PATH, not once per
+// input sample. That is the difference between a brush whose look is a property
+// of the brush and one whose look is a property of the mouse's report rate: a
+// 120Hz trackpad and a 8Hz remote-desktop session must paint the same line.
+//
+// The arc-length cursor therefore has to be carried from one segment to the
+// next. Two bugs live in getting that wrong, and both are guarded by tests:
+//
+//   * reset the cursor at each segment and every sample position gets a dab -
+//     the sample-rate dependency comes straight back, and slow drags get dense
+//     dab clusters;
+//   * stamp at each segment's START as well as carrying, and every interior
+//     input point is stamped TWICE. With max() coverage that is invisible on a
+//     round hard brush and glaring on a scattered or low-flow one, because the
+//     duplicate dab draws a second scatter sample at the same arc length.
+//
+// So: `carry` is the distance still to travel before the next dab, it survives
+// across dab_seg calls, and only wynimg_dab_begin ever stamps unconditionally.
+//
+// STATE LIVES IN C, on purpose. There is exactly one live stroke (src/paint.wyn
+// holds one s_active), and the alternative - returning the new carry and dab
+// index to Wyn so Wyn can pass them back - needs multi-value returns, which do
+// not survive a Wyn module boundary here. wynimg_dab_carry/count expose the
+// state read-only so a test can assert the carry is real rather than inferring
+// it from pixels.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    double radius;     // px, at pressure 1
+    double hardness;   // 0..1
+    double spacing;    // fraction of the CURRENT dab radius, > 0
+    double angle;      // radians, major axis direction
+    double aspect;     // minor/major, (0,1]
+    double scatter;    // fraction of radius, 0 = none
+    long long seed;    // scatter PRNG seed; same seed => same stroke
+    long long smooth;  // 1 = Catmull-Rom the input path (OFF by default)
+} Brush;
+
+// Defaults: a round, unscattered, unsmoothed brush at 25% spacing. Chosen so
+// that a caller who never touches the new knobs gets the geometry the old
+// capsule kernel gave - see the test suite's existing capsule assertions.
+static Brush g_brush = { 12.0, 0.6, 0.25, 0.0, 1.0, 0.0, 1, 0 };
+
+typedef struct {
+    double x, y;       // last input point
+    double press;      // pressure at that point
+    double carry;      // distance still to travel before the next dab
+    long long index;   // dabs stamped so far; also the scatter sequence index
+    // The two input points BEFORE (x,y), for Catmull-Rom. Only read when
+    // g_brush.smooth is set.
+    double px_, py_;   // one back
+    double qx, qy;     // two back
+    long long n;       // input points seen this stroke
+} DabRun;
+
+static DabRun g_run;
+
+long long wynimg_brush_set(double radius, double hardness, double spacing,
+                           double angle_deg, double aspect,
+                           double scatter, long long seed) {
+    if (radius < 0.0) radius = 0.0;
+    g_brush.radius = radius;
+    g_brush.hardness = clamp01d(hardness);
+    // A spacing of 0 would be an infinite number of dabs; 4 radii apart is
+    // already a dotted line, past which the value is meaningless rather than
+    // interesting. Clamping (not refusing) keeps a slider from being able to
+    // hang the editor.
+    if (spacing < 0.01) spacing = 0.01;
+    if (spacing > 4.0) spacing = 4.0;
+    g_brush.spacing = spacing;
+    g_brush.angle = angle_deg * 3.14159265358979323846 / 180.0;
+    if (aspect < 0.05) aspect = 0.05;   // a zero-width nib paints nothing
+    if (aspect > 1.0) aspect = 1.0;     // >1 is the same nib rotated 90 degrees
+    g_brush.aspect = aspect;
+    if (scatter < 0.0) scatter = 0.0;
+    if (scatter > 4.0) scatter = 4.0;
+    g_brush.scatter = scatter;
+    g_brush.seed = seed;
+    return 1;
+}
+
+// Input-path smoothing, OFF by default. See the INPUT-PATH SMOOTHING note
+// above wynimg_dab_seg.
+long long wynimg_brush_smoothing(long long on) {
+    g_brush.smooth = (on != 0) ? 1 : 0;
+    return 1;
+}
+
+double    wynimg_dab_carry(void) { return g_run.carry; }
+long long wynimg_dab_count(void) { return g_run.index; }
+
+// SCATTER IS A HASH, NOT A RANDOM NUMBER GENERATOR.
+//
+// A brush whose jitter comes from rand() cannot be tested, and worse, cannot be
+// undone and redone into the same pixels: history replays the stroke, the RNG has
+// moved on, and the image changes under the user. So each dab's offset is a pure
+// function of (seed, dab index, axis) - the same stroke always paints the same
+// pixels, two seeds paint different ones, and there is no hidden state to reset.
+//
+// This is splitmix64's finaliser. It is chosen for having no linear structure in
+// its low bits: a cheaper hash (index * large_odd_constant) produces offsets that
+// walk in a visible straight line along the stroke, which reads as a texture
+// rather than as scatter.
+static double hash01(long long seed, long long index, long long axis) {
+    unsigned long long z = (unsigned long long)seed * 0x9E3779B97F4A7C15ULL
+                         + (unsigned long long)index * 0xBF58476D1CE4E5B9ULL
+                         + (unsigned long long)axis  * 0x94D049BB133111EBULL;
+    z += 0x9E3779B97F4A7C15ULL;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    z = z ^ (z >> 31);
+    // Top 53 bits, so the result is a uniform double in [0,1) with no bias from
+    // the weaker low bits.
+    return (double)(z >> 11) * (1.0 / 9007199254740992.0);
+}
+
+// The offset applied to dab `index`, in px. Scatter is a fraction of the radius,
+// and the offset is sampled in a DISC rather than a square: a square jitter box
+// makes a wide stroke's edges visibly straight and its corners heavy.
+static void scatter_offset(long long index, double* ox, double* oy) {
+    *ox = 0.0;
+    *oy = 0.0;
+    if (g_brush.scatter <= 0.0) return;
+    double ang = hash01(g_brush.seed, index, 0) * 6.283185307179586;
+    // sqrt of a uniform gives a uniform AREA density; using the raw uniform
+    // clusters every dab near the path centre and scatter barely reads.
+    double rr = sqrt(hash01(g_brush.seed, index, 1)) * g_brush.scatter * g_brush.radius;
+    *ox = cos(ang) * rr;
+    *oy = sin(ang) * rr;
+}
+
+// The arc length between a dab painted at pressure `press` and the next one.
+// Scaled by pressure so a tapering tail gets DENSER dabs rather than breaking
+// into beads as its radius shrinks. Floored so a zero-pressure sample cannot
+// make the placement loop below spin forever.
+static double dab_step(double press) {
+    double step = g_brush.spacing * g_brush.radius * (press > 0.0 ? press : 1.0);
+    if (step < 0.05) step = 0.05;
+    return step;
+}
+
+// One dab, centred at (cx,cy), radius scaled by `press`.
+//
+// The dab is an ELLIPSE: distance is measured after rotating into the brush's
+// frame and stretching the minor axis, so `radius` is the half-length along
+// `angle` and `radius*aspect` the half-width across it. A round brush is the
+// aspect-1 case of the same code, which is why there is no second loop for it.
+static void stamp_dab(WynImg* s, double cx, double cy, double press) {
+    double rad = g_brush.radius * press;
+    if (rad <= 0.0) return;
+    // The bounding box uses the MAJOR axis in both directions: at any rotation
+    // the ellipse fits inside that square, and a box computed from the rotated
+    // extents would have to be recomputed per angle for no measurable gain on
+    // brush-sized areas.
+    long long xa = (long long)floor(cx - rad - 1.0);
+    long long xb = (long long)ceil(cx + rad + 1.0);
+    long long ya = (long long)floor(cy - rad - 1.0);
+    long long yb = (long long)ceil(cy + rad + 1.0);
+    if (xa < 0) xa = 0;
+    if (ya < 0) ya = 0;
+    if (xb > s->w - 1) xb = s->w - 1;
+    if (yb > s->h - 1) yb = s->h - 1;
+
+    double ca = cos(-g_brush.angle), sa = sin(-g_brush.angle);
+    double inv_aspect = 1.0 / g_brush.aspect;
+
+    for (long long y = ya; y <= yb; y++) {
+        for (long long x = xa; x <= xb; x++) {
+            // Pixel CENTRES, so an integer-coordinate dab is symmetric rather
+            // than biased half a pixel up and left.
+            double dx = (double)x + 0.5 - cx;
+            double dy = (double)y + 0.5 - cy;
+            double u = dx * ca - dy * sa;
+            double v = (dx * sa + dy * ca) * inv_aspect;
+            double d = sqrt(u * u + v * v);
+            double c = falloff(d, rad, g_brush.hardness);
+            if (c <= 0.0) continue;
+            size_t o = (size_t)(y * s->w + x) * 4;
+            // MAX, NEVER +=. A sum makes overlapping dabs accumulate, which is
+            // the whole bug this stroke model exists to avoid: a 30%-alpha
+            // stroke would go opaque wherever the pointer moved slowly, and at
+            // 25% spacing every pixel is covered by four or more dabs. Tested
+            // by "a 30%-alpha stroke over itself does not reach opacity".
+            if (c > (double)s->px[o]) s->px[o] = (float)c;
+        }
+    }
+}
+
+// One dab at the path point (px,py), displaced by dab `index`'s scatter offset.
+// Every stamping site goes through here so the offset cannot be applied at one
+// site and forgotten at another - which would make the first dab of a scattered
+// stroke the only one on the path.
+static void stamp_scattered(WynImg* s, double px, double py,
+                            double press, long long index) {
+    double ox, oy;
+    scatter_offset(index, &ox, &oy);
+    stamp_dab(s, px + ox, py + oy, press);
+}
+
+// Begins a dab run: resets the arc-length cursor and stamps the first dab.
+//
+// The first dab is unconditional because a click with no drag must paint. Every
+// LATER dab is placed by arc length only, so this is the single point in the
+// engine that stamps without consulting the carry.
+long long wynimg_dab_begin(void* strokep, double x, double y, double press) {
+    WynImg* s = wynimg_deref(strokep);
+    g_run.x = x;
+    g_run.y = y;
+    g_run.px_ = x;  g_run.py_ = y;
+    g_run.qx = x;   g_run.qy = y;
+    g_run.press = clamp01d(press);
+    g_run.carry = 0.0;
+    g_run.index = 0;
+    g_run.n = 1;
+    if (!s || !s->px) return 0;
+    if (g_brush.radius <= 0.0) return 0;
+    stamp_scattered(s, x, y, g_run.press, 0);
+    g_run.index = 1;
+    g_run.carry = dab_step(g_run.press);   // the next dab is one spacing away
+    return 1;
+}
+
+// INPUT-PATH SMOOTHING (Catmull-Rom), OFF BY DEFAULT.
+//
+// A pointer reports a polyline. Drawn as straight chords, a fast curve shows its
+// corners, which is the one artefact people call "the brush feels cheap". A
+// centripetal-free uniform Catmull-Rom through the last four input points is the
+// standard fix: it interpolates (the curve passes through the samples, so the
+// stroke still goes where the user pointed) and needs only local history.
+//
+// WHY IT IS OFF BY DEFAULT, and why turning it on would be a BEHAVIOUR CHANGE
+// rather than an improvement: the spline moves where dabs land. A 90-degree
+// corner drawn as two segments becomes a rounded corner, and a straight line
+// entered as three collinear samples stays straight only because Catmull-Rom
+// happens to be linear on collinear input - a curve entered as a polyline gets
+// visibly shorter chords near its ends, where the spline has no fourth point and
+// must extrapolate. Every existing test in this suite states the geometry of the
+// STRAIGHT interpretation: "a drag paints a continuous capsule" measures pixels
+// 10..80 on the line y=16, and "a calligraphic nib is directional" measures exact
+// footprint extents. Making the spline the default would move those pixels, so
+// the flag exists and the default is what the tests describe. It is the caller's
+// (a UI checkbox's) choice, not the kernel's.
+//
+// t in [0,1] between p1 and p2; p0 and p3 are the neighbours. Standard uniform
+// Catmull-Rom basis.
+static double catmull(double p0, double p1, double p2, double p3, double t) {
+    double t2 = t * t, t3 = t2 * t;
+    return 0.5 * ((2.0 * p1)
+                + (-p0 + p2) * t
+                + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+                + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3);
+}
+
+// The point at parameter t along the current segment, honouring g_brush.smooth.
+// With smoothing off this is exactly the straight chord, which is why the
+// placement loop below has no second copy for the unsmoothed case.
+static void path_point(double t01, double x0, double y0, double x1, double y1,
+                       double* ox, double* oy) {
+    if (!g_brush.smooth || g_run.n < 2) {
+        *ox = x0 + (x1 - x0) * t01;
+        *oy = y0 + (y1 - y0) * t01;
+        return;
+    }
+    // p1..p2 is the current segment; p0 is the previous input point. p3 is not
+    // known yet - the pointer has not reported it - so the segment is drawn with
+    // p3 = p2, which makes the curve leave p2 straight. A one-segment lag that
+    // waited for p3 would smooth better and put the live preview one sample
+    // behind the cursor, which reads as latency; that trade is deliberately made
+    // in favour of the preview.
+    *ox = catmull(g_run.px_, x0, x1, x1, t01);
+    *oy = catmull(g_run.py_, y0, y1, y1, t01);
+}
+
+// Walks the path from the previous input point to (x,y), stamping a dab every
+// `spacing * radius` pixels of arc length and leaving the remainder in
+// g_run.carry for the next call. Pressure ramps linearly along the segment.
+// Returns the number of dabs stamped, which is 0 for a short segment - and that
+// zero is the point: it is where the leftover is being carried instead.
+long long wynimg_dab_seg(void* strokep, double x, double y, double press) {
+    WynImg* s = wynimg_deref(strokep);
+    if (!s || !s->px) return 0;
+    if (g_brush.radius <= 0.0) return 0;
+
+    double x0 = g_run.x, y0 = g_run.y;
+    double p0 = g_run.press, p1 = clamp01d(press);
+    double dx = x - x0, dy = y - y0;
+    double len = sqrt(dx * dx + dy * dy);
+
+    long long made = 0;
+    if (len > 0.0) {
+        double t = g_run.carry;                 // distance to the next dab
+        while (t <= len) {
+            double f = t / len;
+            double pr = p0 + (p1 - p0) * f;
+            // The chord length is used as the arc-length parameter even when
+            // smoothing bends the path. The spline is at most a few percent
+            // longer than its chord over one pointer sample, so the error is
+            // smaller than the spacing quantisation it feeds; measuring true arc
+            // length would need a per-segment integral for no visible gain.
+            double cx, cy;
+            path_point(f, x0, y0, x, y, &cx, &cy);
+            stamp_scattered(s, cx, cy, pr, g_run.index);
+            g_run.index++;
+            made++;
+            t += dab_step(pr);
+        }
+        g_run.carry = t - len;                  // THE CARRY. See the note above.
+    }
+
+    g_run.qx = g_run.px_;  g_run.qy = g_run.py_;
+    g_run.px_ = x0;        g_run.py_ = y0;
+    g_run.x = x;  g_run.y = y;
+    g_run.press = p1;
+    g_run.n++;
+    return made;
 }
 
 // dst = base composited with (colour, alpha) masked by the stroke coverage.

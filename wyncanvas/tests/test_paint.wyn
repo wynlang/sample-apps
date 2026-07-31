@@ -138,6 +138,655 @@ test "soft edges fall off monotonically" {
     assert_true(mid < 0.95)
 }
 
+// ---------------------------------------------------------------------------
+// THE DAB ENGINE: spacing, the arc-length carry, falloff endpoints, pressure,
+// scatter determinism and the calligraphic nib.
+//
+// Every one of these was written to fail against the brush that came before it -
+// one swept capsule per input sample, no dabs, no pressure, no seed. They are
+// listed with the exact mutation each one catches, because a brush test that
+// passes with the feature reverted is worse than no test.
+// ---------------------------------------------------------------------------
+
+// A fresh brush with every dab knob at a known value. Tests that care about one
+// knob call this and then change that one, so a default drifting cannot silently
+// rewrite what a test is measuring.
+fn round_brush(rad: float, hard: float, space: float) {
+    paint.set_tool(paint.TOOL_BRUSH())
+    paint.set_hsv(0.0, 1.0, 1.0)
+    paint.set_radius(rad)
+    paint.set_hardness(hard)
+    paint.set_alpha(1.0)
+    paint.set_spacing(space)
+    paint.set_angle(0.0)
+    paint.set_aspect(1.0)
+    paint.set_scatter(0.0)
+    paint.set_seed(1)
+    paint.set_smoothing(false)
+}
+
+test "dab count depends on the PATH, not on the input sample rate" {
+    // MUTATION GUARD: place one dab per input sample and the 181-sample count
+    // becomes 181 while the 2-sample count becomes 2. This is the assertion that
+    // decouples the stroke's look from the pointer's report rate.
+    var b = doc(200, 32)
+    round_brush(8.0, 1.0, 0.25)          // spacing = 2.0 px
+    paint.begin(0, 10.0, 16.0)
+    paint.seg(190.0, 16.0)               // ONE 180px sample
+    var coarse = paint.stroke_dabs()
+    paint.commit()
+    assert_eq(paint.stroke_segments(), 2)
+
+    var b2 = doc(200, 32)
+    round_brush(8.0, 1.0, 0.25)
+    paint.begin(0, 10.0, 16.0)
+    var i = 1
+    while i <= 180 {                     // the same path, 180 one-px samples
+        paint.seg(10.0 + i.to_float(), 16.0)
+        i = i + 1
+    }
+    var fine = paint.stroke_dabs()
+    paint.commit()
+    assert_eq(paint.stroke_segments(), 181)
+
+    // Same geometry => same dabs, from 2 samples or from 181.
+    assert_eq(coarse, fine)
+    // And the count is the one spacing predicts: 1 at the start plus 180/2.
+    assert_eq(coarse, 91)
+    assert_true(wynimg_pick(b, 100, 16, 3) > 0.99)
+    assert_true(wynimg_pick(b2, 100, 16, 3) > 0.99)
+}
+
+test "spacing gives CONTINUOUS coverage along a fast drag" {
+    // A 180px drag reported as a single sample. If dabs were stamped per sample
+    // this is two discs 180px apart with nothing between them.
+    var b = doc(200, 40)
+    round_brush(6.0, 1.0, 0.25)
+    paint.begin(0, 10.0, 20.0)
+    paint.seg(190.0, 20.0)
+    paint.commit()
+
+    // Sample the whole spine: no gaps, and the value is FULL, not a dab rim.
+    var x = 10
+    var gaps = 0
+    var lowest = 2.0
+    while x <= 190 {
+        var a = wynimg_pick(b, x, 20, 3)
+        if a < 0.99 { gaps = gaps + 1 }
+        if a < lowest { lowest = a }
+        x = x + 1
+    }
+    assert_eq(gaps, 0)
+    assert_eq(lowest, 1.0)               // exactly saturated, not merely close
+    // Off both ends it stops. Coverage past the radius is EXACTLY zero.
+    assert_eq(wynimg_pick(b, 2, 20, 3), 0.0)
+    assert_eq(wynimg_pick(b, 198, 20, 3), 0.0)
+}
+
+test "the leftover distance carries ACROSS segment boundaries" {
+    // Radius 8, spacing 0.25 => a dab every 2.0 px. Walk 3 px at a time:
+    // the dab positions must be 0,2,4,6,8,... regardless of where the sample
+    // boundaries (3,6,9,12) fall.
+    var b = doc(64, 32)
+    round_brush(8.0, 1.0, 0.25)
+    paint.begin(0, 10.0, 16.0)
+    assert_eq(paint.stroke_dabs(), 1)
+    assert_eq(paint.stroke_carry(), 2.0)
+
+    // 10 -> 13: one dab at 12, 1.0 px still owed.
+    paint.seg(13.0, 16.0)
+    assert_eq(paint.stroke_dabs(), 2)
+    assert_eq(paint.stroke_carry(), 1.0)
+    // 13 -> 16: dabs at 14 and 16, 2.0 px owed again.
+    // MUTATION GUARD: reset the carry per segment and this reads 4 dabs with the
+    // first at 13 - i.e. a dab on every input point, spacing defeated.
+    paint.seg(16.0, 16.0)
+    assert_eq(paint.stroke_dabs(), 4)
+    assert_eq(paint.stroke_carry(), 2.0)
+    paint.cancel()
+}
+
+test "no double-darkening at a segment boundary" {
+    // THE BUG THIS CATCHES: stamping each segment's START point as well as
+    // carrying the arc length stamps every interior input sample twice. With
+    // max() coverage a duplicate round dab is invisible, so the probe uses a
+    // SCATTERED brush, where a second dab at the same arc length lands at a
+    // second random offset and widens the stroke.
+    //
+    // The measurement is the painted AREA off the spine. One path, split two
+    // ways: the split must not change it.
+    var b = doc(120, 60)
+    round_brush(5.0, 1.0, 0.5)
+    paint.set_scatter(1.5)
+    paint.set_seed(7)
+    paint.begin(0, 10.0, 30.0)
+    paint.seg(100.0, 30.0)               // ONE segment
+    paint.commit()
+    var one = 0
+    var yy = 0
+    while yy < 60 {
+        var xx = 0
+        while xx < 120 {
+            if wynimg_pick(b, xx, yy, 3) > 0.5 { one = one + 1 }
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+
+    var b2 = doc(120, 60)
+    round_brush(5.0, 1.0, 0.5)
+    paint.set_scatter(1.5)
+    paint.set_seed(7)
+    paint.begin(0, 10.0, 30.0)
+    paint.seg(55.0, 30.0)                // the SAME path, split in two
+    paint.seg(100.0, 30.0)
+    paint.commit()
+    var two = 0
+    var y2 = 0
+    while y2 < 60 {
+        var x2 = 0
+        while x2 < 120 {
+            if wynimg_pick(b2, x2, y2, 3) > 0.5 { two = two + 1 }
+            x2 = x2 + 1
+        }
+        y2 = y2 + 1
+    }
+
+    // Identical, not merely similar: the split falls at 45px = an exact multiple
+    // of the 2.5px spacing, so the carry is 0 there and every dab must land on
+    // the same arc length in both runs.
+    assert_eq(one, two)
+    assert_true(one > 0)
+    // ...and the dab COUNT is identical too, which is the direct statement that
+    // the boundary neither dropped nor duplicated a dab.
+    assert_eq(paint.stroke_dabs(), 37)
+}
+
+test "falloff is monotonic, exactly 1.0 at a hard centre and exactly 0.0 past the rim" {
+    var b = doc(80, 80)
+    round_brush(20.0, 1.0, 0.25)
+    paint.begin(0, 40.0, 40.0)
+    paint.commit()
+    // A hardness-1 dab centre is EXACTLY saturated. assert_eq compares floats
+    // now, so 0.9999 fails here - which is the point: coverage 1.0 is a contract
+    // the eraser and the fill both rely on.
+    assert_eq(wynimg_pick(b, 40, 40, 3), 1.0)
+    // At and past the radius, EXACTLY nothing. A brush that tints pixels outside
+    // its own footprint has no usable footprint.
+    assert_eq(wynimg_pick(b, 40 + 20, 40, 3), 0.0)
+    assert_eq(wynimg_pick(b, 40 + 25, 40, 3), 0.0)
+
+    // Soft: strictly falling from centre to rim, with no plateau in the ramp.
+    //
+    // NB the dab is placed at 40.5, i.e. ON a pixel centre. A hardness-0 brush
+    // has a solid core of exactly zero width, so coverage is 1.0 only where the
+    // distance is 0 - and pixel (40,40) is sampled at (40.5,40.5), 0.707 px from
+    // a dab at (40,40), which measures 0.99958. That is correct geometry, not a
+    // rounding failure, and stating it this way keeps the exact-1.0 contract
+    // asserted rather than loosened to a tolerance.
+    var b2 = doc(80, 80)
+    round_brush(20.0, 0.0, 0.25)
+    paint.begin(0, 40.5, 40.5)
+    paint.commit()
+    assert_eq(wynimg_pick(b2, 40, 40, 3), 1.0)   // 1.0 exactly AT the centre
+    assert_eq(wynimg_pick(b2, 61, 40, 3), 0.0)   // 0.0 exactly past the rim
+    var prev = 1.01
+    var d = 0
+    var strictly_down = 0
+    while d < 20 {
+        var a = wynimg_pick(b2, 40 + d, 40, 3)
+        if a < prev { strictly_down = strictly_down + 1 }
+        prev = a
+        d = d + 1
+    }
+    assert_eq(strictly_down, 20)          // every step down, none flat
+}
+
+test "a soft brush does not band: the falloff has no flat shelf" {
+    // A cubic smoothstep has a discontinuous SECOND derivative at the ends,
+    // which reads as a ring - Mach banding - at the inner edge. The quintic does
+    // not. Measured as: consecutive first differences change smoothly, so no
+    // single step is more than 3x its neighbour anywhere in the ramp.
+    var b = doc(160, 160)
+    round_brush(60.0, 0.0, 0.25)
+    paint.begin(0, 80.0, 80.0)
+    paint.commit()
+
+    var d = 1
+    var prev_step = 0.0
+    var jumps = 0
+    var last = wynimg_pick(b, 80, 80, 3)
+    while d < 59 {
+        var a = wynimg_pick(b, 80 + d, 80, 3)
+        var step = last - a
+        // Skip the first few, where the step is legitimately near zero (the
+        // curve is flat by construction at the top) and a ratio is meaningless.
+        if d > 6 {
+            if step > prev_step * 3.0 + 0.001 { jumps = jumps + 1 }
+        }
+        prev_step = step
+        last = a
+        d = d + 1
+    }
+    assert_eq(jumps, 0)
+    // And it is a real soft edge, not a hard one: the half-radius point sits
+    // well inside (0,1).
+    var mid = wynimg_pick(b, 110, 80, 3)
+    assert_true(mid > 0.1)
+    assert_true(mid < 0.9)
+}
+
+test "coverage combines with max(), so a SOFT stroke keeps its soft edge" {
+    // THE MUTATION THIS EXISTS FOR: switch the dab stamp's max() to += and this
+    // goes red. It is the assertion that survives where the alpha test below
+    // cannot, and the difference is worth stating, because the += bug was
+    // committed here once and reverted:
+    //
+    //   * At 25% spacing, a pixel one radius off the spine is inside ~8 dabs. Any
+    //     one of them covers it at ~0.13; SUMMED that is >1, so += clamps it to
+    //     1.0 and the soft rim becomes a hard one.
+    //   * The 30%-alpha assertion below cannot catch that, because stroke_apply
+    //     clamps coverage to 1 before compositing - alpha still reads 0.3. So a
+    //     suite that tests only stroke alpha lets += back in.
+    //
+    // Measured on a hardness-0 brush: with max() the cross-section is a genuine
+    // gradient and the half-radius point sits near 0.45; with += it is a flat
+    // plateau of exactly 1.0 all the way out to ~0.6 of the radius.
+    var b = doc(140, 90)
+    round_brush(20.0, 0.0, 0.25)
+    paint.begin(0, 40.0, 45.0)
+    paint.seg(100.0, 45.0)
+    paint.commit()
+
+    // Half a radius off the spine: partly covered, and nowhere near saturated.
+    var half = wynimg_pick(b, 70, 55, 3)
+    assert_true(half > 0.2)
+    assert_true(half < 0.75)
+    // And the profile is still strictly falling out to the rim - a summed
+    // coverage is flat at 1.0 for the first 12 of these 20 steps.
+    var prev = 1.01
+    var d = 0
+    var down = 0
+    while d < 20 {
+        var a = wynimg_pick(b, 70, 45 + d, 3)
+        if a < prev { down = down + 1 }
+        prev = a
+        d = d + 1
+    }
+    assert_eq(down, 20)
+}
+
+test "a 30%-alpha stroke over itself does NOT reach opacity" {
+    // THE BUG THIS CATCHES, and it was committed here once and reverted:
+    // accumulate coverage with += instead of max() and a stroke that overlaps
+    // itself goes opaque. At 25% spacing every pixel on the spine is inside four
+    // or more dabs, so += reaches 1.0 after a single straight drag - no dawdling
+    // required. Then the doubling-back below buries it further.
+    var b = doc(80, 80)
+    round_brush(10.0, 1.0, 0.25)
+    paint.set_alpha(0.3)
+    paint.begin(0, 20.0, 40.0)
+    paint.seg(60.0, 40.0)
+    paint.seg(20.0, 40.0)                 // straight back over the same pixels
+    paint.seg(60.0, 40.0)                 // and again
+    paint.commit()
+
+    // Still 30%, to within float rounding. With += this is 1.0.
+    assert_true(pixel.approx(wynimg_pick(b, 40, 40, 3), 0.3, 0.005))
+    assert_true(pixel.approx(wynimg_pick(b, 25, 40, 3), 0.3, 0.005))
+    assert_true(pixel.approx(wynimg_pick(b, 55, 40, 3), 0.3, 0.005))
+    // The colour is unmuddied too: red at 30% over transparent.
+    assert_true(pixel.approx(wynimg_pick(b, 40, 40, 0), 1.0, 0.01))
+}
+
+// The painted width of the stroke at column x, in pixels with coverage above
+// half. Width is the measurable a taper, a nib and a scatter all move, and
+// counting it is more honest than reading one pixel: a single sample cannot tell
+// "thinner" from "shifted".
+fn width_at(b: int, x: int, h: int) -> int {
+    var y = 0
+    var n = 0
+    while y < h {
+        if wynimg_pick(b, x, y, 3) > 0.5 { n = n + 1 }
+        y = y + 1
+    }
+    return n
+}
+
+test "pressure tapers the stroke: the end is measurably thinner than the start" {
+    // A synthetic taper - pressure 1 down to 0.2 across the drag - is exactly
+    // what a stylus reports, and driving it from the test is what makes the
+    // stylus path verifiable without a stylus.
+    var b = doc(140, 60)
+    round_brush(12.0, 1.0, 0.2)
+    paint.begin_p(0, 20.0, 30.0, 1.0)
+    var i = 1
+    while i <= 10 {
+        var f = i.to_float() / 10.0
+        paint.seg_p(20.0 + f * 100.0, 30.0, 1.0 - f * 0.8)
+        i = i + 1
+    }
+    paint.commit()
+
+    var w_start = width_at(b, 22, 60)
+    var w_mid = width_at(b, 70, 60)
+    var w_end = width_at(b, 118, 60)
+
+    // Full radius at the start: 12 px radius => ~24 px of covered height.
+    assert_eq(w_start, 24)
+    // Pressure 0.2 at the end => radius 2.4, and the half-coverage contour of a
+    // 2.4 px dab sampled on pixel centres spans 4 rows. Measured exactly, not
+    // asserted loosely: a taper that scaled only ALPHA and not the radius would
+    // leave this at 24 and still pass a "the end is lighter" test.
+    assert_eq(w_end, 4)
+    assert_true(w_mid < w_start)
+    assert_true(w_end < w_mid)
+}
+
+test "a tapering tail stays CONTINUOUS: spacing follows the shrinking radius" {
+    // MUTATION GUARD: step by the base radius instead of the current dab's
+    // radius and the thin tail breaks into beads, because the dabs stay 20% of
+    // the FULL radius apart while each one is a fifth of the size.
+    var b = doc(140, 60)
+    round_brush(12.0, 1.0, 0.25)
+    paint.begin_p(0, 20.0, 30.0, 1.0)
+    var i = 1
+    while i <= 20 {
+        var f = i.to_float() / 20.0
+        paint.seg_p(20.0 + f * 100.0, 30.0, 1.0 - f * 0.85)
+        i = i + 1
+    }
+    paint.commit()
+
+    // Walk the spine right to the tail: no gap anywhere.
+    var x = 21
+    var gaps = 0
+    while x <= 118 {
+        if wynimg_pick(b, x, 30, 3) < 0.5 { gaps = gaps + 1 }
+        x = x + 1
+    }
+    assert_eq(gaps, 0)
+}
+
+test "zero pressure paints nothing but does not hang or crash" {
+    // A stylus that reports 0 on lift-off, and the degenerate case of the
+    // pressure-scaled spacing step: radius 0 with a 0-length step would spin the
+    // placement loop forever if the step were not floored.
+    var b = doc(60, 60)
+    round_brush(10.0, 1.0, 0.25)
+    paint.begin_p(0, 30.0, 30.0, 0.0)
+    paint.seg_p(50.0, 30.0, 0.0)
+    paint.commit()
+    assert_eq(wynimg_pick(b, 30, 30, 3), 0.0)
+    assert_eq(wynimg_pick(b, 40, 30, 3), 0.0)
+    // The run still advanced, so the stroke was processed rather than refused.
+    assert_true(paint.stroke_dabs() > 1)
+}
+
+test "the same scatter seed paints identical pixels twice; a different seed differs" {
+    // A randomised brush that cannot be reproduced cannot be tested - and worse,
+    // cannot be undone and redone into the same image. So scatter is a hash of
+    // (seed, dab index), never rand(): there is no hidden state, and replaying a
+    // stroke replays the pixels.
+    var b1 = doc(120, 60)
+    round_brush(6.0, 1.0, 0.4)
+    paint.set_scatter(1.5)
+    paint.set_seed(12345)
+    paint.begin(0, 15.0, 30.0)
+    paint.seg(105.0, 30.0)
+    paint.commit()
+
+    var b2 = doc(120, 60)
+    round_brush(6.0, 1.0, 0.4)
+    paint.set_scatter(1.5)
+    paint.set_seed(12345)                 // THE SAME SEED
+    paint.begin(0, 15.0, 30.0)
+    paint.seg(105.0, 30.0)
+    paint.commit()
+
+    // Byte-exact across the whole buffer, not "close": max_diff returns 2.0 on a
+    // mismatch of dimensions, so a shape error cannot masquerade as a pass.
+    assert_eq(wynimg_max_diff(b1, b2), 0.0)
+
+    var b3 = doc(120, 60)
+    round_brush(6.0, 1.0, 0.4)
+    paint.set_scatter(1.5)
+    paint.set_seed(999)                   // A DIFFERENT SEED
+    paint.begin(0, 15.0, 30.0)
+    paint.seg(105.0, 30.0)
+    paint.commit()
+    // Different pixels - otherwise the seed is being ignored and every "random"
+    // brush is the same brush.
+    assert_true(wynimg_max_diff(b1, b3) > 0.5)
+}
+
+test "scatter widens the stroke and leaves the spine no darker" {
+    // Scatter must MOVE dabs off the path, not merely dither their coverage. The
+    // measurable is width; and because coverage combines with max(), scattering
+    // cannot make the spine darker than the unscattered stroke already is.
+    var b = doc(120, 80)
+    round_brush(5.0, 1.0, 0.4)
+    paint.set_scatter(0.0)
+    paint.begin(0, 15.0, 40.0)
+    paint.seg(105.0, 40.0)
+    paint.commit()
+    var tight = width_at(b, 60, 80)
+
+    var b2 = doc(120, 80)
+    round_brush(5.0, 1.0, 0.4)
+    paint.set_scatter(2.0)                // dabs up to 10 px off the path
+    paint.set_seed(4)
+    paint.begin(0, 15.0, 40.0)
+    paint.seg(105.0, 40.0)
+    paint.commit()
+
+    // Widest column of the scattered stroke, so one lucky gap cannot fail it.
+    var widest = 0
+    var x = 30
+    while x < 90 {
+        var w = width_at(b2, x, 80)
+        if w > widest { widest = w }
+        x = x + 1
+    }
+    assert_true(widest > tight)
+    assert_true(widest > 20)              // ~10 px radius of jitter, both sides
+    assert_true(wynimg_pick(b2, 60, 40, 3) <= 1.0)
+}
+
+test "a calligraphic nib is directional: angle and aspect change the footprint" {
+    // aspect 0.25 at angle 0 is a nib four times wider than it is tall. A round
+    // brush would give the same number either way, which is why the assertion is
+    // the RATIO of the two extents and not either one alone.
+    var b = doc(80, 80)
+    round_brush(16.0, 1.0, 0.25)
+    paint.set_aspect(0.25)
+    paint.set_angle(0.0)                  // major axis along x
+    paint.begin(0, 40.0, 40.0)
+    paint.commit()
+
+    var tall = width_at(b, 40, 80)        // extent across the nib
+    var wide = 0
+    var x = 0
+    while x < 80 {
+        if wynimg_pick(b, x, 40, 3) > 0.5 { wide = wide + 1 }
+        x = x + 1
+    }
+    // 16 px radius along x, 4 px across: ~32 wide, ~8 tall.
+    assert_eq(wide, 32)
+    assert_eq(tall, 8)
+
+    // Rotate the same nib 90 degrees and the two swap. If angle were ignored
+    // these would still read 32 and 8.
+    var b2 = doc(80, 80)
+    round_brush(16.0, 1.0, 0.25)
+    paint.set_aspect(0.25)
+    paint.set_angle(90.0)
+    paint.begin(0, 40.0, 40.0)
+    paint.commit()
+    var tall2 = width_at(b2, 40, 80)
+    var wide2 = 0
+    var x2 = 0
+    while x2 < 80 {
+        if wynimg_pick(b2, x2, 40, 3) > 0.5 { wide2 = wide2 + 1 }
+        x2 = x2 + 1
+    }
+    assert_eq(wide2, 8)
+    assert_eq(tall2, 32)
+}
+
+test "a nib stroke is thin across its travel and thick across the other axis" {
+    // The reason a calligraphic brush exists: dragging a wide-flat nib
+    // horizontally paints a thin line, and dragging it vertically a thick one.
+    var b = doc(100, 100)
+    round_brush(14.0, 1.0, 0.2)
+    paint.set_aspect(0.2)
+    paint.set_angle(0.0)                  // nib long in x, thin in y
+    paint.begin(0, 20.0, 50.0)
+    paint.seg(80.0, 50.0)                 // dragged ALONG its long axis
+    paint.commit()
+    var along = width_at(b, 50, 100)
+
+    var b2 = doc(100, 100)
+    round_brush(14.0, 1.0, 0.2)
+    paint.set_aspect(0.2)
+    paint.set_angle(0.0)
+    paint.begin(0, 50.0, 20.0)
+    paint.seg(50.0, 80.0)                 // dragged ACROSS it
+    paint.commit()
+    var across = width_at(b2, 50, 100)
+
+    // Along its long axis the nib sweeps its own thin height; across, it sweeps
+    // the whole drag plus its thin height.
+    assert_true(along < 8)
+    assert_true(across > 60)
+}
+
+test "brush geometry is frozen at begin(), not sampled per segment" {
+    // A slider dragged mid-stroke must not make the second half of one line a
+    // different brush from the first: half a stroke at one radius is a bug that
+    // only ever appears in the field, because a test that never moves a slider
+    // mid-stroke cannot see it.
+    var b = doc(140, 60)
+    round_brush(4.0, 1.0, 0.25)
+    paint.begin(0, 20.0, 30.0)
+    paint.seg(70.0, 30.0)
+    paint.set_radius(20.0)                // yanked mid-stroke
+    paint.set_aspect(0.2)
+    paint.seg(120.0, 30.0)
+    paint.commit()
+
+    // Both halves are still the radius-4 brush.
+    assert_eq(width_at(b, 40, 60), 8)
+    assert_eq(width_at(b, 100, 60), 8)
+    // ...and the parameter really did change, so this is not passing vacuously.
+    assert_eq(paint.radius(), 20.0)
+}
+
+test "input smoothing is OFF by default, so a corner stays a corner" {
+    // The default MUST be off: the spline moves where dabs land, so switching it
+    // on globally would change the geometry every other test in this file
+    // describes. This is that guarantee, asserted rather than assumed.
+    assert_false(paint.smoothing())
+
+    // An L: right along y=20, then down at x=60. Unsmoothed, the inside of the
+    // corner is square - the pixel diagonally outside the elbow is empty.
+    var b = doc(100, 100)
+    round_brush(3.0, 1.0, 0.25)
+    paint.begin(0, 20.0, 20.0)
+    paint.seg(60.0, 20.0)
+    paint.seg(60.0, 60.0)
+    paint.commit()
+    // The corner is reached and the two arms are painted.
+    assert_true(wynimg_pick(b, 60, 20, 3) > 0.9)
+    assert_true(wynimg_pick(b, 40, 20, 3) > 0.9)
+    assert_true(wynimg_pick(b, 60, 40, 3) > 0.9)
+    // Nothing past the corner along the first arm: a straight chord stops at 60.
+    assert_eq(wynimg_pick(b, 70, 20, 3), 0.0)
+}
+
+test "smoothing on rounds the corner and stays on the sampled points" {
+    var b = doc(100, 100)
+    round_brush(3.0, 1.0, 0.25)
+    paint.set_smoothing(true)
+    assert_true(paint.smoothing())
+    paint.begin(0, 20.0, 20.0)
+    paint.seg(60.0, 20.0)
+    paint.seg(60.0, 60.0)
+    paint.commit()
+
+    // Catmull-Rom INTERPOLATES: the curve still passes through every reported
+    // sample, so the stroke goes where the user pointed. That is the property
+    // that makes smoothing acceptable at all - an approximating spline (a
+    // B-spline) would cut the corner off entirely and paint somewhere the user
+    // never was.
+    assert_true(wynimg_pick(b, 20, 20, 3) > 0.9)
+    assert_true(wynimg_pick(b, 60, 20, 3) > 0.9)
+    assert_true(wynimg_pick(b, 60, 60, 3) > 0.9)
+
+    // And the tangent is now continuous through the elbow: the curve leaves
+    // (60,20) heading along (p2-p0)/2 = right AND down, so the second arm bows
+    // OUTSIDE the corner before settling onto x=60. Measured as: the arm at y=30
+    // reaches past x=60, which the unsmoothed stroke never does.
+    //
+    // This outward bulge is Catmull-Rom's OVERSHOOT, and it is the honest reason
+    // smoothing is opt-in rather than free: a fast right-angle gains a small
+    // flick past the corner. It is bounded (a few px at these radii) and it is
+    // the price of a continuous tangent from an interpolating spline.
+    var x = 0
+    var rightmost = 0
+    while x < 100 {
+        if wynimg_pick(b, x, 30, 3) > 0.5 {
+            if x > rightmost { rightmost = x }
+        }
+        x = x + 1
+    }
+    assert_true(rightmost > 63)
+
+    paint.set_smoothing(false)            // module state is shared across tests
+}
+
+test "smoothing leaves a straight line straight" {
+    // Catmull-Rom is linear on collinear input, so smoothing must not bow a
+    // straight drag. If it did, every ruled line in the editor would sag.
+    var b = doc(120, 40)
+    round_brush(3.0, 1.0, 0.25)
+    paint.set_smoothing(true)
+    paint.begin(0, 10.0, 20.0)
+    paint.seg(50.0, 20.0)
+    paint.seg(90.0, 20.0)
+    paint.seg(110.0, 20.0)
+    paint.commit()
+    paint.set_smoothing(false)
+
+    // The whole spine is painted and nothing strays a full radius off it.
+    var x = 11
+    var gaps = 0
+    while x <= 109 {
+        if wynimg_pick(b, x, 20, 3) < 0.5 { gaps = gaps + 1 }
+        x = x + 1
+    }
+    assert_eq(gaps, 0)
+    assert_eq(wynimg_pick(b, 60, 25, 3), 0.0)
+    assert_eq(wynimg_pick(b, 60, 15, 3), 0.0)
+}
+
+test "the dab knobs clamp instead of accepting nonsense" {
+    paint.set_spacing(0.0)                // would be infinitely many dabs
+    assert_true(paint.spacing() >= 0.01)
+    paint.set_spacing(1000.0)
+    assert_true(paint.spacing() <= 4.0)
+    paint.set_aspect(0.0)                 // a zero-width nib paints nothing
+    assert_true(paint.aspect() >= 0.05)
+    paint.set_aspect(9.0)                 // >1 is the same nib rotated
+    assert_eq(paint.aspect(), 1.0)
+    paint.set_scatter(0.0 - 3.0)
+    assert_eq(paint.scatter(), 0.0)
+    paint.set_angle(360.0 + 45.0)
+    assert_eq(paint.angle(), 45.0)
+    paint.set_angle(0.0 - 90.0)
+    assert_eq(paint.angle(), 270.0)
+}
+
 test "the eraser removes colour AND alpha together" {
     var b = doc(32, 32)
     wynimg_fill(b, 0.8, 0.1, 0.1, 1.0)    // opaque red, premultiplied
