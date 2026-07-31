@@ -157,6 +157,30 @@ var g_doc_h = 0
 // The composited document, on the GPU. Recreated only when the document's
 // dimensions change - a texture cannot be resized under its handle.
 var g_tex = -1
+
+// ---- marching ants ---------------------------------------------------------
+//
+// The selection's real boundary, as a second document-sized texture blitted over
+// the composite. This replaces the bounding BOX the editor used to draw, which
+// showed a rectangle around an ellipse and nothing at all of a feathered edge.
+//
+// A TEXTURE, NOT PER-PIXEL DRAWING, and that is the whole reason it is now
+// affordable. Finding edge pixels from Wyn would be one `select.cov_at` FFI call
+// per pixel per frame - 65,536 for a 256x256 document - which is the "one
+// Win_rect per pixel" mistake this file's header rejects. `select.outline()` is
+// one call into C that fills a coverage buffer, and the buffer reaches the screen
+// the same way the document does: one upload, one blit.
+//
+// Rebuilt only when the selection CHANGES, tracked by a stamp rather than by
+// recomputing every frame: the scan is O(pixels), so at 60fps on a large document
+// it would be the most expensive thing the editor does, for a picture that did
+// not move.
+var g_ants_tex = -1
+var g_ants_buf = 0
+var g_ants_w = 0
+var g_ants_h = 0
+var g_ants_stamp = -1.0
+var g_ants_ready = 0
 var g_tex_w = 0
 var g_tex_h = 0
 
@@ -1652,6 +1676,44 @@ fn paint_entry(ui: Ui, i: int) {
 // the "one Win_rect per pixel" mistake this file's header rejects. The DRAG
 // outline below is exact for a rect and shows the ellipse's box while dragging,
 // which is what a user needs to place it.
+// Rebuild the ants overlay if the selection changed, then blit it.
+//
+// Called from the viewport painter right after the document's own blit, so the
+// ants land ON the image and under the toolbar. Two cheap guards do the work:
+// the texture is only reallocated when the DOCUMENT size changes, and the
+// coverage scan only re-runs when the SELECTION changes (select.generation()).
+// A frame with an unchanged selection costs one blit.
+fn paint_ants(dx: int, dy: int, dw: int, dh: int) {
+    if select.active() == false { return }
+
+    if g_ants_w != g_doc_w or g_ants_h != g_doc_h {
+        if g_ants_tex >= 0 { gui.Win_texture_free(g_ants_tex) }
+        if g_ants_buf != 0 { select.free_mask(g_ants_buf) }
+        g_ants_tex = gui.Win_texture(g_win, g_doc_w, g_doc_h)
+        g_ants_buf = select.new_mask(g_doc_w, g_doc_h)
+        g_ants_w = g_doc_w
+        g_ants_h = g_doc_h
+        // Force a rebuild: a fresh buffer holds no outline yet, and the stamp
+        // may already equal the current generation.
+        g_ants_stamp = 0.0 - 1.0
+        g_ants_ready = 0
+    }
+    if g_ants_tex < 0 { return }
+    if g_ants_buf == 0 { return }
+
+    var gen = select.generation().to_float()
+    if gen != g_ants_stamp {
+        g_ants_stamp = gen
+        g_ants_ready = 0
+        if select.outline(g_ants_buf) {
+            if wynimg_upload_tex(g_ants_tex, g_ants_buf) == 1 { g_ants_ready = 1 }
+        }
+    }
+    if g_ants_ready == 1 {
+        gui.Win_blit(g_win, g_ants_tex, dx, dy, dw, dh)
+    }
+}
+
 fn paint_marquee() {
     if select.active() == false { return }
 
@@ -1692,16 +1754,22 @@ fn paint_marquee() {
         return
     }
 
-    if select.is_empty() { return }
-    // The committed selection: its bounding box. bbox is INCLUSIVE, so the
-    // outline runs to x1+1 in document space to enclose the last selected pixel.
-    var sx0 = view.doc_to_screen_x(select.bbox_x0().to_float()).to_int()
-    var sy0 = view.doc_to_screen_y(select.bbox_y0().to_float()).to_int()
-    var sx1 = view.doc_to_screen_x((select.bbox_x1() + 1).to_float()).to_int()
-    var sy1 = view.doc_to_screen_y((select.bbox_y1() + 1).to_float()).to_int()
-    gui.Win_rect_outline(g_win, sx0, sy0, sx1 - sx0, sy1 - sy0, 20, 20, 20)
-    gui.Win_rect_outline(g_win, sx0 - 1, sy0 - 1, sx1 - sx0 + 2, sy1 - sy0 + 2,
-                         250, 250, 255)
+    // THE COMMITTED SELECTION IS DRAWN BY paint_ants, NOT HERE.
+    //
+    // Its shape now reaches the screen as coverage from select.outline(), so an
+    // ellipse shows an ellipse and a feathered edge fades - which is what the
+    // README called out as missing. The bounding box that used to be drawn here
+    // is deliberately GONE rather than kept as a faint extra: paint_marquee runs
+    // AFTER paint_ants, so a box drawn here paints over the ants along every
+    // axis-aligned edge, and for a rect selection - where the box and the true
+    // outline coincide exactly - it replaced the whole outline with a dark line.
+    // Measured, not reasoned: the rect case of tests/run_ants_test.sh caught it
+    // reading 40,40,48 (the box) where it expected the bright rim.
+    //
+    // Nothing is lost. The box conveyed EXTENT, and the outline conveys extent
+    // plus shape; the live-drag branch above still draws its own rect while a
+    // marquee is being dragged, which is the one moment there is no committed
+    // selection to outline yet.
 }
 
 // The document. Positioned by `view` at the current zoom and pan, clipped to the
@@ -1751,6 +1819,11 @@ fn paint_viewport(ui: Ui) {
         // The whole point of this file: one blit.
         gui.Win_blit(g_win, g_tex, dx, dy, dw, dh)
         gui.Win_rect_outline(g_win, dx - 1, dy - 1, dw + 2, dh + 2, 90, 90, 105)
+
+        // The selection's real boundary, as a second blit over the document.
+        // Before paint_marquee, so a LIVE drag's own outline draws on top of the
+        // committed selection's ants rather than under them.
+        paint_ants(dx, dy, dw, dh)
 
         paint_marquee()
 

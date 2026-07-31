@@ -78,6 +78,7 @@ double    wynimg_sel_max(void* selp);
 long long wynimg_sel_is_empty(void* selp);
 long long wynimg_sel_bbox(void* selp, long long which);
 long long wynimg_sel_clip(void* covp, void* selp);
+long long wynimg_sel_outline(void* selp, void* outp, double thresh);
 
 // Supersampling grid for the shapes whose coverage has no closed form here
 // (ellipse, polygon): 4x4 = 16 samples at pixel-cell centres, so a boundary
@@ -602,4 +603,78 @@ long long wynimg_sel_bbox(void* selp, long long which) {
 // clipping path. Buffers must share dimensions. 1 / 0.
 long long wynimg_sel_clip(void* covp, void* selp) {
     return wynimg_sel_combine(covp, selp, WYNIMG_SEL_INTERSECT);
+}
+
+// ---------------------------------------------------------------------------
+// Marching ants: the selection's BOUNDARY, as a coverage buffer.
+// ---------------------------------------------------------------------------
+
+// Write the outline of `sel` into `out`, as coverage.
+//
+// WHY THIS IS IN C AT ALL. The editor drew a bounding BOX for every selection,
+// so an ellipse showed the rectangle it was inscribed in and a feathered edge
+// showed nothing of its shape. The honest reason recorded in src/ui.wyn was that
+// finding edge pixels from Wyn means one wynimg_sel_at call PER PIXEL, per frame
+// - 65,536 FFI calls for a 256x256 document, which is the "one Win_rect per
+// pixel" mistake that file's header rejects. That reason is sound, and it is an
+// argument against doing it in WYN, not against doing it. One pass in C is a
+// single call.
+//
+// WHAT AN OUTLINE PIXEL IS. A pixel is on the boundary when it differs from at
+// least one 4-neighbour by more than `thresh`. The written value is the LARGEST
+// such difference, not 1.0, which is what makes a soft edge legible: a feathered
+// selection's boundary fades exactly as the coverage gradient does, and a hard
+// edge comes out at full strength. Taking max (rather than summing the four
+// differences) keeps the result in [0,1] without a clamp that would flatten
+// every corner - a corner differs from two neighbours at once and would
+// otherwise saturate while a straight edge did not.
+//
+// 4-neighbour, not 8: a diagonal-inclusive test widens every boundary to two
+// pixels on a 45-degree edge, which reads as a blurry selection rather than a
+// crisp one.
+//
+// THE DOCUMENT EDGE COUNTS AS OUTSIDE. A selection that runs to the border is
+// outlined along that border. Treating the edge as "same as me" instead would
+// silently drop the outline exactly where select-all puts it, which is the most
+// common selection there is.
+//
+// `out` is REPLACED, not combined: it is a scratch overlay owned by the caller
+// and rebuilt whenever the selection changes, so accumulating into it would keep
+// stale ants from a previous shape. Buffers must share dimensions. 1 / 0.
+long long wynimg_sel_outline(void* selp, void* outp, double thresh) {
+    WynImg* s = wynimg_deref(selp);
+    WynImg* o = wynimg_deref(outp);
+    if (!s || !s->px || !o || !o->px) return 0;
+    if (s->w != o->w || s->h != o->h) return 0;
+    if (thresh < 0.0) thresh = 0.0;
+
+    const long long w = s->w;
+    const long long h = s->h;
+
+    for (long long y = 0; y < h; y++) {
+        for (long long x = 0; x < w; x++) {
+            const size_t here = (size_t)(y * w + x) * 4;
+            const double c = (double)s->px[here];
+
+            // Off-document neighbours read as 0 - see the edge note above.
+            const double left  = (x > 0)     ? (double)s->px[(size_t)(y * w + x - 1) * 4] : 0.0;
+            const double right = (x < w - 1) ? (double)s->px[(size_t)(y * w + x + 1) * 4] : 0.0;
+            const double up    = (y > 0)     ? (double)s->px[(size_t)((y - 1) * w + x) * 4] : 0.0;
+            const double down  = (y < h - 1) ? (double)s->px[(size_t)((y + 1) * w + x) * 4] : 0.0;
+
+            double d = c - left;  if (d < 0.0) d = -d;
+            double t = c - right; if (t < 0.0) t = -t;  if (t > d) d = t;
+            t = c - up;           if (t < 0.0) t = -t;  if (t > d) d = t;
+            t = c - down;         if (t < 0.0) t = -t;  if (t > d) d = t;
+
+            const float v = (d > thresh) ? (float)clamp01d(d) : 0.0f;
+            // Written to all four channels so the same buffer can be uploaded as
+            // a texture or read back as coverage without a second convention.
+            o->px[here]     = v;
+            o->px[here + 1] = v;
+            o->px[here + 2] = v;
+            o->px[here + 3] = v;
+        }
+    }
+    return 1;
 }

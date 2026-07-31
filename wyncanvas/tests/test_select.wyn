@@ -755,3 +755,168 @@ test "op_name covers every op" {
     assert_eq(select.op_name(select.OP_INTERSECT()), "intersect")
     assert_eq(select.op_name(9), "?")
 }
+
+// ---- outline (marching ants) ----------------------------------------------
+//
+// The values below are derived by hand, not read off a run. An outline pixel is
+// the LARGEST absolute difference from a 4-neighbour, and the document edge
+// counts as outside (0), so for a hard-edged rect every pixel on the rect's
+// border differs from its outside neighbour by exactly 1.0 and every pixel
+// strictly inside differs from all four neighbours by 0.
+
+test "a hard rect's outline is its border, at full strength" {
+    select.init(16, 16)
+    select.rect(4.0, 4.0, 8.0, 8.0, select.OP_REPLACE())
+    var out = select.new_mask(16, 16)
+    assert_true(select.outline(out))
+
+    // A corner of the rect: outside neighbours on two sides, so the max
+    // difference is 1.0 - and taking max rather than a sum is what keeps it 1.0
+    // instead of saturating past it.
+    assert_eq(select.mask_at(out, 4, 4), 1.0)
+    // A mid-edge pixel: one outside neighbour.
+    assert_eq(select.mask_at(out, 7, 4), 1.0)
+    // Strictly interior: all four neighbours are selected, so no difference.
+    assert_eq(select.mask_at(out, 7, 7), 0.0)
+    // Strictly exterior, not adjacent to the rect.
+    assert_eq(select.mask_at(out, 0, 0), 0.0)
+    // Just OUTSIDE the border is itself an outline pixel: it differs from the
+    // selected pixel next to it by 1.0. The boundary is two pixels wide in the
+    // sense that both sides of the step are marked, which is what makes the
+    // outline visible on both a light and a dark document.
+    assert_eq(select.mask_at(out, 3, 7), 1.0)
+    select.free_mask(out)
+}
+
+test "an empty selection has an empty outline" {
+    select.init(8, 8)
+    select.select_none()
+    var out = select.new_mask(8, 8)
+    select.outline(out)
+    assert_eq(select.mask_area(out), 0.0)
+    select.free_mask(out)
+}
+
+test "select-all is outlined along the document border" {
+    // The case that would silently vanish if the document edge were treated as
+    // "same as me" instead of as outside - and select-all is the most common
+    // selection there is.
+    select.init(8, 8)
+    select.select_all()
+    var out = select.new_mask(8, 8)
+    assert_true(select.outline(out))
+    assert_eq(select.mask_at(out, 0, 0), 1.0)
+    assert_eq(select.mask_at(out, 4, 0), 1.0)
+    assert_eq(select.mask_at(out, 4, 4), 0.0)
+    // The border is 8x8 minus the 6x6 interior = 28 pixels, each at 1.0.
+    assert_eq(select.mask_area(out), 28.0)
+    select.free_mask(out)
+}
+
+test "outline is REPLACED, so a shrunken selection leaves no stale ants" {
+    select.init(16, 16)
+    select.rect(0.0, 0.0, 16.0, 16.0, select.OP_REPLACE())
+    var out = select.new_mask(16, 16)
+    select.outline(out)
+    var full = select.mask_area(out)
+    assert_true(full > 0.0)
+
+    // A much smaller rect in the middle: the old border must be GONE, not
+    // combined with the new one.
+    select.rect(6.0, 6.0, 4.0, 4.0, select.OP_REPLACE())
+    select.outline(out)
+    assert_eq(select.mask_at(out, 0, 0), 0.0)
+    assert_true(select.mask_area(out) < full)
+    select.free_mask(out)
+}
+
+test "a mismatched output buffer is refused, not written past" {
+    select.init(16, 16)
+    select.select_all()
+    var small = select.new_mask(8, 8)
+    assert_true(select.outline(small) == false)
+    select.free_mask(small)
+}
+
+test "a soft edge produces a soft outline" {
+    // The whole reason the value is the gradient and not 1.0: a feathered
+    // selection's boundary must fade the way its edge does. After feathering,
+    // no single step is a full 1.0 jump any more, so the peak drops below 1.
+    select.init(32, 32)
+    select.rect(8.0, 8.0, 16.0, 16.0, select.OP_REPLACE())
+    select.feather(3.0)
+    var out = select.new_mask(32, 32)
+    assert_true(select.outline(out))
+    var pk = select.mask_at(out, 8, 16)
+    assert_true(pk > 0.0)
+    assert_true(pk < 1.0)
+    select.free_mask(out)
+}
+
+// ---- change generation -----------------------------------------------------
+//
+// The counter exists so a cache of something DERIVED from the selection (the
+// marching-ants overlay) knows when to rebuild. Comparing area() instead would
+// be a full-buffer scan - the very cost the cache avoids - and two different
+// selections can share an area, so it would also miss changes.
+
+test "every mutator bumps the generation" {
+    select.init(16, 16)
+    var g0 = select.generation()
+
+    select.select_all()
+    var g1 = select.generation()
+    assert_true(g1 > g0)
+
+    select.select_none()
+    var g2 = select.generation()
+    assert_true(g2 > g1)
+
+    select.rect(2.0, 2.0, 4.0, 4.0, select.OP_REPLACE())
+    var g3 = select.generation()
+    assert_true(g3 > g2)
+
+    select.invert()
+    assert_true(select.generation() > g3)
+    var g4 = select.generation()
+
+    select.ellipse(8.0, 8.0, 3.0, 3.0, select.OP_REPLACE())
+    assert_true(select.generation() > g4)
+    var g5 = select.generation()
+
+    select.feather(1.0)
+    assert_true(select.generation() > g5)
+    var g6 = select.generation()
+
+    select.grow(1)
+    assert_true(select.generation() > g6)
+    var g7 = select.generation()
+
+    select.contract(1)
+    assert_true(select.generation() > g7)
+}
+
+test "a READ does not bump the generation" {
+    // The other half of the contract: if a query bumped it, the overlay would
+    // rebuild every frame and the cache would be pointless.
+    select.init(16, 16)
+    select.select_all()
+    var g = select.generation()
+    select.area()
+    select.peak()
+    select.is_empty()
+    select.cov_at(1, 1)
+    select.bbox_x0()
+    select.bbox_y1()
+    assert_eq(select.generation(), g)
+}
+
+test "init counts as a change even when it fails" {
+    // init has already freed the previous buffer by the time it validates its
+    // arguments, so anything cached from the old selection is stale regardless.
+    select.init(8, 8)
+    select.select_all()
+    var g = select.generation()
+    assert_eq(select.init(0, 8), 0)
+    assert_true(select.generation() > g)
+}

@@ -125,12 +125,42 @@ extern fn wynimg_sel_max(sel: int) -> float;
 extern fn wynimg_sel_is_empty(sel: int) -> int;
 extern fn wynimg_sel_bbox(sel: int, which: int) -> int;
 extern fn wynimg_sel_clip(cov: int, sel: int) -> int;
+extern fn wynimg_sel_outline(sel: int, out: int, thresh: float) -> int;
 
 // ---- the current selection -------------------------------------------------
 
 var s_sel = 0
 var s_w = 0
 var s_h = 0
+
+// How many times the selection has CHANGED.
+//
+// Exists so a caller can cache something derived from the selection - the
+// marching-ants overlay in src/ui.wyn - and know when to rebuild it. The
+// alternative, comparing `area()` between frames, is itself a full-buffer scan
+// (wynimg_sel_sum walks every pixel), so it would cost the very thing the cache
+// is there to avoid; and two DIFFERENT selections can share an area, so it would
+// also miss changes. A counter is O(1) and cannot collide.
+//
+// Bumped by every mutator in this module, including the ones that empty the
+// selection: "the selection became empty" is a change a cache must see.
+var s_gen = 0
+
+pub fn generation() -> int { return s_gen }
+
+// Every mutator returns through here.
+//
+// A SINGLE WRITER, deliberately: twelve mutators each remembering to bump a
+// counter is twelve chances to forget, and the failure mode is silent - a stale
+// marching-ants overlay that disagrees with the real selection, which looks like
+// a rendering bug and is actually a bookkeeping one. src/history.wyn records
+// exactly this lesson ("a second writer left them at DIFFERENT LENGTHS"), so the
+// shape is copied from there. Passes the result through unchanged so a mutator
+// stays a one-line `return changed(...)`.
+fn changed(ok: bool) -> bool {
+    s_gen = s_gen + 1
+    return ok
+}
 
 // Allocates (or reallocates) the selection for a `w` x `h` document and selects
 // NOTHING. Returns the handle, or 0 on failure.
@@ -146,6 +176,10 @@ pub fn init(w: int, h: int) -> int {
     s_sel = 0
     s_w = 0
     s_h = 0
+    // Bumped here, before the early returns: this function has ALREADY freed the
+    // previous buffer, so even a failing init is a change - anything cached from
+    // the old selection is now stale and must not be reused.
+    s_gen = s_gen + 1
     if w <= 0 { return 0 }
     if h <= 0 { return 0 }
     var m = wynimg::new(w, h)
@@ -169,18 +203,19 @@ pub fn release() {
     s_sel = 0
     s_w = 0
     s_h = 0
+    s_gen = s_gen + 1
 }
 
 // ---- whole-document ops ----------------------------------------------------
 
-pub fn select_all() -> bool { return wynimg::sel_all(s_sel) == 1 }
-pub fn select_none() -> bool { return wynimg::sel_none(s_sel) == 1 }
+pub fn select_all() -> bool { return changed(wynimg::sel_all(s_sel) == 1) }
+pub fn select_none() -> bool { return changed(wynimg::sel_none(s_sel) == 1) }
 
 // Exactly 1-c per pixel, so this is an involution on PARTIAL coverage too: a
 // half-selected feathered edge inverts to half and back to half. A
 // threshold-based invert would quietly harden every soft edge it touched, and
 // "invert twice is the identity" is asserted bit-exactly for that reason.
-pub fn invert() -> bool { return wynimg::sel_invert(s_sel) == 1 }
+pub fn invert() -> bool { return changed(wynimg::sel_invert(s_sel) == 1) }
 
 // ---- shapes ----------------------------------------------------------------
 
@@ -189,20 +224,20 @@ pub fn invert() -> bool { return wynimg::sel_invert(s_sel) == 1 }
 // the rect (an axis-aligned box filter is separable and has a closed form), not
 // a supersampled estimate - so a half-pixel edge reads exactly 0.5.
 pub fn rect(x: float, y: float, w: float, h: float, op: int) -> bool {
-    return wynimg::sel_rect(s_sel, x, y, w, h, op) == 1
+    return changed(wynimg::sel_rect(s_sel, x, y, w, h, op) == 1)
 }
 
 // Antialiased axis-aligned ellipse. Coverage on the rim is 4x4 supersampled - an
 // ellipse's exact pixel overlap has no cheap closed form - so a boundary pixel
 // reads a multiple of 1/16.
 pub fn ellipse(cx: float, cy: float, rx: float, ry: float, op: int) -> bool {
-    return wynimg::sel_ellipse(s_sel, cx, cy, rx, ry, op) == 1
+    return changed(wynimg::sel_ellipse(s_sel, cx, cy, rx, ry, op) == 1)
 }
 
 // Circle - the common case, and named so a caller does not have to remember
 // which of rx/ry comes first.
 pub fn circle(cx: float, cy: float, r: float, op: int) -> bool {
-    return wynimg::sel_ellipse(s_sel, cx, cy, r, r, op) == 1
+    return changed(wynimg::sel_ellipse(s_sel, cx, cy, r, r, op) == 1)
 }
 
 // ---- lasso / polygon -------------------------------------------------------
@@ -219,7 +254,7 @@ pub fn poly_set(pts: int, i: int, x: float, y: float) -> bool {
 // Fills the (implicitly closed) polygon under the NONZERO WINDING rule - see the
 // file header. Needs at least 3 points; fewer is not an area and returns false.
 pub fn polygon(pts: int, op: int) -> bool {
-    return wynimg::sel_polygon(s_sel, pts, op) == 1
+    return changed(wynimg::sel_polygon(s_sel, pts, op) == 1)
 }
 
 // ---- feather ---------------------------------------------------------------
@@ -238,14 +273,14 @@ pub fn polygon(pts: int, op: int) -> bool {
 // counting pixels. That is why the tests use it - a feather whose numbers cannot
 // be predicted by hand is a feather nobody can review.
 pub fn feather_box(rad: float, passes: int) -> bool {
-    return wynimg::sel_feather(s_sel, rad, passes) == 1
+    return changed(wynimg::sel_feather(s_sel, rad, passes) == 1)
 }
 
 // Three box passes approximate a gaussian to within about 3% (the central limit
 // theorem doing the work), for a third of the cost of a real gaussian kernel and
 // none of its truncation choices.
 pub fn feather(rad: float) -> bool {
-    return wynimg::sel_feather(s_sel, rad, 3) == 1
+    return changed(wynimg::sel_feather(s_sel, rad, 3) == 1)
 }
 
 // ---- grow / contract -------------------------------------------------------
@@ -268,12 +303,12 @@ pub fn feather(rad: float) -> bool {
 
 pub fn grow(n: int) -> bool {
     if n < 0 { return false }
-    return wynimg::sel_grow(s_sel, n) == 1
+    return changed(wynimg::sel_grow(s_sel, n) == 1)
 }
 
 pub fn contract(n: int) -> bool {
     if n < 0 { return false }
-    return wynimg::sel_grow(s_sel, 0 - n) == 1
+    return changed(wynimg::sel_grow(s_sel, 0 - n) == 1)
 }
 
 // ---- queries ---------------------------------------------------------------
@@ -319,6 +354,31 @@ pub fn bbox_y1() -> int { return wynimg::sel_bbox(s_sel, 3) }
 pub fn clip(cov: int) -> bool {
     if s_sel == 0 { return false }
     return wynimg::sel_clip(cov, s_sel) == 1
+}
+
+// Write the current selection's BOUNDARY into `out`, as coverage.
+//
+// This is what makes marching ants possible. The editor previously drew the
+// selection's bounding BOX, so an ellipse showed the rectangle around it and a
+// feathered edge showed nothing of its shape - honestly documented, because
+// finding edge pixels from Wyn is one FFI call PER PIXEL per frame. The scan is
+// one call into C instead.
+//
+// `out` must be a buffer of the document's dimensions (select.new_mask(w, h)),
+// and is REPLACED each time: it is an overlay rebuilt when the selection
+// changes, so accumulating would leave stale ants from the previous shape.
+//
+// A soft boundary comes back soft - the written value is the coverage GRADIENT,
+// so a feathered selection's outline fades the way its edge does.
+pub fn outline(out: int) -> bool {
+    if s_sel == 0 { return false }
+    return wynimg::sel_outline(s_sel, out, 0.004) == 1
+}
+
+// The same, on caller-owned handles, for tests and for outlining something that
+// is not the current selection.
+pub fn mask_outline(m: int, out: int, thresh: float) -> bool {
+    return wynimg::sel_outline(m, out, thresh) == 1
 }
 
 // ---- explicit-handle helpers ----------------------------------------------
