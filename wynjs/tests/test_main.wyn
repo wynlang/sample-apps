@@ -71,6 +71,8 @@ fn main() {
         "declarations",
         "control_flow",
         "functions",
+        "arrow_bodies",
+        "arrow_params",
         "closures",
         "recursion",
         "short_circuit",

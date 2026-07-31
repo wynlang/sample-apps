@@ -1886,9 +1886,47 @@ fn p_primary() -> string {
         if tt == 3 {
             var id1 = tv; var sp = pos
             next()
-            if tt == 31 or tt == 36 {
+            // A parameter may be followed by `)`, `,` or `=` (a default). The `=`
+            // case was missing, so `(a, b = 1) => ...` never matched here: it fell
+            // through to the backtrack below, was re-parsed as a parenthesised
+            // EXPRESSION, and the whole arrow silently vanished - taking the rest
+            // of the program with it, because the `=>` that followed was then
+            // unexpected. `wynjs` printed NOTHING for such a file and exited 0.
+            //
+            // Defaults are encoded into the params string as `name=default`,
+            // exactly as p_func_expr does it, because callfn splits fparams on ","
+            // and already understands that spelling - a plain `function` with
+            // default parameters has always worked, and this makes the arrow use
+            // the same machinery rather than a second one.
+            if tt == 31 or tt == 36 or tt == 15 {
                 var params = id1
-                while tt == 36 { next(); params = params + "," + tv; next() }
+                var pdone = 0
+                while pdone == 0 {
+                    if tt == 15 {
+                        next()
+                        if tt == 2 {
+                            params = params + "=\"" + tv + "\""
+                            next()
+                        } else if tt == 1 or tt == 4 {
+                            params = params + "=" + tv
+                            next()
+                        } else {
+                            // Complex default: capture its source text.
+                            var ds = pos - tv.len()
+                            p_expr()
+                            params = params + "=" + src.substring(ds, pos).trim()
+                        }
+                    }
+                    if tt == 36 {
+                        next()
+                        // A rest parameter may only be last; the encoding is the
+                        // same `...name` p_func_expr uses.
+                        if tt == 98 { next(); params = params + ",..." + tv } else { params = params + "," + tv }
+                        next()
+                    } else {
+                        pdone = 1
+                    }
+                }
                 if tt == 31 { next() }
                 if tt == 40 { next(); return p_arrow(params) }
             }
