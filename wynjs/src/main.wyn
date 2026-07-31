@@ -2103,10 +2103,18 @@ fn p_arrow(params: string) -> string {
     var fid = fcnt
     fparams[fid] = sdup(params)
     if tt == 32 {
-        next()
-        var depth = 1; var bstart = pos
+        // bstart BEFORE the next() that eats `{`, which is the whole fix here.
+        // Taking it after leaves bstart pointing past the body's first token, so
+        // `() => { return 1 }` captured "1 }" minus its `return` and every
+        // block-bodied arrow silently evaluated to undefined - including the
+        // `.map(x => { return x*2 })` shape that is most of real JS. The two
+        // other body-capture sites (p_func_expr, class methods) already spell it
+        // this way; this one had drifted.
+        var bstart = pos; if tt == 32 { next() }
+        var depth = 1
         while depth > 0 and tt != 0 { if tt == 32 { depth = depth + 1 } if tt == 33 { depth = depth - 1; if depth == 0 { break } } next() }
-        fbodies[fid] = sdup(src.substring(bstart, pos - 1))
+        var bend = pos - 1; if bend < bstart { bend = bstart }
+        fbodies[fid] = sdup(src.substring(bstart, bend))
         next()
     } else {
         // Expression body: capture raw source text
