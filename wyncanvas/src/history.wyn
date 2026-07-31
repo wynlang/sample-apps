@@ -40,6 +40,23 @@ pub fn history_new() -> int {
     return 0
 }
 
+// Empties the log AND frees the snapshot buffers it owned. Declared here next to
+// history_new but implemented below, where discard_above is in scope.
+//
+// WHY BOTH EXIST. `history_new` resets the counters, which is what a test that
+// starts a fresh scenario wants and what src/server.wyn's demo scene wants: the
+// buffers in the log at that moment are all still reachable through the layer
+// store. Replacing the DOCUMENT (opening a file) is the other case, and there
+// the log is the only remaining reference to every OP_PIXELS snapshot - two
+// full-canvas float32 buffers per recorded stroke, 8MB a step on a 256x256
+// document. Resetting the counters alone would strand all of them.
+pub fn history_reset() -> int {
+    discard_above(0)
+    h_len = 0
+    h_pos = 0
+    return 0
+}
+
 pub fn depth() -> int { return h_len }
 pub fn can_undo() -> bool { return h_pos > 0 }
 pub fn can_redo() -> bool { return h_pos < h_len }
@@ -229,6 +246,28 @@ pub fn record_pixels(layer_id: int, before: int, after: int) -> int {
     return push_ex(OP_PIXELS(), layer_id, 0.0, 0.0, 0, 0, before, after, "", 0)
 }
 
+// THE SAME RECORD, WITH THE OPERATION'S OWN NAME - and this is why a filter and
+// a text commit do NOT get their own opcodes.
+//
+// A filter over a selection, and a text block committed through the brush
+// kernel, are both "these pixels of this layer were replaced". There is no
+// smaller honest representation: a gaussian blur is not invertible (energy is
+// genuinely lost at the borders and in the interior average), and a text commit
+// is a coverage-weighted blend whose inverse would need the coverage kept
+// forever. So the before/after pair IS the operation, exactly as it is for a
+// brush stroke, and reusing OP_PIXELS means undo, redo, the leak-free redo-branch
+// truncation in `discard_above`, and the copy-not-swap rule are all inherited
+// rather than re-derived per feature. A fifth opcode with an identical `apply`
+// body would be the version that eventually drifts.
+//
+// Only the LABEL differs, and it rides in the string column OP_PIXELS does not
+// use - so the status bar can say "undo blur" instead of "undo paint", which is
+// the difference between a user knowing what Undo will do and guessing.
+pub fn record_pixels_as(layer_id: int, before: int, after: int,
+                        what: string) -> int {
+    return push_ex(OP_PIXELS(), layer_id, 0.0, 0.0, 0, 0, before, after, what, 0)
+}
+
 pub fn record_add_layer(pos: int, name: string, buf: int, kind: int) -> int {
     return push_ex(OP_ADD_LAYER(), pos, 0.0, 0.0, 0, 0, buf, 0, name, kind)
 }
@@ -343,7 +382,14 @@ pub fn redo_any() -> int {
 pub fn label_any(i: int) -> string {
     if i < 0 or i >= h_len { return "" }
     var op = h_op[i]
-    if op == OP_PIXELS() { return "paint" }
+    if op == OP_PIXELS() {
+        // A named pixel op (a filter, a text commit) carries its own label in the
+        // string column; a brush stroke leaves it "" and is called "paint".
+        if i < h_s.len() {
+            if h_s[i] != "" { return h_s[i] }
+        }
+        return "paint"
+    }
     if op == OP_ADD_LAYER() { return "add layer" }
     if op == OP_DEL_LAYER() { return "delete layer" }
     if op == OP_SWAP() { return "reorder" }

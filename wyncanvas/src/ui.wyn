@@ -87,9 +87,28 @@ import pixel
 import layer
 import history
 import render
+
+// SELECT MUST BE IMPORTED BEFORE SERVER, and that is a live compiler bug, not a
+// style choice. src/select.wyn has `pub fn handle() -> int` (the current
+// selection's coverage handle) and src/server.wyn has `pub fn handle(req: string)`
+// plus an UNQUALIFIED internal call to it. With server first, that internal call
+// is emitted as `handle_string(req)` - an overload-mangled name that is never
+// defined - and the build dies with "call to undeclared function 'handle_string'"
+// pointing at a line in server.wyn that this file never touched.
+//
+// Minimised to three files: module A with `pub fn handle(s: string)` and a second
+// pub fn calling it unqualified, module B with `pub fn handle()`, and an importer
+// of both. `import a` then `import b` fails; `import b` then `import a` compiles
+// and runs. The mangling only appears when the two signatures DIFFER in arity -
+// two same-arity `handle`s are fine - so it is the arity-disambiguation path
+// leaking a mangled callee into the wrong module. Reported upstream.
+import select
 import server
 import paint
 import view
+import project
+import filter
+import text
 
 // Bridge from a wynimg buffer handle to a GPU texture. Implemented in
 // csrc/wynimg_tex.c, because resolving a handle to its `float*` requires
@@ -174,6 +193,9 @@ var g_dirty = 1
 var REQ_NONE = 0
 var REQ_OPEN = 1
 var REQ_SAVE = 2
+// A text commit is deferred for exactly the same reason Open and Save are: the
+// string the user typed lives in the Ui, which a handler cannot reach.
+var REQ_TEXT = 3
 var g_req = 0
 
 // One line of feedback, shown in the status bar. A UI that silently does
@@ -193,6 +215,34 @@ var g_row_count = 0
 // The path entry's widget id, so the frame loop can read what was typed.
 var g_path_id = -1
 
+// ---- text tool -------------------------------------------------------------
+//
+// THE TEXT ENTRY IS A REAL WIDGET, NOT AN ON-CANVAS EDITOR, and that is the
+// choice this file makes rather than a shortcut. The task allowed a status-line
+// entry; a toolbar text field is the same decision and is honest about it.
+//
+// The reason is the toolkit's contract: `widgets.Ui_events` DRAINS the key queue,
+// so a second reader (an on-canvas editor keeping its own buffer) would see
+// nothing. Typing on the canvas would mean teaching the toolkit about a caret
+// that is not a widget - the same argument the file header makes for the canvas
+// drag going the other way. So the flow is: pick the Text tool, type in the
+// entry, click the document to place it. Which is one gesture fewer than an
+// on-canvas editor needs anyway.
+//
+// The entry's widget id, and the font. The font is loaded ONCE, lazily on first
+// use rather than at startup: `wynimg_font_default` scans the system font
+// directories and opens a file, which is wasted work in a session that never
+// draws text, and a machine with no usable font must not stop the editor
+// launching.
+var g_text_id = -1
+var g_text_font = -1
+var g_text_px = 32.0
+
+// Where the last click asked for text, in DOCUMENT coordinates. Set by
+// canvas_press and consumed by the frame loop's REQ_TEXT service.
+var g_text_x = 0.0
+var g_text_y = 0.0
+
 // ---- canvas drag state ----------------------------------------------------
 //
 // A drag is a press, N moves and a release; the toolkit models a CLICK. So the
@@ -202,9 +252,71 @@ var DRAG_STROKE = 1
 var DRAG_PAN = 2
 var DRAG_SV = 3
 var DRAG_HUE = 4
+var DRAG_MARQUEE = 5
 var g_drag = 0
 var g_drag_px = 0        // last pointer position, for the pan delta
 var g_drag_py = 0
+
+// ---- selection tools -------------------------------------------------------
+//
+// THE MARQUEE TOOLS LIVE HERE, NOT IN paint.set_tool, and the reason is a
+// boundary rather than a convenience. `paint` owns what a STROKE is - a coverage
+// accumulator, a base snapshot, a colour - and a marquee has none of those: it
+// produces no pixels and records no history. paint.set_tool also refuses any id
+// above 4 by design, so extending it would mean editing a module this change does
+// not own. So the selection tools are a SEPARATE mode, and the two are mutually
+// exclusive: choosing a marquee sets g_sel_tool and choosing a paint tool clears
+// it, which is what `tool_word()` reports and what canvas_press branches on.
+// SEL_TEXT is in this enum rather than in paint's because it is the same kind of
+// thing as a marquee: a canvas mode this file owns, which produces no stroke and
+// which paint.set_tool would refuse anyway (it caps ids at 4). It is not a
+// selection, and `mask_for_ops` never sees it - only canvas_press branches on it.
+var SEL_NONE = 0
+var SEL_RECT = 1
+var SEL_ELLIPSE = 2
+var SEL_LASSO = 3
+var SEL_TEXT = 4
+var g_sel_tool = 0
+
+// How a drag combines with what is already selected. Kept as state rather than a
+// modifier key because the widget toolkit owns the key queue (a second reader
+// sees nothing) - the same argument src/paint.wyn makes for Pan being a tool.
+var g_sel_op = 0
+
+// The marquee's anchor, in DOCUMENT coordinates.
+//
+// DOCUMENT, NOT WINDOW, AND THAT IS THE WHOLE CORRECTNESS ARGUMENT. A marquee
+// stored in window pixels and converted at release would be wrong the moment the
+// view was zoomed or panned mid-drag, and - worse - would be a SECOND transform
+// path that could disagree with the brush's. Anchoring in document space means
+// the marquee goes through the identical view.screen_to_doc_* the brush uses, so
+// "the selection lands where the pointer was" is true for the same reason the
+// brush's version is, and tests/test_view.wyn's invertibility proof covers both.
+var g_marq_x0 = 0.0
+var g_marq_y0 = 0.0
+var g_marq_x1 = 0.0
+var g_marq_y1 = 0.0
+var g_marq_live = 0
+
+// The lasso's path, accumulated in Wyn arrays and turned into a wynimg point list
+// only at release.
+//
+// WHY NOT A PRE-ALLOCATED POINT LIST, which was the obvious first try:
+// `wynimg_sel_polygon` takes the point count from the BUFFER'S WIDTH
+// (csrc/wynimg_select.c: `long long n = p->w`), so a list allocated with a cap of
+// 512 and filled with 20 real points is a 512-gon with 492 vertices at the origin
+// - a lasso in the top-left corner joined to whatever the user drew. There is no
+// "used count" to set. So the list must be allocated at EXACTLY the length of the
+// path, which cannot be known until the drag ends.
+//
+// Two Wyn float arrays are the right holder for that: this is the entry file, the
+// count is a drag's worth of points rather than a document's worth of pixels, and
+// the bulk-data argument in src/select.wyn's header is about 12M pixels, not 200
+// coordinates. Points closer than a pixel to the last one are dropped, so a slow
+// drag does not push thousands of duplicates.
+var g_lasso_xs = [0.0]
+var g_lasso_ys = [0.0]
+var g_lasso_n = 0
 
 // Pointer state as of the last frame, so a transition (down this frame, up last
 // frame) can be detected. The toolkit consumes the EVENTS; this reads the
@@ -329,27 +441,54 @@ fn on_zoom_100(id: int) {
 // handler receives only a widget id and mapping id->tool would need a second
 // lookup table for no gain: there are five tools and they are not data.
 
+// Choosing a paint tool leaves selection-tool mode, and vice versa - the two are
+// one mode, not two independent flags, so the canvas can never be "both".
 fn on_tool_brush(id: int) {
+    g_sel_tool = SEL_NONE
     paint.set_tool(paint.TOOL_BRUSH())
     g_msg = "brush"
 }
 
+fn on_tool_mrect(id: int) {
+    g_sel_tool = SEL_RECT
+    g_msg = "rect select"
+}
+
+fn on_tool_mellipse(id: int) {
+    g_sel_tool = SEL_ELLIPSE
+    g_msg = "ellipse select"
+}
+
+fn on_tool_lasso(id: int) {
+    g_sel_tool = SEL_LASSO
+    g_msg = "lasso select"
+}
+
+fn on_tool_text(id: int) {
+    g_sel_tool = SEL_TEXT
+    g_msg = "text: type in the field, then click the canvas"
+}
+
 fn on_tool_eraser(id: int) {
+    g_sel_tool = SEL_NONE
     paint.set_tool(paint.TOOL_ERASER())
     g_msg = "eraser"
 }
 
 fn on_tool_fill(id: int) {
+    g_sel_tool = SEL_NONE
     paint.set_tool(paint.TOOL_FILL())
     g_msg = "fill"
 }
 
 fn on_tool_pick(id: int) {
+    g_sel_tool = SEL_NONE
     paint.set_tool(paint.TOOL_PICK())
     g_msg = "eyedropper"
 }
 
 fn on_tool_pan(id: int) {
+    g_sel_tool = SEL_NONE
     paint.set_tool(paint.TOOL_PAN())
     g_msg = "pan"
 }
@@ -506,6 +645,213 @@ fn on_blend_prev(id: int) {
     g_dirty = 1
 }
 
+// ---- filters --------------------------------------------------------------
+//
+// A FILTER IS AN UNDOABLE WHOLE-LAYER REPLACEMENT, and that is the honest
+// representation rather than a shortcut.
+//
+// Everything else in this file that changes pixels - the brush, the bucket fill -
+// records a before/after pair for the same reason (src/history.wyn's OP_PIXELS),
+// and a filter has even less choice about it: a gaussian blur genuinely destroys
+// information (it is an averaging operator, so it is not injective), and a levels
+// remap with a clamp destroys everything outside the window. There is no
+// parameter pair that inverts either. So Undo restores the EXACT prior pixels
+// from a snapshot, or a filter is a trap - a button that changes the document
+// with no way back.
+//
+// THE SELECTION IS PASSED AS THE COVERAGE MASK, WITH ONE CONVERSION THAT MATTERS.
+// Every filter takes a mask handle where 0 means "the whole buffer", and the
+// selection is a coverage buffer of exactly that shape (src/select.wyn's header:
+// the mask's R channel is linear coverage, the same convention the brush and the
+// text engine produce). So passing the selection IS the integration - the C
+// driver blends `original*(1-coverage) + filtered*coverage` per pixel, so a
+// feathered selection gives a feathered filter for free.
+//
+// But an EMPTY selection must become 0, not its handle. `select.is_empty()` is
+// true both when there is no selection object and when nothing is selected, and
+// in the second case the handle is a valid buffer of all zeros - which would make
+// every filter a silent no-op. Turning that into "no mask" is the whole of
+// `mask_for_ops` and is the one line that decides whether Blur-with-nothing-
+// selected filters the layer or does nothing.
+
+// The mask handle to pass to a filter: the selection when there is one, 0 when
+// there is not. See above for why the empty case is 0 and not the handle.
+fn mask_for_ops() -> int {
+    if select.is_empty() { return 0 }
+    return select.handle()
+}
+
+// One word for the status bar and the undo label, so "undo blur" is possible.
+// Read from the selection state at apply time rather than cached, because the
+// selection can change between two filters.
+fn scope_word() -> string {
+    if select.is_empty() { return "layer" }
+    return "selection"
+}
+
+// Runs `what` on the active layer, clipped by the selection, as ONE undo entry.
+//
+// The order is fixed by correctness: snapshot BEFORE, filter, snapshot AFTER,
+// record. Snapshotting after the filter would record the filtered pixels as the
+// "before" and make Undo a no-op that looks wired - the exact failure the brief
+// calls a trap. If the filter itself fails, the before-clone is freed and NO
+// entry is recorded, because a history entry whose two halves are identical would
+// make Undo appear broken to the user rather than reporting the refusal.
+fn run_filter(what: string) {
+    if g_active < 0 {
+        g_msg = "no active layer"
+        return
+    }
+    var buf = layer.buffer(g_active)
+    if buf == 0 {
+        // An adjustment layer has no pixels of its own; filtering it would have
+        // to mean "filter what is beneath", which is a different feature.
+        g_msg = "cannot filter that layer"
+        return
+    }
+    var before = wynimg_clone(buf)
+    if before == 0 {
+        g_msg = "out of memory"
+        return
+    }
+
+    var m = mask_for_ops()
+    var ok = false
+    // Radii and amounts are fixed rather than slider-driven: the toolkit has no
+    // slider, and a stepper per filter parameter would be twelve more buttons
+    // for no gain in what this proves. The values are the ones a single click
+    // should mean - a blur you can see, a sharpen that does not ring.
+    if what == "blur"      { ok = filter.gaussian(buf, 4.0, m) }
+    if what == "sharpen"   { ok = filter.sharpen(buf, 0.8, m) }
+    if what == "saturate"  { ok = filter.saturation(buf, 1.4, m) }
+    if what == "desaturate" { ok = filter.saturation(buf, 0.6, m) }
+    if what == "levels"    { ok = filter.levels(buf, 0.05, 0.95, 1.2, m) }
+    if what == "invert"    { ok = filter.invert(buf, m) }
+    if what == "curve" {
+        // A curve is a buffer too, so it must be freed on BOTH paths - which is
+        // why this filter is the one with its own block rather than a one-liner.
+        var c = filter.gamma_curve(32, 1.6)
+        if c == 0 {
+            wynimg_free(before)
+            g_msg = "out of memory"
+            return
+        }
+        ok = filter.curve(buf, c, m)
+        filter.free_curve(c)
+    }
+
+    if ok == false {
+        wynimg_free(before)
+        g_msg = what + " refused"
+        return
+    }
+
+    var after = wynimg_clone(buf)
+    if after == 0 {
+        // The pixels ARE filtered but cannot be recorded. Put them back rather
+        // than leaving an unundoable change on screen: a silent hole in the undo
+        // log is worse than the filter not happening.
+        wynimg_copy_into(buf, before)
+        wynimg_free(before)
+        g_msg = "out of memory"
+        return
+    }
+    history.record_pixels_as(g_active, before, after, what)
+    g_msg = what + " on " + scope_word()
+    g_dirty = 1
+}
+
+// ---- text ------------------------------------------------------------------
+//
+// ONE UNDO ENTRY, THE SAME WAY A FILTER GETS ONE: a before/after pixel pair.
+// text.draw goes through `wynimg_stroke_apply` - the identical kernel the brush
+// uses (see src/text.wyn's header) - so the composited result is right by
+// construction. What it does NOT do is record anything, because a library that
+// recorded into history would be deciding the caller's undo granularity. So the
+// snapshot pair is taken here, exactly as run_filter takes it, and for the same
+// reason: a coverage-weighted blend has no inverse to store instead.
+//
+// THE COLOUR IS LINEAR, WHICH IS THE ONE THING EASY TO GET WRONG HERE.
+// paint.color_linear(c) is what the brush passes to the same kernel; passing
+// paint.color_srgb would paint visibly light glyphs that no assertion about
+// coverage would catch. That is why there is no sRGB-taking path in text.wyn.
+fn commit_text(s: string) {
+    if s == "" {
+        g_msg = "type some text first"
+        return
+    }
+    if g_active < 0 {
+        g_msg = "no active layer"
+        return
+    }
+    var buf = layer.buffer(g_active)
+    if buf == 0 {
+        g_msg = "cannot draw text on that layer"
+        return
+    }
+    if g_text_font < 0 {
+        // Lazily, once. 0 means the machine has no usable font, which is a fact
+        // about the machine and is reported rather than treated as a bug - the
+        // same contract src/text.wyn asks callers to honour.
+        g_text_font = text.default_font()
+    }
+    if g_text_font == 0 {
+        g_msg = "no system font available"
+        return
+    }
+
+    var before = wynimg_clone(buf)
+    if before == 0 {
+        g_msg = "out of memory"
+        return
+    }
+    // (x,y) is the TOP-LEFT of the layout box, not the baseline, which is what
+    // text.wyn takes - so a click places the top-left of the text where the
+    // pointer was and no caller has to add the ascent.
+    var ok = text.draw(buf, g_text_font, s, g_text_x, g_text_y, g_text_px,
+                       paint.color_linear(0), paint.color_linear(1),
+                       paint.color_linear(2), paint.alpha(),
+                       1.0, text.ALIGN_LEFT(), 0.0, text.GAMMA_DISPLAY(), 0)
+    if ok == false {
+        wynimg_free(before)
+        g_msg = "text refused"
+        return
+    }
+    var after = wynimg_clone(buf)
+    if after == 0 {
+        // Put the pixels back rather than leave an unundoable change - the same
+        // policy run_filter uses, and for the same reason.
+        wynimg_copy_into(buf, before)
+        wynimg_free(before)
+        g_msg = "out of memory"
+        return
+    }
+    history.record_pixels_as(g_active, before, after, "text")
+    g_msg = "text \"" + s + "\" at " + g_text_x.to_int().to_string() + ","
+            + g_text_y.to_int().to_string()
+    g_dirty = 1
+}
+
+fn on_text_bigger(id: int) {
+    g_text_px = g_text_px * 1.25
+    if g_text_px > 400.0 { g_text_px = 400.0 }
+    g_msg = "text " + rounded(g_text_px) + "px"
+}
+
+fn on_text_smaller(id: int) {
+    g_text_px = g_text_px / 1.25
+    if g_text_px < 4.0 { g_text_px = 4.0 }
+    g_msg = "text " + rounded(g_text_px) + "px"
+}
+
+fn on_flt_blur(id: int) { run_filter("blur") }
+fn on_flt_sharpen(id: int) { run_filter("sharpen") }
+fn on_flt_saturate(id: int) { run_filter("saturate") }
+fn on_flt_desaturate(id: int) { run_filter("desaturate") }
+fn on_flt_levels(id: int) { run_filter("levels") }
+fn on_flt_invert(id: int) { run_filter("invert") }
+fn on_flt_curve(id: int) { run_filter("curve") }
+
 // A layer row does two things depending on WHERE it was clicked: the visibility
 // box toggles (through history, so it is undoable), and the rest of the row
 // selects the layer. Splitting geometrically rather than with two widgets keeps
@@ -535,6 +881,49 @@ fn on_layer_row(id: int) {
 fn vis_word(on: bool) -> string {
     if on { return "shown" }
     return "hidden"
+}
+
+// ---- selection commands ----------------------------------------------------
+//
+// DELIBERATELY NOT UNDOABLE, and this is a decision rather than an omission.
+//
+// A selection is not part of the document: it survives a save only as a channel
+// in formats that store one, it does not appear in the exported PNG, and no pixel
+// changes when it does. Putting it in the undo log would mean Undo after
+// "blur the selection" popped the SELECTION change first and left the blur on
+// screen - i.e. the user would press Undo, see nothing happen to the image, and
+// press it again. Photoshop makes the same call: Select > All is not an undo step
+// (it is Deselect that people expect Ctrl+Z to reach, and that is a separate
+// argument this project does not need yet).
+//
+// Stated in the README as a limitation rather than left to be discovered.
+
+fn on_sel_all(id: int) {
+    if select.select_all() {
+        g_msg = "selected all"
+    } else {
+        g_msg = "no selection buffer"
+    }
+    // The marquee is drawn from the selection's bbox, so the frame must redraw -
+    // but the PIXELS did not change, so this is not g_dirty (which would force a
+    // needless full composite).
+}
+
+fn on_sel_none(id: int) {
+    select.select_none()
+    g_msg = "deselected"
+}
+
+fn on_sel_invert(id: int) {
+    if select.is_empty() {
+        // Inverting nothing is selecting everything, which is what a user means
+        // by it, and is what the coverage arithmetic does anyway (1-0 = 1).
+        select.select_all()
+        g_msg = "selected all (inverted empty)"
+        return
+    }
+    select.invert()
+    g_msg = "inverted selection"
 }
 
 // ---- document -------------------------------------------------------------
@@ -603,6 +992,112 @@ fn save_png(path: string) {
     g_msg = "cannot write " + path
 }
 
+// ---- layered documents (.wync) --------------------------------------------
+//
+// THE EXTENSION PICKS THE FORMAT, and the two formats are not interchangeable:
+// PNG flattens the stack to one image, `.wync` keeps every layer with its blend
+// mode, opacity, visibility, mask and adjustment amount. One Save button that
+// silently threw the layer stack away because the user typed the wrong suffix
+// would be worse than two buttons, so the suffix - the thing the user actually
+// typed - decides, and the status line names which one happened.
+
+fn is_wync(path: string) -> bool { return path.lower().ends_with(".wync") }
+
+fn save_doc(path: string) {
+    if path == "" {
+        g_msg = "no path"
+        return
+    }
+    if is_wync(path) == false {
+        save_png(path)
+        return
+    }
+    var rc = project.save(path, g_doc_w, g_doc_h)
+    if rc == project.OK() {
+        g_msg = "wrote " + path + " (" + layer.count().to_string() + " layers)"
+        return
+    }
+    // Every failure mode has its own code for exactly this reason: "save failed"
+    // is not actionable, "cannot open for writing" is.
+    g_msg = "cannot write " + path + ": " + project.error_message(rc)
+}
+
+// Replaces the document with a loaded .wync. This is the loop src/project.wyn's
+// header describes as "the integrator's job": the loader reports a table and
+// this decides what happens to the document being replaced.
+//
+// THE ORDER MATTERS AND IS THE WHOLE FUNCTION.
+//
+// 1. `load` FIRST, before anything is torn down. On any failure the old document
+//    is still intact and the message names the reason - a loader that cleared
+//    the stack first would turn "that file is damaged" into "your work is gone".
+// 2. Then release the outgoing document's own memory: an in-flight stroke (whose
+//    base clone and coverage buffer are full-canvas), then the history log's
+//    OP_PIXELS snapshots. Only after that are the old layer buffers unreachable.
+// 3. `take_buffer`/`take_mask` TRANSFER ownership row by row, so `release()`
+//    frees only what was not kept. Taking twice yields 0 by design, so each is
+//    called exactly once per row.
+fn open_wync(path: string) {
+    var rc = project.load(path)
+    if rc != project.OK() {
+        g_msg = "cannot open " + path + ": " + project.error_message(rc)
+        return
+    }
+    var n = project.layer_count()
+    var w = project.doc_width()
+    var h = project.doc_height()
+    if n <= 0 or w <= 0 or h <= 0 {
+        project.release()
+        g_msg = "empty document in " + path
+        return
+    }
+
+    if paint.stroke_active() { paint.cancel() }
+    // The old layer buffers are freed here rather than leaked. Nothing else can
+    // still reference them: the stroke is cancelled above, the history log is
+    // reset (freeing its own snapshots), and the composite is a separate buffer.
+    history.history_reset()
+    var old = 0
+    while old < layer.count() {
+        if layer.buffer(old) != 0 { wynimg_free(layer.buffer(old)) }
+        if layer.mask(old) != 0 { wynimg_free(layer.mask(old)) }
+        old = old + 1
+    }
+    layer.store_new()
+
+    var i = 0
+    while i < n {
+        var idx = layer.add(project.layer_name(i), project.take_buffer(i),
+                            project.layer_kind(i))
+        layer.set_blend_mode(idx, project.layer_blend(i))
+        layer.set_opacity(idx, project.layer_opacity(i))
+        layer.set_visible(idx, project.layer_visible(i))
+        layer.set_adjust_amount(idx, project.layer_amount(i))
+        layer.set_mask(idx, project.take_mask(i))
+        i = i + 1
+    }
+    project.release()
+
+    g_doc_w = w
+    g_doc_h = h
+    g_active = layer.count() - 1
+    view.set_doc(g_doc_w, g_doc_h)
+    view.zoom_fit()
+    // The selection is document-sized coverage, so it cannot survive a document
+    // of different dimensions. Reallocated empty rather than kept and clipped.
+    select.init(g_doc_w, g_doc_h)
+    g_msg = "opened " + path + " (" + n.to_string() + " layers)"
+    g_dirty = 1
+}
+
+fn open_doc(path: string) {
+    if path == "" {
+        g_msg = "no path"
+        return
+    }
+    if is_wync(path) { open_wync(path) } else { open_png(path) }
+}
+
 // ---- canvas gesture -------------------------------------------------------
 //
 // Called from the frame loop with the pointer's WINDOW position and button
@@ -653,6 +1148,126 @@ fn pick_hue(my: int) {
     g_msg = "hue " + rounded(paint.hue())
 }
 
+// ---- marquee ---------------------------------------------------------------
+//
+// Applied on every drag move, not only at release, so the selection the marquee
+// outline shows IS the selection - there is no separate "preview" that could
+// disagree with the committed result. That is the same argument src/paint.wyn
+// makes for the stroke preview going through the apply kernel.
+//
+// FOR A LIVE DRAG THE OP IS ALWAYS REPLACE ON THE BASE, which needs one extra
+// buffer and is the reason `g_sel_base` exists. Re-applying an ADD rect at every
+// mouse move would accumulate every intermediate rectangle - drag a rect
+// leftwards and you would select the union of every size it passed through, not
+// the final one. So the pre-drag selection is snapshotted at press, and each move
+// restores it and applies the shape ONCE with the chosen op.
+var g_sel_base = 0
+
+// Appends a lasso point, dropping one within half a pixel of the last so a slow
+// drag does not store thousands of duplicates (which would also make the polygon
+// kernel's per-point cost the dominant one).
+fn lasso_push(x: float, y: float) {
+    if g_lasso_n > 0 {
+        var lx = g_lasso_xs[g_lasso_n - 1]
+        var ly = g_lasso_ys[g_lasso_n - 1]
+        if pixel.approx(lx, x, 0.5) {
+            if pixel.approx(ly, y, 0.5) { return }
+        }
+    }
+    if g_lasso_n < g_lasso_xs.len() {
+        g_lasso_xs[g_lasso_n] = x
+        g_lasso_ys[g_lasso_n] = y
+    } else {
+        g_lasso_xs.push(x)
+        g_lasso_ys.push(y)
+    }
+    g_lasso_n = g_lasso_n + 1
+}
+
+// Builds a point list of EXACTLY the path's length and fills the selection with
+// it. Exact length because the kernel reads the count from the buffer's width -
+// see the note on g_lasso_xs.
+fn lasso_fill() {
+    if g_lasso_n < 3 { return }
+    var pts = select.poly_new(g_lasso_n)
+    if pts == 0 { return }
+    var i = 0
+    while i < g_lasso_n {
+        select.poly_set(pts, i, g_lasso_xs[i], g_lasso_ys[i])
+        i = i + 1
+    }
+    select.polygon(pts, g_sel_op)
+    select.poly_free(pts)
+}
+
+fn marquee_apply(final_pass: bool) {
+    if select.active() == false { return }
+    // Restore the pre-drag state, then apply the shape once. See above.
+    if g_sel_base != 0 { wynimg_copy_into(select.handle(), g_sel_base) }
+
+    if g_sel_tool == SEL_LASSO {
+        lasso_fill()
+        return
+    }
+
+    // A drag from either corner must work, so the rect is normalised rather than
+    // requiring top-left-to-bottom-right.
+    var x0 = g_marq_x0
+    var x1 = g_marq_x1
+    if x1 < x0 { x0 = g_marq_x1 x1 = g_marq_x0 }
+    var y0 = g_marq_y0
+    var y1 = g_marq_y1
+    if y1 < y0 { y0 = g_marq_y1 y1 = g_marq_y0 }
+
+    if g_sel_tool == SEL_ELLIPSE {
+        // The ellipse INSCRIBED in the dragged box, which is what dragging an
+        // ellipse means everywhere; centre and radii, because that is what the
+        // engine takes.
+        select.ellipse((x0 + x1) / 2.0, (y0 + y1) / 2.0,
+                       (x1 - x0) / 2.0, (y1 - y0) / 2.0, g_sel_op)
+        return
+    }
+    select.rect(x0, y0, x1 - x0, y1 - y0, g_sel_op)
+}
+
+// A click with no drag DESELECTS, for rect and ellipse. A zero-area marquee is
+// what a user does to get rid of a selection, and leaving a 0x0 selection behind
+// would make every subsequent tool a silent no-op - the worst outcome available.
+fn marquee_release() {
+    var degenerate = false
+    if g_sel_tool != SEL_LASSO {
+        if pixel.approx(g_marq_x0, g_marq_x1, 0.5) {
+            if pixel.approx(g_marq_y0, g_marq_y1, 0.5) { degenerate = true }
+        }
+    } else {
+        if g_lasso_n < 3 { degenerate = true }
+    }
+
+    if degenerate {
+        if g_sel_base != 0 { wynimg_copy_into(select.handle(), g_sel_base) }
+        select.select_none()
+        g_msg = "deselected"
+    } else {
+        marquee_apply(true)
+        g_msg = sel_tool_word() + " selection, " + rounded(select.area()) + " px"
+    }
+
+    if g_sel_base != 0 {
+        wynimg_free(g_sel_base)
+        g_sel_base = 0
+    }
+    g_lasso_n = 0
+    g_marq_live = 0
+}
+
+fn sel_tool_word() -> string {
+    if g_sel_tool == SEL_RECT { return "rect" }
+    if g_sel_tool == SEL_ELLIPSE { return "ellipse" }
+    if g_sel_tool == SEL_LASSO { return "lasso" }
+    if g_sel_tool == SEL_TEXT { return "text" }
+    return "none"
+}
+
 fn canvas_press(mx: int, my: int) {
     var t = paint.tool()
 
@@ -671,6 +1286,47 @@ fn canvas_press(mx: int, my: int) {
 
     if in_viewport(mx, my) == false { return }
 
+    // The text tool: a click PLACES text, so it needs the document position and
+    // then the frame loop (which can read the entry) to do the work. Unlike a
+    // marquee this does require the click to be on the canvas - text placed
+    // outside the document would rasterise entirely off the buffer.
+    if g_sel_tool == SEL_TEXT {
+        if view.hits_doc(mx, my) == false {
+            g_msg = "outside the canvas"
+            return
+        }
+        g_text_x = view.screen_to_doc_x(mx.to_float())
+        g_text_y = view.screen_to_doc_y(my.to_float())
+        g_req = REQ_TEXT
+        g_msg = "placing text"
+        return
+    }
+
+    // A marquee tool takes the press before any paint tool sees it, and it does
+    // NOT require view.hits_doc: dragging a selection from outside the canvas
+    // into it is normal, and the coverage kernels clip to the buffer anyway.
+    if g_sel_tool != SEL_NONE {
+        if select.active() == false {
+            g_msg = "no selection buffer"
+            return
+        }
+        g_marq_x0 = view.screen_to_doc_x(mx.to_float())
+        g_marq_y0 = view.screen_to_doc_y(my.to_float())
+        g_marq_x1 = g_marq_x0
+        g_marq_y1 = g_marq_y0
+        g_marq_live = 1
+        g_drag = DRAG_MARQUEE
+
+        // Snapshot the pre-drag selection so each move can restore it. Without
+        // this an add-mode drag accumulates every intermediate shape.
+        if g_sel_base != 0 { wynimg_free(g_sel_base) }
+        g_sel_base = wynimg_clone(select.handle())
+
+        g_lasso_n = 0
+        if g_sel_tool == SEL_LASSO { lasso_push(g_marq_x0, g_marq_y0) }
+        return
+    }
+
     if t == paint.TOOL_PAN() {
         g_drag = DRAG_PAN
         g_drag_px = mx
@@ -685,6 +1341,41 @@ fn canvas_press(mx: int, my: int) {
 
     var dx = view.screen_to_doc_x(mx.to_float())
     var dy = view.screen_to_doc_y(my.to_float())
+
+    // THE SELECTION GATES THE PIXEL TOOLS - and this is a REFUSAL at the press,
+    // not a clip of the coverage, which is a stated limitation rather than an
+    // oversight. The reason is a boundary this change cannot cross.
+    //
+    // The correct clip is one call - `select.clip(cov)` between
+    // `wynimg_stroke_seg` and `wynimg_stroke_apply` in src/paint.wyn's `seg`, and
+    // the same before the apply in `fill_at`. src/select.wyn's header says
+    // exactly that, and it is right. But the coverage buffer is `paint.wyn`'s
+    // private `s_cov`, and paint.wyn is not this change's file to edit.
+    //
+    // WHY NOT DO IT AFTER THE FACT, which was tried and rejected: reconstructing
+    // `layer = before*(1-sel) + after*sel` from outside needs a masked lerp
+    // between two BUFFERS, and no such kernel exists. The nearest available
+    // composition (zero the alpha inside the selection with an erase-mode apply,
+    // then source-over the unclipped result through the selection as a mask) is
+    // exact for a HARD selection but wrong at a feathered edge - source-over
+    // cannot lower alpha, so an ERASER inside a soft-edged selection would leave
+    // the alpha it was asked to remove. A filter that is right for a hard mask
+    // and quietly wrong for a soft one is the kind of thing this project
+    // documents rather than ships.
+    //
+    // So: with a selection active, a press on an UNSELECTED pixel does nothing at
+    // all - which is the property that matters most, because it is the one that
+    // makes "the selection protects the rest of the layer" true. A stroke that
+    // STARTS inside and is dragged out is not clipped at the boundary; the README
+    // says so.
+    if select.is_empty() == false {
+        if t != paint.TOOL_PICK() {
+            if select.cov_at(dx.to_int(), dy.to_int()) <= 0.0 {
+                g_msg = "outside the selection"
+                return
+            }
+        }
+    }
 
     if t == paint.TOOL_PICK() {
         if g_last_comp == 0 { refresh(0) }
@@ -719,6 +1410,16 @@ fn canvas_press(mx: int, my: int) {
 }
 
 fn canvas_drag(mx: int, my: int) {
+    if g_drag == DRAG_MARQUEE {
+        // DOCUMENT coordinates, through the same transform the blit uses - so the
+        // marquee tracks the pointer at any zoom for the same reason the brush
+        // does. See the note on g_marq_x0.
+        g_marq_x1 = view.screen_to_doc_x(mx.to_float())
+        g_marq_y1 = view.screen_to_doc_y(my.to_float())
+        if g_sel_tool == SEL_LASSO { lasso_push(g_marq_x1, g_marq_y1) }
+        marquee_apply(false)
+        return
+    }
     if g_drag == DRAG_STROKE {
         var dx = view.screen_to_doc_x(mx.to_float())
         var dy = view.screen_to_doc_y(my.to_float())
@@ -743,6 +1444,11 @@ fn canvas_drag(mx: int, my: int) {
 }
 
 fn canvas_release(mx: int, my: int) {
+    if g_drag == DRAG_MARQUEE {
+        marquee_release()
+        g_drag = DRAG_NONE
+        return
+    }
     if g_drag == DRAG_STROKE {
         paint.commit()
         g_msg = paint.tool_name(paint.tool()) + " stroke, "
@@ -859,6 +1565,77 @@ fn paint_entry(ui: Ui, i: int) {
     gui.Win_clip(g_win, 0, 0, 0, 0)
 }
 
+// THE MARQUEE. A selection the user cannot see is a trap, because every
+// subsequent tool silently refuses outside it - so the outline is not decoration.
+//
+// IT IS DRAWN FROM THE SELECTION'S OWN BOUNDING BOX, not from the drag
+// rectangle, and that distinction is the whole reason this is trustworthy: the
+// bbox comes from `select.bbox_*`, which scans the actual coverage buffer. So the
+// outline is a statement ABOUT the selection rather than a redrawing of the
+// gesture that made it, and it is therefore correct for a selection built by
+// three lasso drags, by an invert, or by Select All - none of which has a drag
+// rectangle at all. A marquee painted from g_marq_* would have shown the last
+// dragged box and been quietly wrong for every other case.
+//
+// A bbox is not the shape, and that is stated honestly: an ellipse selection
+// shows its bounding box, not marching ants along the rim. Drawing the true
+// boundary means walking the coverage buffer per frame to find edge pixels
+// (65,536 reads at 256x256, per frame, from Wyn - one FFI call each), which is
+// the "one Win_rect per pixel" mistake this file's header rejects. The DRAG
+// outline below is exact for a rect and shows the ellipse's box while dragging,
+// which is what a user needs to place it.
+fn paint_marquee() {
+    if select.active() == false { return }
+
+    // While dragging, the exact shape being dragged - a rect outline for MRct,
+    // its bounding box for MEll (which is what the ellipse is inscribed in).
+    if g_marq_live == 1 {
+        if g_sel_tool != SEL_LASSO {
+            var ax = view.doc_to_screen_x(g_marq_x0).to_int()
+            var ay = view.doc_to_screen_y(g_marq_y0).to_int()
+            var bx = view.doc_to_screen_x(g_marq_x1).to_int()
+            var by = view.doc_to_screen_y(g_marq_y1).to_int()
+            var lx = ax
+            var rx = bx
+            if rx < lx { lx = bx rx = ax }
+            var ty2 = ay
+            var by2 = by
+            if by2 < ty2 { ty2 = by by2 = ay }
+            // Two outlines, light over dark, so the marquee is visible over both
+            // a white and a black document - the same trick the picker's
+            // crosshair uses.
+            gui.Win_rect_outline(g_win, lx, ty2, rx - lx, by2 - ty2, 20, 20, 20)
+            gui.Win_rect_outline(g_win, lx - 1, ty2 - 1, rx - lx + 2,
+                                 by2 - ty2 + 2, 250, 250, 255)
+            return
+        }
+        // The lasso, as the polyline the user has drawn so far. Exact, because a
+        // lasso's own path IS its outline.
+        var i = 1
+        while i < g_lasso_n {
+            gui.Win_line(g_win,
+                         view.doc_to_screen_x(g_lasso_xs[i - 1]).to_int(),
+                         view.doc_to_screen_y(g_lasso_ys[i - 1]).to_int(),
+                         view.doc_to_screen_x(g_lasso_xs[i]).to_int(),
+                         view.doc_to_screen_y(g_lasso_ys[i]).to_int(),
+                         250, 250, 255)
+            i = i + 1
+        }
+        return
+    }
+
+    if select.is_empty() { return }
+    // The committed selection: its bounding box. bbox is INCLUSIVE, so the
+    // outline runs to x1+1 in document space to enclose the last selected pixel.
+    var sx0 = view.doc_to_screen_x(select.bbox_x0().to_float()).to_int()
+    var sy0 = view.doc_to_screen_y(select.bbox_y0().to_float()).to_int()
+    var sx1 = view.doc_to_screen_x((select.bbox_x1() + 1).to_float()).to_int()
+    var sy1 = view.doc_to_screen_y((select.bbox_y1() + 1).to_float()).to_int()
+    gui.Win_rect_outline(g_win, sx0, sy0, sx1 - sx0, sy1 - sy0, 20, 20, 20)
+    gui.Win_rect_outline(g_win, sx0 - 1, sy0 - 1, sx1 - sx0 + 2, sy1 - sy0 + 2,
+                         250, 250, 255)
+}
+
 // The document. Positioned by `view` at the current zoom and pan, clipped to the
 // viewport, on a checkerboard so that transparency is visible as transparency
 // rather than as whatever colour the panel happens to be.
@@ -906,6 +1683,8 @@ fn paint_viewport(ui: Ui) {
         // The whole point of this file: one blit.
         gui.Win_blit(g_win, g_tex, dx, dy, dw, dh)
         gui.Win_rect_outline(g_win, dx - 1, dy - 1, dw + 2, dh + 2, 90, 90, 105)
+
+        paint_marquee()
 
         // Brush cursor: a ring at the pointer, its radius scaled by the zoom, so
         // "how big is the brush" is answered by looking rather than by reading a
@@ -1092,6 +1871,16 @@ fn paint_status(ui: Ui) {
     s = s + " r" + rounded(paint.radius())
     s = s + " h" + rounded(paint.hardness())
     s = s + " a" + rounded(paint.alpha())
+    // The selection's area, because every pixel tool refuses outside it: a user
+    // whose brush has stopped working needs to see WHY in the status bar rather
+    // than deduce it. Omitted entirely when there is no selection, so the line
+    // does not carry a permanent "sel 0".
+    if select.is_empty() == false {
+        s = s + "  sel " + rounded(select.area()) + "px"
+    }
+    if g_sel_tool != SEL_NONE {
+        s = s + "  [" + sel_tool_word() + " " + select.op_name(g_sel_op) + "]"
+    }
     s = s + "  @" + g_cur_dx.to_string() + "," + g_cur_dy.to_string()
     s = s + "  hist " + history.depth().to_string()
     s = s + "  " + g_msg
@@ -1169,10 +1958,16 @@ fn build_form(win: int, font: int) -> Ui {
     ui = widgets.Ui_button(ui, "a-", 544, 9, 26, 28, on_alpha_down)
     ui = widgets.Ui_button(ui, "a+", 572, 9, 26, 28, on_alpha_up)
 
-    ui = widgets.Ui_entry(ui, "/tmp/wyncanvas-out.png", 610, 9, 300, 28)
+    ui = widgets.Ui_entry(ui, "/tmp/wyncanvas-out.png", 610, 9, 240, 28)
     g_path_id = widgets.Ui_last_id(ui)
 
-    ui = widgets.Ui_label(ui, "Esc quits", 926, 15)
+    // The text tool's string, plus its size steppers. A real entry widget rather
+    // than an on-canvas caret - see the note on g_text_id for why the toolkit's
+    // key handling makes that the only shape available.
+    ui = widgets.Ui_entry(ui, "Wyn", 854, 9, 90, 28)
+    g_text_id = widgets.Ui_last_id(ui)
+    ui = widgets.Ui_button(ui, "t-", 948, 9, 24, 28, on_text_smaller)
+    ui = widgets.Ui_button(ui, "t+", 974, 9, 24, 28, on_text_bigger)
 
     // Tool palette, down the left edge.
     var ty = VIEW_Y() + 8
@@ -1181,6 +1976,13 @@ fn build_form(win: int, font: int) -> Ui {
     ui = widgets.Ui_button(ui, "Fill", 5, ty + 68, 44, 30, on_tool_fill)
     ui = widgets.Ui_button(ui, "Pick", 5, ty + 102, 44, 30, on_tool_pick)
     ui = widgets.Ui_button(ui, "Pan", 5, ty + 136, 44, 30, on_tool_pan)
+
+    // Marquee tools, below the paint tools. Separated by a gap because they are a
+    // different MODE rather than a sixth brush - see the note on g_sel_tool.
+    ui = widgets.Ui_button(ui, "MRct", 5, ty + 176, 44, 28, on_tool_mrect)
+    ui = widgets.Ui_button(ui, "MEll", 5, ty + 206, 44, 28, on_tool_mellipse)
+    ui = widgets.Ui_button(ui, "Lass", 5, ty + 236, 44, 28, on_tool_lasso)
+    ui = widgets.Ui_button(ui, "Text", 5, ty + 266, 44, 28, on_tool_text)
 
     // Layer commands, above the layer list.
     var ly = LAYERS_Y() - 48
@@ -1195,6 +1997,22 @@ fn build_form(win: int, font: int) -> Ui {
                            on_blend_prev)
     ui = widgets.Ui_button(ui, "b>", PANEL_X() + 42, ly + 24, 32, 22,
                            on_blend_next)
+
+    // Filters, in the toolbar's second row. Abbreviated labels because seven
+    // filters at full width would not fit, and each is one click with fixed
+    // parameters - see run_filter for why fixed and not slider-driven.
+    var fy = 9
+    ui = widgets.Ui_button(ui, "Blur", 1004, fy, 40, 28, on_flt_blur)
+    ui = widgets.Ui_button(ui, "Shrp", 1046, fy, 40, 28, on_flt_sharpen)
+    ui = widgets.Ui_button(ui, "Sat+", 1088, fy, 40, 28, on_flt_saturate)
+    ui = widgets.Ui_button(ui, "Inv", 1130, fy, 36, 28, on_flt_invert)
+
+    // Selection commands, under the tool palette. `All`/`Non`/`Inv` are the three
+    // a user reaches for constantly and none of them is a drag.
+    var sy = VIEW_Y() + 306
+    ui = widgets.Ui_button(ui, "All", 5, sy, 44, 24, on_sel_all)
+    ui = widgets.Ui_button(ui, "Non", 5, sy + 26, 44, 24, on_sel_none)
+    ui = widgets.Ui_button(ui, "SInv", 5, sy + 52, 44, 24, on_sel_invert)
 
     var i = 0
     while i < layer.count() {
@@ -1308,6 +2126,28 @@ fn print_px(x: int, y: int) {
 // Split into 8 intermediate moves so segment accumulation and coverage
 // saturation are both exercised rather than assumed.
 fn do_stroke(dx0: int, dy0: int, dx1: int, dy1: int) {
+    var ax = win_x_of_doc(dx0)
+    var ay = win_y_of_doc(dy0)
+    var bx = win_x_of_doc(dx1)
+    var by = win_y_of_doc(dy1)
+    canvas_press(ax, ay)
+    var i = 1
+    while i <= 8 {
+        var t = i.to_float() / 8.0
+        var mx = ax + ((bx - ax).to_float() * t).to_int()
+        var my = ay + ((by - ay).to_float() * t).to_int()
+        canvas_drag(mx, my)
+        i = i + 1
+    }
+    canvas_release(bx, by)
+}
+
+// A scripted marquee drag, in DOCUMENT coordinates, through the WINDOW path -
+// the same shape as do_stroke and for the same reason. 8 intermediate moves, so
+// the per-move restore-and-reapply in marquee_apply is exercised rather than
+// assumed: a marquee that accumulated its intermediate rectangles would come out
+// with the union of all nine and fail the area assertion.
+fn do_marquee(dx0: int, dy0: int, dx1: int, dy1: int) {
     var ax = win_x_of_doc(dx0)
     var ay = win_y_of_doc(dy0)
     var bx = win_x_of_doc(dx1)
@@ -1459,15 +2299,130 @@ fn run_action(ui: Ui, act: string) -> Ui {
         return ui
     }
 
-    // tool:name
+    // tool:name - including the three marquee tools, which are a MODE rather than
+    // a paint tool (see g_sel_tool), so selecting one clears the paint tool's
+    // claim on the canvas and vice versa.
     if act.starts_with("tool:") {
         var tn = act.substring(5, act.len())
-        if tn == "brush" { paint.set_tool(paint.TOOL_BRUSH()) }
-        if tn == "eraser" { paint.set_tool(paint.TOOL_ERASER()) }
-        if tn == "fill" { paint.set_tool(paint.TOOL_FILL()) }
-        if tn == "pick" { paint.set_tool(paint.TOOL_PICK()) }
-        if tn == "pan" { paint.set_tool(paint.TOOL_PAN()) }
-        println("  tool -> " + paint.tool_name(paint.tool()))
+        if tn == "brush" { on_tool_brush(0) }
+        if tn == "eraser" { on_tool_eraser(0) }
+        if tn == "fill" { on_tool_fill(0) }
+        if tn == "pick" { on_tool_pick(0) }
+        if tn == "pan" { on_tool_pan(0) }
+        if tn == "mrect" { on_tool_mrect(0) }
+        if tn == "mellipse" { on_tool_mellipse(0) }
+        if tn == "lasso" { on_tool_lasso(0) }
+        if tn == "text" { on_tool_text(0) }
+        println("  tool -> " + paint.tool_name(paint.tool())
+                + " sel=" + sel_tool_word())
+        return ui
+    }
+
+    // text:x:y:string - places text at DOCUMENT (x,y) through the tool's own
+    // path: it sets the tool, presses the canvas at the mapped window position
+    // (which is what sets g_text_x/g_text_y and raises REQ_TEXT), and then
+    // services the request with the given string. So this exercises the mapping
+    // and canvas_press, not just commit_text - the same reason `stroke:` goes
+    // through the window path rather than calling paint.seg.
+    //
+    // The string is the REST of the action, not a field, so it may contain
+    // spaces. It may not contain a comma (the script separator) or a colon.
+    if act.starts_with("text:") {
+        var tp = act.substring(5, act.len()).split(":")
+        if tp.len() < 3 {
+            println("  text needs x:y:string")
+            return ui
+        }
+        on_tool_text(0)
+        canvas_press(win_x_of_doc(tp[0].to_int()), win_y_of_doc(tp[1].to_int()))
+        if g_req == REQ_TEXT {
+            commit_text(tp[2])
+            g_req = REQ_NONE
+        }
+        println("  " + act + " -> " + g_msg
+                + " hist=" + history.depth().to_string()
+                + " undo=" + history.undo_label())
+        return ui
+    }
+
+    // textpx:size - the text size, so a script can name one instead of counting
+    // stepper clicks.
+    if act.starts_with("textpx:") {
+        g_text_px = act.substring(7, act.len()).to_float()
+        println("  textpx -> " + rounded(g_text_px))
+        return ui
+    }
+
+    // filter:name - through run_filter, the SAME function the toolbar buttons
+    // call, so a scripted filter proves the button's path and not a parallel one.
+    if act.starts_with("filter:") {
+        run_filter(act.substring(7, act.len()))
+        println("  " + act + " -> " + g_msg
+                + " hist=" + history.depth().to_string()
+                + " undo=" + history.undo_label())
+        return ui
+    }
+
+    // marquee:x0:y0:x1:y1 in DOCUMENT coordinates, dragged through the WINDOW
+    // path - canvas_press/drag/release with window coordinates derived from
+    // document ones through `view`, exactly as `stroke:` does. That is what makes
+    // this a test of the marquee's mapping at a zoom and a pan rather than of
+    // select.rect's arithmetic, which tests/test_select.wyn already covers.
+    if act.starts_with("marquee:") {
+        var qq = act.substring(8, act.len()).split(":")
+        if qq.len() < 4 {
+            println("  marquee needs x0:y0:x1:y1")
+            return ui
+        }
+        do_marquee(qq[0].to_int(), qq[1].to_int(),
+                   qq[2].to_int(), qq[3].to_int())
+        println("  " + act + " -> " + g_msg + " area=" + rounded(select.area())
+                + " bbox=" + select.bbox_x0().to_string() + ","
+                + select.bbox_y0().to_string() + ","
+                + select.bbox_x1().to_string() + ","
+                + select.bbox_y1().to_string())
+        return ui
+    }
+
+    // selop:replace|add|subtract|intersect - how the NEXT marquee drag combines.
+    if act.starts_with("selop:") {
+        var so = act.substring(6, act.len())
+        if so == "replace" { g_sel_op = select.OP_REPLACE() }
+        if so == "add" { g_sel_op = select.OP_ADD() }
+        if so == "subtract" { g_sel_op = select.OP_SUBTRACT() }
+        if so == "intersect" { g_sel_op = select.OP_INTERSECT() }
+        println("  selop -> " + select.op_name(g_sel_op))
+        return ui
+    }
+
+    // sel:all|none|invert|feather:N - the whole-document commands, through the
+    // same handlers the buttons call.
+    if act.starts_with("sel:") {
+        var sc = act.substring(4, act.len())
+        if sc == "all" { on_sel_all(0) }
+        if sc == "none" { on_sel_none(0) }
+        if sc == "invert" { on_sel_invert(0) }
+        if sc.starts_with("feather:") {
+            select.feather(sc.substring(8, sc.len()).to_float())
+            g_msg = "feathered"
+        }
+        println("  " + act + " -> " + g_msg + " area=" + rounded(select.area())
+                + " empty=" + select.is_empty().to_string())
+        return ui
+    }
+
+    // selat:x:y - the selection's coverage at one document pixel. This is what
+    // makes a feathered edge assertable: a boolean "is it selected" cannot
+    // distinguish 1.0 from 0.5, and 0.5 is exactly what a half-covered edge
+    // pixel must read.
+    if act.starts_with("selat:") {
+        var sa = act.substring(6, act.len()).split(":")
+        if sa.len() < 2 {
+            println("  selat needs x:y")
+            return ui
+        }
+        println("  selat(" + sa[0] + "," + sa[1] + ")="
+                + rounded3(select.cov_at(sa[0].to_int(), sa[1].to_int())))
         return ui
     }
 
@@ -1603,16 +2558,38 @@ fn run_action(ui: Ui, act: string) -> Ui {
         println("  fit -> " + view.zoom().to_string() + "%")
         return ui
     }
+    // save / open take the path from the environment, so a script can name a
+    // temp file without a text-entry drag. Both go through save_doc/open_doc -
+    // the SAME suffix-dispatch the Save and Open buttons use - so a `.wync` path
+    // here exercises the layered format and a `.png` one the flattened export,
+    // and neither is a second code path that could disagree with the button.
     if act == "save" {
-        save_png(System.env("WYNCANVAS_SAVE"))
+        save_doc(System.env("WYNCANVAS_SAVE"))
         println("  save -> " + g_msg)
         return ui
     }
     if act == "open" {
-        open_png(System.env("WYNCANVAS_OPEN"))
+        open_doc(System.env("WYNCANVAS_OPEN"))
         println("  open -> " + g_msg + " doc=" + g_doc_w.to_string() + "x"
                 + g_doc_h.to_string() + " layers=" + layer.count().to_string()
                 + " zoom=" + view.zoom().to_string() + "%")
+        return ui
+    }
+
+    // saveas:path / openas:path - the path in the action itself, so ONE run can
+    // round-trip a document (write it, mutate, read it back) instead of needing
+    // two processes and an environment variable per file.
+    if act.starts_with("saveas:") {
+        save_doc(act.substring(7, act.len()))
+        println("  " + act + " -> " + g_msg)
+        return ui
+    }
+    if act.starts_with("openas:") {
+        open_doc(act.substring(7, act.len()))
+        println("  " + act + " -> " + g_msg + " doc=" + g_doc_w.to_string() + "x"
+                + g_doc_h.to_string() + " layers=" + layer.count().to_string()
+                + " active=" + g_active.to_string()
+                + " hist=" + history.depth().to_string())
         return ui
     }
     if act == "layers" {
@@ -1674,6 +2651,13 @@ fn main() -> int {
     view.set_doc(g_doc_w, g_doc_h)
     view.zoom_100()
 
+    // The selection is a document-sized coverage mask, allocated once here and
+    // reallocated by open_wync/open_png when the dimensions change. It starts
+    // EMPTY, and "empty" deliberately means the same thing as "no selection" -
+    // see the header of src/select.wyn - so every tool below can ask
+    // `select.is_empty()` and treat true as "no clipping".
+    select.init(g_doc_w, g_doc_h)
+
     // The picker's ramps. Built once; the SV square is re-filled when the hue
     // changes (paint_picker), the hue strip never changes.
     g_sv_buf = wynimg_new(SV_SIZE(), SV_SIZE())
@@ -1721,8 +2705,9 @@ fn main() -> int {
         // - is in scope.
         if g_req != REQ_NONE {
             var path = widgets.Ui_text(ui, g_path_id)
-            if g_req == REQ_OPEN { open_png(path) }
-            if g_req == REQ_SAVE { save_png(path) }
+            if g_req == REQ_OPEN { open_doc(path) }
+            if g_req == REQ_SAVE { save_doc(path) }
+            if g_req == REQ_TEXT { commit_text(widgets.Ui_text(ui, g_text_id)) }
             g_req = REQ_NONE
             if layer.count() != g_row_count {
                 ui = rebuild_rows(ui)

@@ -4,16 +4,46 @@ A layered image editor written in [Wyn](https://wynlang.com), with a C shim for
 pixel work.
 
 **Implemented:** float32 linear imaging core, non-destructive layer model,
-27 blend modes, masks, adjustment layers, PNG I/O, undo/redo, a native SDL3
-window, and **editing**: a soft-edged brush and eraser, a bucket fill, an
-eyedropper, an HSV colour picker, working pan/zoom, and layer add / delete /
-reorder / opacity / blend-mode / visibility - every one of them a single
-undoable command.
+27 blend modes, masks, adjustment layers, PNG I/O, **layered `.wync` documents**,
+undo/redo, a native SDL3 window, and **editing**: a soft-edged brush and eraser, a
+bucket fill, an eyedropper, an HSV colour picker, working pan/zoom, layer add /
+delete / reorder / opacity / blend-mode / visibility, **coverage selections**
+(rect / ellipse / lasso marquees, all/none/invert, feather), **filters** (blur,
+sharpen, saturation, levels, curves, invert) applied to the active layer through
+the selection, and a **text tool** - every one of them a single undoable command.
 
-**Not implemented:** selections, text, vectors, PSD, filters, transform tools,
-layer groups. A layer's MASK is not captured by the delete/undo record (there is
-no eleventh entry column for it), so undoing a delete restores the pixels and
-properties but not the mask.
+**Not implemented:** vectors, PSD, transform tools, layer groups.
+
+Honest limitations of what *is* implemented:
+
+- **A stroke is gated by the selection at the press, not clipped at the boundary.**
+  Pressing on an unselected pixel does nothing (and records nothing), so a
+  selection genuinely protects the rest of the layer - but a stroke that STARTS
+  inside a selection and is dragged out is not cut off at the edge. The correct
+  fix is one line - `select.clip(cov)` between `wynimg_stroke_seg` and
+  `wynimg_stroke_apply` inside `src/paint.wyn`'s `seg` - and it is not done here
+  because that coverage buffer is `paint.wyn`'s private state. Filters and text
+  ARE fully clipped, including at a feathered edge, because they take a coverage
+  mask directly.
+- **The marquee shows a bounding box, not marching ants.** An ellipse selection
+  outlines the box it is inscribed in. Drawing the true boundary means scanning the
+  coverage buffer for edge pixels every frame from Wyn - one FFI call per pixel,
+  which is the "one `Win_rect` per pixel" mistake `src/ui.wyn`'s header rejects.
+  A live lasso drag DOES draw its exact path, because a lasso's path is its
+  outline.
+- **Selection changes are not undoable.** A selection is not part of the document;
+  putting it in the undo log would mean Undo after "blur the selection" popped the
+  selection change first and left the blur on screen.
+- **The text tool types into a toolbar field, not onto the canvas.** Pick Text,
+  type, then click to place. The toolkit's `Ui_events` drains the key queue, so an
+  on-canvas caret keeping its own buffer would see no keystrokes.
+- **Filter parameters are fixed, not slider-driven** (blur radius 4, sharpen 0.8,
+  saturation 1.4/0.6, levels 0.05/0.95/1.2, gamma curve 1.6). The toolkit has no
+  slider widget.
+- A layer's MASK is not captured by the delete/undo record (there is no eleventh
+  entry column for it), so undoing a delete restores the pixels and properties but
+  not the mask. `.wync` save/load *does* preserve masks.
+- A `.wync` file does not store the selection.
 
 ### What "the brush works" means here, and how it is checked
 
@@ -55,7 +85,7 @@ export WYN_ROOT=/path/to/wynlang/wyn   # required: your wyn compiler checkout
 ~/.wyn/bin/wyn test                                      # run all tests
 ~/.wyn/bin/wyn run src/ui.wyn                            # launch the editor
 
-# headless verification of the editor itself (57 pixel assertions)
+# headless verification of the editor itself (132 pixel assertions)
 ~/.wyn/bin/wyn build src/ui.wyn -o /tmp/wcui && ./verify_ui.sh /tmp/wcui
 ```
 
@@ -78,6 +108,33 @@ transform the blit uses), `px:x:y` (print a composited pixel), `screen:x:y`
 (print the WINDOW framebuffer at where that document pixel maps), `fill:`,
 `eyedrop:`, `pickat:`, `huedrag:`, `zoom:`, `pan:`, `map:`, `tool:`, `hsv:`,
 `brush:`, `layers`, `undo`, `redo`, `save`, `open`.
+
+Selections, filters, text and layered documents add:
+
+| Action | Effect |
+|---|---|
+| `marquee:x0:y0:x1:y1` | drag the current marquee tool in DOCUMENT coordinates |
+| `selop:replace\|add\|subtract\|intersect` | how the next marquee drag combines |
+| `sel:all\|none\|invert\|feather:N` | the whole-document selection commands |
+| `selat:x:y` | print the selection's coverage at one pixel, to 3 decimals |
+| `filter:blur\|sharpen\|saturate\|desaturate\|levels\|invert\|curve` | apply to the active layer through the selection |
+| `text:x:y:string` | place text at a document position |
+| `textpx:size` | the text size in pixels |
+| `saveas:path` / `openas:path` | save/open with the path in the action |
+| `tool:mrect\|mellipse\|lasso\|text` | the marquee and text tools |
+
+The **extension picks the format**: a `.wync` path saves and loads the whole layer
+stack (blend modes, opacities, visibility, masks, adjustment amounts), any other
+path goes through the flattening PNG codec. `.wync` errors are reported by their
+own code - "this file is newer than I understand" is a different message from
+"these bytes are damaged" - and a failed open leaves the document you had open
+untouched.
+
+```bash
+SDL_VIDEODRIVER=dummy WYNCANVAS_FRAMES=2 \
+  WYNCANVAS_SCRIPT='active:0,tool:mrect,marquee:40:40:120:120,filter:blur,undo,saveas:/tmp/d.wync' \
+  /tmp/wcui
+```
 
 ```bash
 SDL_VIDEODRIVER=dummy WYNCANVAS_FRAMES=2 \
@@ -176,8 +233,12 @@ Symptom / minimal-repro / root-cause records live with the upstream compiler iss
 | `src/server.wyn` | HTTP endpoints |
 | `src/app.wyn` | Window bootstrap + accept loop |
 | `src/cli.wyn` | Headless composite |
+| `src/select.wyn` | Selections as a coverage mask |
+| `src/filter.wyn` | Blur / sharpen / levels / curves / saturation |
+| `src/text.wyn` | Text as coverage, through the brush kernel |
+| `src/project.wyn` | `.wync` layered save / load |
 | `src/ui.wyn` | Native SDL3 editor window: layout, paint, dispatch |
-| `verify_ui.sh` | 57 headless pixel assertions against the built editor |
+| `verify_ui.sh` | 132 headless pixel assertions against the built editor |
 | `tests/golden/` | Reference images (see its README) |
 
 ## Compiler bugs found while building the editor
@@ -205,7 +266,35 @@ every scripted brush stroke at window (0,0). Worked around by renaming the
 colliding locals: `src/paint.wyn` uses `chi`/`clo` rather than `mx`/`mn`, and
 `src/ui.wyn`'s `win_x_of_doc` takes `docx` rather than `dx`.
 
-**2. `from` is a reserved word and cannot be a parameter name.**
+**2. Two modules with a same-named `pub fn` of DIFFERENT ARITY corrupt the
+first one's own internal call.**
+
+```wyn
+// a.wyn
+pub fn handle(s: string) -> int { return s.len() }
+pub fn use_it(s: string) -> int { return handle(s) }   // unqualified, internal
+
+// b.wyn
+pub fn handle() -> int { return 7 }
+
+// m.wyn
+import a
+import b        // swap these two lines and it compiles
+fn main() -> int { print("${a.use_it("xy")} ${b.handle()}") return 0 }
+```
+
+`a.wyn`'s own internal `handle(s)` is emitted as `handle_string(req)` - an
+overload-mangled name nothing defines - and the build fails with
+`call to undeclared function 'handle_string'`, pointing at a line in a file the
+programmer never edited. Two `handle`s of the SAME arity are fine, so it is the
+arity-disambiguation path leaking a mangled callee into the wrong module.
+
+Real here: `src/select.wyn` has `pub fn handle()` (the selection's coverage
+handle) and `src/server.wyn` has `pub fn handle(req: string)`. **Import order is
+the workaround** - `src/ui.wyn` imports `select` before `server`, with the reason
+recorded at the import.
+
+**3. `from` is a reserved word and cannot be a parameter name.**
 
 ```wyn
 fn g(from: int) -> int { return from + 1 }   // "Expected parameter name"
