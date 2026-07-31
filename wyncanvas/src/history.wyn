@@ -61,10 +61,11 @@ pub fn depth() -> int { return h_len }
 pub fn can_undo() -> bool { return h_pos > 0 }
 pub fn can_redo() -> bool { return h_pos < h_len }
 
-// EVERY record goes through push_ex, including the three scalar ones. That is
-// not indirection for its own sake: the entry columns were later extended with
-// h_a/h_b/h_s/h_k for the pixel and structural commands, and a second writer that
-// appended to only the first six left the arrays at DIFFERENT LENGTHS.
+// EVERY record goes through push_ex -> push_full, including the three scalar
+// ones. That is not indirection for its own sake: the entry columns were later
+// extended with h_a/h_b/h_s/h_k for the pixel and structural commands, and a
+// second writer that appended to only the first six left the arrays at DIFFERENT
+// LENGTHS.
 //
 // The failure was measured, not theorised: a script that clicked `b>` twice,
 // `o-` twice, `dn`, `-L` and then Undo panicked with
@@ -72,8 +73,9 @@ pub fn can_redo() -> bool { return h_pos < h_len }
 // advanced h_len to 6 while h_a still held 2, so the first structural undo read
 // off the end. A scalar-only session never touches h_a and never notices.
 //
-// One writer makes the ten columns the same length by construction, which is the
-// only version of this invariant that cannot rot.
+// One writer makes the eleven columns the same length by construction, which is
+// the only version of this invariant that cannot rot - and it is why adding h_m
+// for the delete record's mask was a two-line change rather than an audit.
 fn push(op: int, lid: int, of: float, nf: float, oi: int, ni: int) -> int {
     return push_ex(op, lid, of, nf, oi, ni, 0, 0, "", 0)
 }
@@ -174,14 +176,32 @@ fn OP_NAME() -> int { return 7 }
 
 // Extra columns. Parallel arrays again, one per field: `h_a`/`h_b` are buffer
 // handles for OP_PIXELS and OP_DEL_LAYER/OP_ADD_LAYER, `h_s` is the layer name,
-// `h_k` the layer kind.
+// `h_k` the layer kind, `h_m` the layer's MASK handle.
+//
+// h_m IS THE ELEVENTH COLUMN, and it is a column rather than a reuse of h_b for
+// the reason the old comment on record_del_layer stated: h_b is OP_PIXELS's
+// "after" snapshot, and `discard_above` FREES that. A mask parked in h_b would be
+// freed out from under the live layer the moment the redo branch was truncated -
+// a silently blank mask, which is exactly the class of bug the handle table's
+// generation tagging turns from a crash into an invisible one.
 var h_a = [0]
 var h_b = [0]
 var h_s = [""]
 var h_k = [0]
+var h_m = [0]
 
 fn push_ex(op: int, lid: int, of: float, nf: float, oi: int, ni: int,
            a: int, b: int, s: string, k: int) -> int {
+    return push_full(op, lid, of, nf, oi, ni, a, b, s, k, 0)
+}
+
+// THE ONE WRITER. push_ex delegates here for the same reason `push` delegates to
+// push_ex: the columns were extended once before and a second writer left them at
+// DIFFERENT LENGTHS, which crashed the first structural undo of any session that
+// had only made scalar edits ("array index out of bounds: index 5, length 2").
+// Eleven columns stay the same length because exactly one function appends.
+fn push_full(op: int, lid: int, of: float, nf: float, oi: int, ni: int,
+             a: int, b: int, s: string, k: int, m: int) -> int {
     // Free any snapshot the discarded redo branch owned. Without this every
     // "paint, undo, paint again" leaks a full-canvas float buffer.
     discard_above(h_pos)
@@ -206,11 +226,13 @@ fn push_ex(op: int, lid: int, of: float, nf: float, oi: int, ni: int,
         h_b[h_len] = b
         h_s[h_len] = s
         h_k[h_len] = k
+        h_m[h_len] = m
     } else {
         h_a.push(a)
         h_b.push(b)
         h_s.push(s)
         h_k.push(k)
+        h_m.push(m)
     }
     h_len = h_len + 1
     h_pos = h_len
@@ -222,6 +244,10 @@ fn push_ex(op: int, lid: int, of: float, nf: float, oi: int, ni: int,
 // structural entry's handle is either live in the layer store (add) or is the
 // only surviving reference to a deleted layer's pixels (delete), and freeing
 // either would be wrong - so this frees snapshots and nothing else.
+//
+// h_m (the delete record's mask) is NEVER freed here for exactly that reason,
+// and it is why the mask needed its own column rather than a seat in h_b: h_b is
+// freed two lines below.
 fn discard_above(start: int) -> int {
     var i = start
     var n = 0
@@ -283,16 +309,24 @@ pub fn record_add_layer(pos: int, name: string, buf: int, kind: int) -> int {
 // h_new_f is the opacity, h_new_i the blend mode, h_old_i the visibility. Undo of
 // a delete is an insert followed by restoring those three.
 //
-// `mask` is deliberately NOT captured. A mask is another buffer handle and there
-// is no column left for it; recording it in h_b - which OP_PIXELS uses for its
-// "after" snapshot - would make discard_above free a live mask. So a delete
-// currently loses the mask, and that is a stated limitation rather than a
-// forgotten case; fixing it needs an eleventh column, not a cleverer encoding.
+// THE MASK IS CAPTURED TOO, in h_m - the eleventh column.
+//
+// It used to be dropped, and the note here said so honestly: there was no column
+// left, and parking the handle in h_b (OP_PIXELS's "after" snapshot) would have
+// let `discard_above` free a live mask. The fix is the column, not a cleverer
+// encoding, and it is read out of the LAYER rather than passed in, so a caller
+// cannot delete a masked layer and forget to hand the mask over - the one way
+// this could silently regress.
+//
+// Ownership matches the buffer exactly: layer.remove drops the row without
+// freeing either handle, so between the delete and its undo the ONLY reference to
+// both is this record. discard_above therefore frees neither (see its note).
 pub fn record_del_layer(pos: int, name: string, buf: int, kind: int) -> int {
     var vis = 0
     if layer.visible(pos) { vis = 1 }
-    return push_ex(OP_DEL_LAYER(), pos, 0.0, layer.opacity(pos),
-                   vis, layer.blend_mode(pos), buf, 0, name, kind)
+    return push_full(OP_DEL_LAYER(), pos, 0.0, layer.opacity(pos),
+                     vis, layer.blend_mode(pos), buf, 0, name, kind,
+                     layer.mask(pos))
 }
 
 pub fn record_swap(a: int, b: int) -> int {
@@ -332,16 +366,25 @@ fn apply_ex(i: int, use_new: bool) -> int {
     }
     if op == OP_DEL_LAYER() {
         if use_new {
+            // REDO of a delete must re-capture the mask, not assume the record
+            // still holds it. Between the undo and the redo the layer is live and
+            // the user can attach or replace its mask; a redo that put the old
+            // handle back would resurrect a mask the layer no longer has, and the
+            // one it does have would leak.
+            if i < h_m.len() { h_m[i] = layer.mask(lid) }
             layer.remove(lid)
         } else {
             // Insert, then restore the properties the delete captured. Without
             // the second half, undoing the delete of an `overlay` layer at 60%
             // brought it back as `normal` at 100% - measured, and near-invisible
-            // because the pixels were right.
+            // because the pixels were right. The MASK is the same class of loss
+            // and was the last one outstanding: layer.insert always writes mask 0,
+            // so the restore has to be explicit.
             layer.insert(lid, h_s[i], h_a[i], h_k[i])
             layer.set_opacity(lid, h_new_f[i])
             layer.set_blend_mode(lid, h_new_i[i])
             layer.set_visible(lid, h_old_i[i] == 1)
+            if i < h_m.len() { layer.set_mask(lid, h_m[i]) }
         }
         return 1
     }

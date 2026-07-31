@@ -5,6 +5,23 @@ import history
 // Call convention (v1.20.0 codegen constraint, see the wyn compiler's issue tracker):
 //   extern fns   -> called BARE          (wynimg_new)
 //   pub fn Wyn   -> called QUALIFIED     (layer.set_opacity, history.undo)
+//
+// WHY THE OPACITY ASSERTIONS BELOW ARE `assert_eq` AND NOT `approx`.
+//
+// An undo record stores the OLD VALUE and hands it straight back to
+// layer.set_opacity, which only clamps. No arithmetic happens anywhere on that
+// path, so a restored opacity is BIT-IDENTICAL to the value recorded - which makes
+// exact equality the honest assertion and a tolerance a place for a lossy restore
+// to hide.
+//
+// They were written as `pixel.approx(..., 0.00001)` for a real reason: `assert_eq`
+// used to truncate both sides to int, so `assert_eq(opacity, 1.0)` accepted
+// anything in [1,2) and `assert_eq(opacity, 0.4)` accepted anything in [0,1) -
+// i.e. every wrong opacity there is. `approx` with a tight tolerance was the only
+// float assertion available. It now compares floats, so the tolerance is gone
+// where the value is provably exact; the ONE assertion that keeps a tolerance is
+// the ramp in `history grows past its initial capacity`, whose expectation is
+// itself computed (1.0 - i/100.0) and therefore not exact by construction.
 
 test "a new history has nothing to undo" {
     history.history_new()
@@ -24,7 +41,7 @@ test "undo restores a previous opacity" {
     assert_true(history.can_undo())
 
     history.undo()
-    assert_true(pixel.approx(layer.opacity(id), 1.0, 0.00001))
+    assert_eq(layer.opacity(id), 1.0)
     wynimg_free(b)
 }
 
@@ -40,7 +57,7 @@ test "redo reapplies an undone change" {
     assert_true(history.can_redo())
 
     history.redo()
-    assert_true(pixel.approx(layer.opacity(id), 0.4, 0.00001))
+    assert_eq(layer.opacity(id), 0.4)
     wynimg_free(b)
 }
 
@@ -59,15 +76,15 @@ test "undo and redo work across several steps" {
     assert_eq(history.depth(), 3)
 
     history.undo()
-    assert_true(pixel.approx(layer.opacity(id), 0.6, 0.00001))
+    assert_eq(layer.opacity(id), 0.6)
     history.undo()
-    assert_true(pixel.approx(layer.opacity(id), 0.8, 0.00001))
+    assert_eq(layer.opacity(id), 0.8)
     history.undo()
-    assert_true(pixel.approx(layer.opacity(id), 1.0, 0.00001))
+    assert_eq(layer.opacity(id), 1.0)
     assert_false(history.can_undo())
 
     history.redo()
-    assert_true(pixel.approx(layer.opacity(id), 0.8, 0.00001))
+    assert_eq(layer.opacity(id), 0.8)
     wynimg_free(b)
 }
 
@@ -144,7 +161,7 @@ test "history records parameters, not pixels" {
     history.undo()
 
     // Opacity reverted; the pixel edit survived untouched.
-    assert_true(pixel.approx(layer.opacity(id), 1.0, 0.00001))
+    assert_eq(layer.opacity(id), 1.0)
     assert_true(pixel.approx(wynimg_get(b, 0), 0.9, 0.00001))
     wynimg_free(b)
 }
@@ -190,9 +207,9 @@ test "redo past the newest entry is a safe no-op" {
     assert_false(history.can_redo())
     assert_eq(history.redo(), 0)
     // The extra redo must not have moved the cursor or reapplied anything.
-    assert_true(pixel.approx(layer.opacity(id), 0.4, 0.00001))
+    assert_eq(layer.opacity(id), 0.4)
     history.undo()
-    assert_true(pixel.approx(layer.opacity(id), 1.0, 0.00001))
+    assert_eq(layer.opacity(id), 1.0)
     wynimg_free(b)
 }
 
@@ -210,7 +227,7 @@ test "undo past the oldest entry is a safe no-op" {
     // Still fully redoable -- the failed undos did not corrupt the cursor.
     assert_true(history.can_redo())
     history.redo()
-    assert_true(pixel.approx(layer.opacity(id), 0.4, 0.00001))
+    assert_eq(layer.opacity(id), 0.4)
     wynimg_free(b)
 }
 
@@ -248,9 +265,9 @@ test "repeated undo/redo cycling is stable" {
     var i = 0
     while i < 20 {
         history.undo()
-        assert_true(pixel.approx(layer.opacity(id), 1.0, 0.00001))
+        assert_eq(layer.opacity(id), 1.0)
         history.redo()
-        assert_true(pixel.approx(layer.opacity(id), 0.25, 0.00001))
+        assert_eq(layer.opacity(id), 0.25)
         i = i + 1
     }
     assert_eq(history.depth(), 1)
@@ -289,7 +306,7 @@ test "the redo branch is truncated, not merely hidden" {
     // opacity values that previously occupied it.
     history.undo()
     assert_eq(layer.blend_mode(id), 0)
-    assert_true(pixel.approx(layer.opacity(id), 0.8, 0.00001))
+    assert_eq(layer.opacity(id), 0.8)
     wynimg_free(b)
 }
 
@@ -308,8 +325,8 @@ test "entries target their own layer independently" {
 
     // Undo the newest entry only: layer c reverts, layer a does not.
     history.undo()
-    assert_true(pixel.approx(layer.opacity(c), 1.0, 0.00001))
-    assert_true(pixel.approx(layer.opacity(a), 0.5, 0.00001))
+    assert_eq(layer.opacity(c), 1.0)
+    assert_eq(layer.opacity(a), 0.5)
     wynimg_free(b1)
     wynimg_free(b2)
 }
@@ -371,7 +388,206 @@ test "history grows past its initial capacity" {
         j = j + 1
     }
     assert_false(history.can_undo())
-    assert_true(pixel.approx(layer.opacity(id), 1.0, 0.00001))
+    assert_eq(layer.opacity(id), 1.0)
+    wynimg_free(b)
+}
+
+// ---------------------------------------------------------------------------
+// A DELETE RECORD CAPTURES THE LAYER'S MASK - the eleventh column.
+//
+// This was a stated limitation: undoing a delete restored the pixels and the
+// properties but silently dropped the mask, because there was no column for it
+// and the one spare handle column (h_b) is the one `discard_above` FREES. The
+// shape of the loss is the same as the properties bug before it - the layer comes
+// back, the image looks nearly right, and what is gone is invisible until
+// someone looks for it.
+// ---------------------------------------------------------------------------
+
+// A mask with a per-pixel RAMP rather than a flat value, so a restore that
+// handed back some OTHER coverage buffer of the right size cannot pass. Coverage
+// lives in the R channel, matching wynimg_composite and the brush.
+fn ramp_mask(w: int, h: int) -> int {
+    var m = wynimg_new(w, h)
+    var i = 0
+    while i < w * h {
+        wynimg_set(m, i * 4, i.to_float() / 100.0)
+        i = i + 1
+    }
+    return m
+}
+
+test "undoing a delete restores the layer's MASK, not just its pixels" {
+    // MUTATION GUARD: drop the h_m column (or the set_mask in apply_ex's
+    // OP_DEL_LAYER undo) and the handle comes back 0 - layer.insert always writes
+    // mask 0 - so both the handle and every coverage assertion below go red.
+    layer.store_new()
+    history.history_new()
+    var b0 = wynimg_new(4, 4)
+    layer.add("bottom", b0, layer.KIND_RASTER())
+    var mid = wynimg_new(4, 4)
+    layer.add("mid", mid, layer.KIND_RASTER())
+    var msk = ramp_mask(4, 4)
+    layer.set_mask(1, msk)
+    assert_eq(layer.mask(1), msk)
+
+    history.record_del_layer(1, layer.name(1), layer.buffer(1), layer.kind(1))
+    layer.remove(1)
+    assert_eq(layer.count(), 1)
+
+    history.undo_any()
+    assert_eq(layer.count(), 2)
+    assert_eq(layer.buffer(1), mid)
+    // The SAME mask handle, and it is still alive - layer.remove must not have
+    // freed it, and neither must anything between the delete and the undo.
+    assert_eq(layer.mask(1), msk)
+    assert_eq(wynimg_alive(msk), 1)
+    // ...and its COVERAGE is the values it had. Asserting the handle alone would
+    // pass for a freed-and-reissued slot or for an all-zeros buffer.
+    //
+    // 0.0 is exact (zero is representable in float32); the others carry a 1e-6
+    // tolerance for a REAL reason and not as a hedge - the buffer stores float32,
+    // so 7/100 comes back as 0.07000000029802322 and an exact assert_eq against
+    // the double 0.07 would fail on correct data. Stated so the difference between
+    // "exact because the path is lossless" and "toleranced because float32 is not
+    // float64" stays visible.
+    assert_eq(wynimg_get(msk, 0), 0.0)
+    assert_true(pixel.approx(wynimg_get(msk, 1 * 4), 0.01, 0.000001))
+    assert_true(pixel.approx(wynimg_get(msk, 7 * 4), 0.07, 0.000001))
+    assert_true(pixel.approx(wynimg_get(msk, 15 * 4), 0.15, 0.000001))
+    wynimg_free(msk)
+    wynimg_free(mid)
+    wynimg_free(b0)
+}
+
+test "an unmasked layer comes back unmasked, not with a stale handle" {
+    // The other half of the column: a record for a layer with no mask must store
+    // 0, so undo restores 0. A column left holding a previous record's mask would
+    // graft one layer's mask onto another - and it would look like a rendering bug
+    // in the compositor, three files away from the cause.
+    layer.store_new()
+    history.history_new()
+    layer.add("bottom", wynimg_new(4, 4), layer.KIND_RASTER())
+
+    // First delete a MASKED layer, so the column is populated...
+    var m1 = ramp_mask(4, 4)
+    layer.add("masked", wynimg_new(4, 4), layer.KIND_RASTER())
+    layer.set_mask(1, m1)
+    history.record_del_layer(1, layer.name(1), layer.buffer(1), layer.kind(1))
+    layer.remove(1)
+    history.undo_any()
+    assert_eq(layer.mask(1), m1)
+
+    // ...then delete an UNMASKED one and undo that.
+    layer.add("plain", wynimg_new(4, 4), layer.KIND_RASTER())
+    assert_eq(layer.mask(2), 0)
+    history.record_del_layer(2, layer.name(2), layer.buffer(2), layer.kind(2))
+    layer.remove(2)
+    history.undo_any()
+    assert_eq(layer.count(), 3)
+    assert_eq(layer.name(2), "plain")
+    assert_eq(layer.mask(2), 0)
+    // And the masked layer below still has ITS mask.
+    assert_eq(layer.mask(1), m1)
+    wynimg_free(m1)
+}
+
+test "redo of a delete re-captures the mask the layer has NOW" {
+    // Between the undo and the redo the layer is live, so the user can change its
+    // mask. A redo that re-used the recorded handle would resurrect a mask the
+    // layer no longer has on the NEXT undo, and leak the one it does have.
+    layer.store_new()
+    history.history_new()
+    layer.add("bottom", wynimg_new(4, 4), layer.KIND_RASTER())
+    var m_old = ramp_mask(4, 4)
+    layer.add("mid", wynimg_new(4, 4), layer.KIND_RASTER())
+    layer.set_mask(1, m_old)
+
+    history.record_del_layer(1, layer.name(1), layer.buffer(1), layer.kind(1))
+    layer.remove(1)
+    history.undo_any()
+    assert_eq(layer.mask(1), m_old)
+
+    // Swap the mask while the layer is back, then redo the delete and undo again.
+    var m_new = wynimg_new(4, 4)
+    wynimg_fill(m_new, 0.25, 0.0, 0.0, 1.0)
+    layer.set_mask(1, m_new)
+    history.redo_any()
+    assert_eq(layer.count(), 1)
+    history.undo_any()
+    assert_eq(layer.mask(1), m_new)
+    // 0.25 is a power of two, so it is exact in float32 as well as float64 - no
+    // tolerance is warranted here, unlike the 7/100 ramp above.
+    assert_eq(wynimg_get(m_new, 0), 0.25)
+    wynimg_free(m_old)
+    wynimg_free(m_new)
+}
+
+test "truncating the redo branch does not free a delete record's mask" {
+    // `discard_above` frees OP_PIXELS's two snapshots, which it owns outright. It
+    // must NOT touch h_m: a delete record's mask is either live in the layer store
+    // or is the only reference to a deleted layer's mask, and freeing it would
+    // make a later undo restore a stale handle - which the generation-tagged
+    // handle table turns into a silently blank mask rather than a crash.
+    layer.store_new()
+    history.history_new()
+    layer.add("bottom", wynimg_new(4, 4), layer.KIND_RASTER())
+    var msk = ramp_mask(4, 4)
+    layer.add("mid", wynimg_new(4, 4), layer.KIND_RASTER())
+    layer.set_mask(1, msk)
+    history.record_del_layer(1, layer.name(1), layer.buffer(1), layer.kind(1))
+    layer.remove(1)
+
+    // Undo, then record something else: the delete record itself is discarded.
+    history.undo_any()
+    assert_eq(layer.mask(1), msk)
+    history.record_opacity(1, 1.0, 0.5)
+    assert_false(history.can_redo())
+    // The mask survived the truncation and is still the layer's.
+    assert_eq(wynimg_alive(msk), 1)
+    assert_eq(layer.mask(1), msk)
+    assert_true(pixel.approx(wynimg_get(msk, 7 * 4), 0.07, 0.000001))
+    wynimg_free(msk)
+}
+
+test "the eleventh column stays in step with the other ten" {
+    // THE INVARIANT h_m WAS ADDED UNDER: one writer, so every column is the same
+    // length by construction. The measured failure this guards was a second writer
+    // that appended to only the first six columns - a scalar-only session advanced
+    // h_len past h_a's length and the first structural undo panicked with
+    // "array index out of bounds". Six scalar records then one structural undo is
+    // exactly that shape, now with h_m as the newest column to fall behind.
+    layer.store_new()
+    history.history_new()
+    var b = wynimg_new(4, 4)
+    var id = layer.add("l", b, layer.KIND_RASTER())
+    var msk = ramp_mask(4, 4)
+    layer.set_mask(id, msk)
+
+    history.record_opacity(id, 1.0, 0.9)
+    history.record_opacity(id, 0.9, 0.8)
+    history.record_blend(id, 0, 3)
+    history.record_blend(id, 3, 5)
+    history.record_visible(id, true, false)
+    history.record_visible(id, false, true)
+    assert_eq(history.depth(), 6)
+
+    // Now a structural record and its undo, which reads h_a/h_s/h_k/h_m at index 6.
+    history.record_del_layer(id, layer.name(id), layer.buffer(id), layer.kind(id))
+    layer.remove(id)
+    history.undo_any()
+    assert_eq(layer.count(), 1)
+    assert_eq(layer.mask(0), msk)
+    // ...and the six scalar entries still undo correctly underneath it.
+    var i = 0
+    while i < 6 {
+        history.undo_any()
+        i = i + 1
+    }
+    assert_false(history.can_undo())
+    assert_eq(layer.opacity(0), 1.0)
+    assert_eq(layer.blend_mode(0), 0)
+    assert_true(layer.visible(0))
+    wynimg_free(msk)
     wynimg_free(b)
 }
 

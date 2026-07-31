@@ -40,6 +40,19 @@ import pixel
 import layer
 import history
 
+// THE SELECTION CLIPS EVERY STROKE, and importing it here is what makes that
+// true rather than approximately true. Until this import existed the selection
+// was only a GATE at the press: a stroke that started inside a marquee and was
+// dragged out kept painting past the boundary, because the coverage buffer it
+// would have to be multiplied into is this module's private `s_cov` and nothing
+// outside could reach it. See `clipped_cov` below - the whole fix is one
+// multiply in one place.
+//
+// `import select` needs a compiler new enough to treat `select` as a
+// CONTEXTUAL keyword (the channel-multiplexing statement `select { ... }`);
+// on an older one this line fails with "Expected module name".
+import select
+
 // ---- the dab engine (csrc/wynimg_paint.c) ----------------------------------
 //
 // Declared HERE rather than in src/pixel.wyn, following src/text.wyn: these are
@@ -284,6 +297,7 @@ var s_active = 0
 var s_layer = -1
 var s_base = 0        // pixels as they were when the stroke began
 var s_cov = 0         // coverage accumulator (R channel)
+var s_clip = 0        // selection-clipped COPY of s_cov; see clip_cov
 var s_lx = 0.0        // last position, so a drag paints capsules not dots
 var s_ly = 0.0
 var s_segs = 0
@@ -332,7 +346,21 @@ pub fn begin_p(lid: int, x: float, y: float, press: float) -> int {
     push_brush()
     wynimg::dab_begin(s_cov, x, y, press)
     s_segs = 1
-    return apply_cov()
+    // A FAILED FIRST APPLY MUST NOT LEAVE A STROKE ACTIVE. begin() documents
+    // "returns 1 if a stroke started"; without the rollback it could return 0 with
+    // s_active still 1, and src/ui.wyn (which treats 0 as "cannot paint that
+    // layer" and does not enter DRAG_STROKE) would leave the stroke live forever -
+    // the next begin() would cancel it and the base buffers would churn silently.
+    //
+    // Reachable, not theoretical: a selection whose dimensions do not match the
+    // layer makes select.clip refuse, so clipped_cov returns 0 and apply_cov with
+    // it. Refusing outright is right there - painting unclipped because the mask
+    // was the wrong size is the failure mode that loses a user's work.
+    if apply_cov() == 0 {
+        cancel()
+        return 0
+    }
+    return 1
 }
 
 pub fn seg(x: float, y: float) -> int {
@@ -355,15 +383,58 @@ pub fn seg_p(x: float, y: float, press: float) -> int {
     return apply_cov()
 }
 
+// THE SELECTION CLIP, and the two things it must not do.
+//
+// A selection is a coverage mask (src/select.wyn) and a stroke is a coverage
+// buffer, so clipping is one multiply: `select.clip(cov)`. It happens HERE, in
+// the buffer handed to stroke_apply, because apply_cov is the single choke point
+// every phase of a stroke goes through - begin, every seg, and by extension the
+// commit, which snapshots what the last apply left. Clipping at three call sites
+// instead is three chances for the fourth one to be forgotten.
+//
+// 1. IT MUST NOT CLIP `s_cov` IN PLACE. The dab engine max()es new dabs into
+//    s_cov and every apply re-reads the whole buffer, so an in-place multiply
+//    would be applied again on the next apply, and again on the one after:
+//    coverage inside a FEATHERED edge would decay geometrically (0.5, 0.25,
+//    0.125 ...) and a slow drag would fade its own selection edge away. So the
+//    clip runs on a COPY, and s_cov stays the unclipped truth. s_base is not
+//    touched at all, which is what keeps the pre-stroke pixels intact outside
+//    the selection.
+//
+// 2. AN EMPTY SELECTION MEANS "NO SELECTION, PAINT EVERYWHERE", NOT "an
+//    all-zeros mask". Multiplying by an empty mask makes the brush a silent
+//    no-op - the exact conversion bug that bit the filter integration.
+//    `select.is_empty()` is true both when there is no selection buffer at all
+//    and when nothing is selected, which is deliberate (see select.wyn's
+//    `init`), and both mean no clipping.
+//
+// Failure is a REFUSAL, never an unclipped paint: if the scratch buffer cannot
+// be allocated, or the clip is rejected because the selection is not the same
+// size as this layer, this returns 0 and apply_cov paints nothing. A brush that
+// silently ignored the selection because an allocation failed would be worse
+// than one that stopped.
+fn clipped_cov() -> int {
+    if select.is_empty() { return s_cov }
+    if s_clip == 0 {
+        s_clip = wynimg::new(wynimg::width(s_cov), wynimg::height(s_cov))
+        if s_clip == 0 { return 0 }
+    }
+    if wynimg::copy_into(s_clip, s_cov) == 0 { return 0 }
+    if select.clip(s_clip) == false { return 0 }
+    return s_clip
+}
+
 // Rebuilds the layer as base + colour*coverage. Shared by begin and seg so the
 // live preview during a drag is produced by the identical code as the commit -
 // there is no separate preview renderer that can disagree.
 fn apply_cov() -> int {
     var buf = layer.buffer(s_layer)
     if buf == 0 { return 0 }
+    var cov = clipped_cov()
+    if cov == 0 { return 0 }
     var erase = 0
     if p_tool == TOOL_ERASER() { erase = 1 }
-    return wynimg::stroke_apply(buf, s_base, s_cov,
+    return wynimg::stroke_apply(buf, s_base, cov,
                                 color_linear(0), color_linear(1),
                                 color_linear(2), p_alpha, erase)
 }
@@ -387,7 +458,9 @@ pub fn commit() -> int {
     var buf = layer.buffer(s_layer)
     var after = wynimg::clone(buf)
     wynimg::free(s_cov)
+    wynimg::free(s_clip)
     s_cov = 0
+    s_clip = 0
     s_active = 0
     if after == 0 {
         // Could not snapshot: drop the record rather than store a half one,
@@ -411,8 +484,10 @@ pub fn cancel() -> int {
     }
     wynimg::free(s_base)
     wynimg::free(s_cov)
+    wynimg::free(s_clip)
     s_base = 0
     s_cov = 0
+    s_clip = 0
     s_active = 0
     return 1
 }
@@ -444,6 +519,18 @@ pub fn fill_at(lid: int, x: int, y: int) -> int {
         wynimg::free(cov)
         return n
     }
+
+    // The fill is clipped by the selection for the same reason a stroke is, and
+    // IN PLACE is correct here where it is not for a stroke: this coverage buffer
+    // is built once, consumed once and freed, so there is no second apply to
+    // multiply it a second time. The empty-selection guard is the same - an empty
+    // selection means "no selection", not "a mask of zeros".
+    //
+    // `n` stays the FLOODED region's size, not the painted one. It is what the
+    // status bar reports and what a caller uses to say "nothing to fill"; the
+    // number of pixels the selection then let through is a different question and
+    // there is no honest single number for it once the edge is feathered.
+    if select.is_empty() == false { select.clip(cov) }
 
     var erase = 0
     if p_tool == TOOL_ERASER() { erase = 1 }

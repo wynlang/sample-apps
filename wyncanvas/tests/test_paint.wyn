@@ -15,13 +15,55 @@
 import pixel
 import layer
 import history
+import select
 import paint
+
+// assert_eq COMPARES FLOATS, and this file's assertions depend on it.
+//
+// It used to route every numeric comparison through an INT compare, truncating
+// both sides - so any two values inside one unit interval were equal and
+// `assert_eq(coverage, 0.0)` passed for coverage 0.9999. Thirty-five of the
+// assertions in this file and one in tests/test_history.wyn were vacuous in
+// exactly that way: every `assert_eq(wynimg_pick(...), 0.0)`, every
+// `assert_eq(wynimg_max_diff(a, b), 0.0)`, the three stroke-carry values, the
+// frozen radius and the two wrapped angles. Each was re-checked against the
+// compiler that compares floats and each is now genuinely asserted (verified by
+// perturbing all 51 expectations by +0.4 and confirming every one goes red - none
+// were hiding a defect, because the pixels had always been right).
+//
+// The ones that were ALREADY real are worth naming too, because it is not
+// obvious: `assert_eq(wynimg_pick(...), 1.0)` on a channel clamped to [0,1] could
+// only be satisfied by exactly 1.0 even under truncation, since the truncating
+// compare accepted [1,2) and nothing in that range but 1.0 is reachable.
+//
+// This is the guard. If the float arm ever regresses, this test is the one that
+// says so instead of the whole file silently going vacuous again.
+test "assert_eq compares FLOATS, not their truncations" {
+    // Two values in the same unit interval must NOT be equal. `approx` with a
+    // tolerance smaller than the difference is the phrasing that cannot itself be
+    // fooled - if assert_eq truncated, the line below would be the only thing left
+    // asserting anything in half this file.
+    assert_false(pixel.approx(0.0, 0.9999, 0.5))
+    // ...and the compiler's own arm: a mismatch of 0.4 inside one interval must be
+    // visible. Stated as an inequality on the SAME values assert_eq is handed
+    // everywhere below.
+    var a = pixel.srgb_to_linear(0.5)      // 0.2140, not 0
+    assert_true(a > 0.2)
+    assert_true(a < 0.22)
+    assert_false(pixel.approx(a, 0.0, 0.2))
+}
 
 // A fresh single-layer document of transparent pixels, so each test starts from
 // a known state (the layer and history stores are module-level and shared).
+//
+// The SELECTION is module-level state too, and it is released here rather than
+// at the end of the tests that use one: a test that failed halfway would
+// otherwise leave a selection behind and clip the next test's brush to it,
+// turning one red assertion into a cascade of unrelated ones.
 fn doc(w: int, h: int) -> int {
     layer.store_new()
     history.history_new()
+    select.release()
     var b = wynimg_new(w, h)
     layer.add("paint", b, layer.KIND_RASTER())
     return b
@@ -37,12 +79,17 @@ test "a click paints a dab centred on the click" {
     paint.begin(0, 32.0, 32.0)
     paint.commit()
 
-    // Centre is opaque red.
-    assert_true(pixel.approx(wynimg_pick(b, 32, 32, 3), 1.0, 0.01))
-    assert_true(pixel.approx(wynimg_pick(b, 32, 32, 0), 1.0, 0.01))
-    assert_true(pixel.approx(wynimg_pick(b, 32, 32, 1), 0.0, 0.01))
-    // A pixel well outside the radius is untouched.
-    assert_true(pixel.approx(wynimg_pick(b, 32, 50, 3), 0.0, 0.001))
+    // Centre is opaque red, EXACTLY. A hardness-1 core is coverage 1.0 and a pure
+    // hue-0 red is (1,0,0) with no rounding anywhere on the path, so a tolerance
+    // here would only be hiding a bug it was never going to catch. These read as
+    // 0.01-tolerance approx() calls in most of this file's history because
+    // assert_eq truncated floats and an exact float assertion was not expressible.
+    assert_eq(wynimg_pick(b, 32, 32, 3), 1.0)
+    assert_eq(wynimg_pick(b, 32, 32, 0), 1.0)
+    assert_eq(wynimg_pick(b, 32, 32, 1), 0.0)
+    // A pixel well outside the radius is untouched - and `falloff` returns exactly
+    // 0.0 at and past the rim, so this is 0.0 and not "small".
+    assert_eq(wynimg_pick(b, 32, 50, 3), 0.0)
     // A pixel just inside the radius is painted.
     assert_true(wynimg_pick(b, 37, 32, 3) > 0.9)
 }
@@ -770,6 +817,244 @@ test "smoothing leaves a straight line straight" {
     assert_eq(wynimg_pick(b, 60, 15, 3), 0.0)
 }
 
+// ---------------------------------------------------------------------------
+// SMOOTHING AT A STROKE'S TWO ENDS - the samples with no neighbour to fit
+// through. Smoothing is off by default and that stays right; these are the
+// assertions that the ON path is correct where it has least information.
+//
+// A REAL DEFECT LIVED HERE and these were written against it: the missing
+// neighbour was collapsed onto the endpoint (p3 = p2), which HALVES the spline's
+// speed at the end of every segment. Dabs are placed by arc length along the
+// chord but drawn at the spline's parameter, so a half-speed end bunched them up.
+// Measured on three collinear samples 60 px apart at 8 px spacing, dab centres
+// came out 19 27 35 43 51 59 67 75 83 92 102 111 120 128 134 139 - the last six
+// gaps 10, 9, 9, 8, 6, 5 instead of 8. On a straight line, which the spline is
+// not even supposed to bend. Reflecting the missing neighbour
+// (p3 = 2*p2 - p1, and p0 = 2*p1 - p2 at the start) makes the end tangent the
+// chord and fixes it.
+// ---------------------------------------------------------------------------
+
+// The number of separate covered runs along row `y`, and the widest gap between
+// them. Together these describe a dotted line exactly: the run count says how
+// many dabs are resolvable and the gap says how evenly they are spread. A
+// coverage sum could not - bunching dabs conserves it.
+fn runs_on_row(b: int, y: int, w: int) -> int {
+    var x = 0
+    var inrun = 0
+    var n = 0
+    while x < w {
+        var on = 0
+        if wynimg_pick(b, x, y, 3) > 0.5 { on = 1 }
+        if on == 1 and inrun == 0 {
+            n = n + 1
+            inrun = 1
+        }
+        if on == 0 { inrun = 0 }
+        x = x + 1
+    }
+    return n
+}
+
+fn widest_gap_on_row(b: int, y: int, w: int) -> int {
+    var x = 0
+    var last = 0 - 1
+    var worst = 0
+    while x < w {
+        if wynimg_pick(b, x, y, 3) > 0.5 {
+            if last >= 0 {
+                if x - last - 1 > worst { worst = x - last - 1 }
+            }
+            last = x
+        }
+        x = x + 1
+    }
+    return worst
+}
+
+test "smoothing does not bunch the dabs at a segment's END" {
+    // THE REGRESSION. A widely-spaced brush makes each dab a separate dot, so the
+    // spacing is directly measurable. Three collinear samples 60 px apart, dabs
+    // 8 px apart: every gap must be the same, smoothed or not.
+    //
+    // MUTATION GUARD: put back p3 = p2 (pass x1/y1 as the fourth catmull argument
+    // instead of the reflected point) and the smoothed run count drops while the
+    // widest gap grows - the second half of the line goes denser than the first.
+    var b = doc(200, 40)
+    round_brush(2.0, 1.0, 4.0)            // dabs 8 px apart: separate dots
+    paint.set_smoothing(true)
+    paint.begin(0, 20.0, 20.0)
+    paint.seg(80.0, 20.0)
+    paint.seg(140.0, 20.0)
+    paint.commit()
+    paint.set_smoothing(false)
+    var s_runs = runs_on_row(b, 20, 200)
+    var s_gap = widest_gap_on_row(b, 20, 200)
+
+    var b2 = doc(200, 40)
+    round_brush(2.0, 1.0, 4.0)
+    paint.begin(0, 20.0, 20.0)
+    paint.seg(80.0, 20.0)
+    paint.seg(140.0, 20.0)
+    paint.commit()
+
+    // Collinear input: Catmull-Rom is linear on it, so smoothing must be the
+    // IDENTITY here - not merely similar. Asserted as byte-exact over the whole
+    // buffer, because "16 dots either way" would also hold if they were 16 dots in
+    // different places.
+    assert_eq(wynimg_max_diff(b, b2), 0.0)
+    assert_eq(s_runs, runs_on_row(b2, 20, 200))
+    assert_eq(s_gap, widest_gap_on_row(b2, 20, 200))
+    // ...and the numbers are the ones spacing predicts, so this cannot pass by
+    // both strokes being equally wrong: 121 px of path at 8 px = 16 dots, radius 2
+    // dots leave a 4 px gap between them.
+    assert_eq(s_runs, 16)
+    assert_eq(s_gap, 4)
+}
+
+test "smoothing at the START: the first segment has no p0 and is the chord" {
+    // The first segment of a stroke has no previous input point. Its only
+    // defensible interpretation is the straight chord - there is no information
+    // about the curve yet - and that is what reflecting p0 gives.
+    //
+    // A LONE segment is the sharpest form of the check: both neighbours are
+    // missing, both are reflected, and the algebra makes the higher-order terms
+    // cancel exactly. So it must be BIT-identical to the unsmoothed stroke, in a
+    // direction that is not axis-aligned (an axis-aligned line would also pass
+    // under a bug that only moved points along the other axis).
+    var b = doc(160, 160)
+    round_brush(3.0, 1.0, 0.3)
+    paint.set_smoothing(true)
+    paint.begin(0, 20.0, 20.0)
+    paint.seg(140.0, 130.0)              // one diagonal segment
+    paint.commit()
+    paint.set_smoothing(false)
+
+    var b2 = doc(160, 160)
+    round_brush(3.0, 1.0, 0.3)
+    paint.begin(0, 20.0, 20.0)
+    paint.seg(140.0, 130.0)
+    paint.commit()
+    assert_eq(wynimg_max_diff(b, b2), 0.0)
+
+    // And a CLICK - a stroke with no seg at all, i.e. the first dab and nothing
+    // else. Smoothing must not move it: the dab is stamped by dab_begin, which
+    // never consults the spline, and this is the assertion that it stays that way.
+    var b3 = doc(80, 80)
+    round_brush(6.0, 1.0, 0.25)
+    paint.set_smoothing(true)
+    paint.begin(0, 40.0, 40.0)
+    paint.commit()
+    paint.set_smoothing(false)
+    assert_eq(wynimg_pick(b3, 40, 40, 3), 1.0)
+    assert_eq(paint.stroke_dabs(), 1)
+}
+
+test "smoothing at the END: the last sample is reached and not overshot along the path" {
+    // The final segment is drawn with p3 REFLECTED, which makes the curve leave p2
+    // with the chord's tangent - so the stroke stops AT the last reported sample
+    // rather than flicking past it. A curve, not a straight line, so the spline is
+    // genuinely bending and the end condition is doing work.
+    var b = doc(200, 140)
+    round_brush(2.0, 1.0, 0.25)
+    paint.set_smoothing(true)
+    paint.begin(0, 20.0, 100.0)
+    paint.seg(60.0, 70.0)
+    paint.seg(110.0, 55.0)
+    paint.seg(170.0, 50.0)                // the LAST sample
+    paint.commit()
+    paint.set_smoothing(false)
+
+    // The last sample is painted...
+    assert_true(wynimg_pick(b, 170, 50, 3) > 0.9)
+    // ...and nothing is painted past it. Radius 2 plus the antialiased rim reaches
+    // column 172; 175 onward must be empty in EVERY row, which is the statement
+    // that the curve did not continue beyond the user's last point.
+    var x = 175
+    var beyond = 0
+    while x < 200 {
+        var y = 0
+        while y < 140 {
+            if wynimg_pick(b, x, y, 3) > 0.01 { beyond = beyond + 1 }
+            y = y + 1
+        }
+        x = x + 1
+    }
+    assert_eq(beyond, 0)
+}
+
+test "smoothing END: a stroke that doubles back does not fling past its turn" {
+    // The worst end case: the last segment reverses direction, so p1's tangent
+    // points one way and p2 is behind it. With p3 reflected the reversal is
+    // followed rather than extrapolated through, and the paint stops at the
+    // furthest point the pointer actually reached.
+    var b = doc(200, 80)
+    round_brush(3.0, 1.0, 0.25)
+    paint.set_smoothing(true)
+    paint.begin(0, 20.0, 40.0)
+    paint.seg(120.0, 40.0)
+    paint.seg(60.0, 40.0)                 // straight back over itself
+    paint.commit()
+    paint.set_smoothing(false)
+
+    // The turn is painted, and nothing is more than the brush's own reach past it.
+    assert_true(wynimg_pick(b, 120, 40, 3) > 0.9)
+    assert_eq(wynimg_pick(b, 130, 40, 3), 0.0)
+    assert_eq(wynimg_pick(b, 150, 40, 3), 0.0)
+    // The doubled-back half is still one solid line, not a row of gaps: coverage
+    // combines with max(), so painting over itself changes nothing.
+    var x = 62
+    var gaps = 0
+    while x <= 118 {
+        if wynimg_pick(b, x, 40, 3) < 0.9 { gaps = gaps + 1 }
+        x = x + 1
+    }
+    assert_eq(gaps, 0)
+}
+
+test "smoothing keeps the dab count per segment, so the carry still means what it says" {
+    // Dabs are placed by arc length along the CHORD even when the spline bends, so
+    // switching smoothing on must not change how many dabs a segment gets. If it
+    // did, the arc-length carry would no longer be comparable between the two
+    // modes and every spacing assertion in this file would mean something
+    // different with the checkbox ticked.
+    var b = doc(300, 40)
+    round_brush(2.0, 1.0, 4.0)
+    paint.set_smoothing(true)
+    paint.begin(0, 20.0, 20.0)
+    assert_eq(paint.stroke_dabs(), 1)
+    paint.seg(80.0, 20.0)
+    var s1 = paint.stroke_dabs()
+    paint.seg(140.0, 20.0)
+    var s2 = paint.stroke_dabs()
+    paint.seg(200.0, 20.0)
+    var s3 = paint.stroke_dabs()
+    var s_carry = paint.stroke_carry()
+    paint.commit()
+    paint.set_smoothing(false)
+
+    var b2 = doc(300, 40)
+    round_brush(2.0, 1.0, 4.0)
+    paint.begin(0, 20.0, 20.0)
+    paint.seg(80.0, 20.0)
+    var p1 = paint.stroke_dabs()
+    paint.seg(140.0, 20.0)
+    var p2 = paint.stroke_dabs()
+    paint.seg(200.0, 20.0)
+    var p3 = paint.stroke_dabs()
+    var p_carry = paint.stroke_carry()
+    paint.commit()
+
+    assert_eq(s1, p1)
+    assert_eq(s2, p2)
+    assert_eq(s3, p3)
+    assert_eq(s_carry, p_carry)
+    // 60 px per segment at 8 px spacing: 7 dabs, 4 px owed into the next segment,
+    // so the carry accumulates 4, 8 (which pays for one more dab, leaving 0)...
+    // stated as numbers so "equal but both wrong" cannot pass.
+    assert_eq(s1, 8)
+    assert_eq(s3, 23)
+}
+
 test "the dab knobs clamp instead of accepting nonsense" {
     paint.set_spacing(0.0)                // would be infinitely many dabs
     assert_true(paint.spacing() >= 0.01)
@@ -797,14 +1082,18 @@ test "the eraser removes colour AND alpha together" {
     paint.begin(0, 16.0, 16.0)
     paint.commit()
 
-    // Fully erased: alpha zero. And the RAW stored channel is zero too - an
-    // eraser that zeroed only alpha would leave premultiplied colour behind and
-    // show a red halo the moment anything composited over it.
-    assert_true(pixel.approx(wynimg_pick(b, 16, 16, 3), 0.0, 0.001))
-    assert_true(pixel.approx(wynimg_get(b, pixel.px_index(32, 16, 16, 0)),
-                             0.0, 0.001))
-    // Outside the brush the red survives.
-    assert_true(pixel.approx(wynimg_pick(b, 2, 2, 3), 1.0, 0.001))
+    // Fully erased: alpha EXACTLY zero. And the RAW stored channel is exactly zero
+    // too - an eraser that zeroed only alpha would leave premultiplied colour
+    // behind and show a red halo the moment anything composited over it.
+    //
+    // Exact, not within 0.001: destination-out at coverage 1 and alpha 1 scales
+    // every channel by (1 - 1) = 0, so anything but 0.0 means the eraser is not
+    // reaching full strength - which a 0.001 tolerance would let through at the
+    // 99.9%-erased mark, i.e. with a visible halo still present in 8-bit output.
+    assert_eq(wynimg_pick(b, 16, 16, 3), 0.0)
+    assert_eq(wynimg_get(b, pixel.px_index(32, 16, 16, 0)), 0.0)
+    // Outside the brush the red survives, at full opacity.
+    assert_eq(wynimg_pick(b, 2, 2, 3), 1.0)
 }
 
 test "a stroke is ONE undo entry and undo restores the pixels" {
@@ -830,9 +1119,13 @@ test "a stroke is ONE undo entry and undo restores the pixels" {
     assert_eq(history.undo_label(), "paint")
     assert_true(wynimg_pick(b, 16, 16, 0) > 0.9)
 
+    // Undo copies a SNAPSHOT back, so the restored pixel is bit-identical to the
+    // black it started as - not approximately black. A tolerance here would accept
+    // a restore that had been through a lossy path (a re-composite, a re-encode),
+    // which is exactly the class of undo bug worth catching.
     history.undo_any()
-    assert_true(pixel.approx(wynimg_pick(b, 16, 16, 0), 0.0, 0.001))
-    assert_true(pixel.approx(wynimg_pick(b, 16, 16, 3), 1.0, 0.001))
+    assert_eq(wynimg_pick(b, 16, 16, 0), 0.0)
+    assert_eq(wynimg_pick(b, 16, 16, 3), 1.0)
 
     history.redo_any()
     assert_true(wynimg_pick(b, 16, 16, 0) > 0.9)
@@ -854,7 +1147,7 @@ test "undo writes back into the SAME buffer handle" {
     history.undo_any()
 
     assert_eq(layer.buffer(0), b)
-    assert_true(pixel.approx(wynimg_pick(b, 16, 16, 0), 0.0, 0.001))
+    assert_eq(wynimg_pick(b, 16, 16, 0), 0.0)
 }
 
 test "cancel puts the layer back and records nothing" {
@@ -908,18 +1201,25 @@ test "a fill is one undoable entry" {
 }
 
 test "HSV to RGB hits the primaries exactly" {
-    assert_true(pixel.approx(pixel.hsv_channel(0.0, 1.0, 1.0, 0), 1.0, 0.001))
-    assert_true(pixel.approx(pixel.hsv_channel(0.0, 1.0, 1.0, 1), 0.0, 0.001))
-    assert_true(pixel.approx(pixel.hsv_channel(120.0, 1.0, 1.0, 1), 1.0, 0.001))
-    assert_true(pixel.approx(pixel.hsv_channel(120.0, 1.0, 1.0, 0), 0.0, 0.001))
-    assert_true(pixel.approx(pixel.hsv_channel(240.0, 1.0, 1.0, 2), 1.0, 0.001))
+    // "Exactly" in the test's NAME, and now in its assertions. A primary at s=v=1
+    // is (c, y, 0) with c = 1 and y = 0, so every value below is an exact float -
+    // the multiplies are by 1.0 and 0.0. The tolerance these used to carry was a
+    // workaround for assert_eq truncating floats, and it let a hue wheel that was
+    // 0.1% off at the primaries pass a test called "exactly".
+    assert_eq(pixel.hsv_channel(0.0, 1.0, 1.0, 0), 1.0)
+    assert_eq(pixel.hsv_channel(0.0, 1.0, 1.0, 1), 0.0)
+    assert_eq(pixel.hsv_channel(120.0, 1.0, 1.0, 1), 1.0)
+    assert_eq(pixel.hsv_channel(120.0, 1.0, 1.0, 0), 0.0)
+    assert_eq(pixel.hsv_channel(240.0, 1.0, 1.0, 2), 1.0)
     // Cyan: no red, full green and blue.
-    assert_true(pixel.approx(pixel.hsv_channel(180.0, 1.0, 1.0, 0), 0.0, 0.001))
-    assert_true(pixel.approx(pixel.hsv_channel(180.0, 1.0, 1.0, 1), 1.0, 0.001))
-    assert_true(pixel.approx(pixel.hsv_channel(180.0, 1.0, 1.0, 2), 1.0, 0.001))
-    // Zero saturation is grey at every hue.
-    assert_true(pixel.approx(pixel.hsv_channel(37.0, 0.0, 0.6, 0), 0.6, 0.001))
-    assert_true(pixel.approx(pixel.hsv_channel(37.0, 0.0, 0.6, 2), 0.6, 0.001))
+    assert_eq(pixel.hsv_channel(180.0, 1.0, 1.0, 0), 0.0)
+    assert_eq(pixel.hsv_channel(180.0, 1.0, 1.0, 1), 1.0)
+    assert_eq(pixel.hsv_channel(180.0, 1.0, 1.0, 2), 1.0)
+    // Zero saturation is grey at every hue: c = 0, so all three channels are the
+    // achromatic floor `v` itself, with no arithmetic to round.
+    assert_eq(pixel.hsv_channel(37.0, 0.0, 0.6, 0), 0.6)
+    assert_eq(pixel.hsv_channel(37.0, 0.0, 0.6, 1), 0.6)
+    assert_eq(pixel.hsv_channel(37.0, 0.0, 0.6, 2), 0.6)
 }
 
 test "RGB to HSV round-trips through HSV to RGB" {
@@ -996,6 +1296,292 @@ test "a stroke on a layer with a mask still lands in the layer's own pixels" {
     paint.begin(0, 16.0, 16.0)
     paint.commit()
     assert_true(wynimg_pick(b, 16, 16, 3) > 0.9)
+}
+
+// ---------------------------------------------------------------------------
+// THE SELECTION CLIPS THE STROKE, not merely gates it at the press.
+//
+// This was a stated limitation of the editor: pressing outside a selection did
+// nothing, but a stroke that STARTED inside and was dragged out kept painting
+// past the boundary. The fix is one multiply in src/paint.wyn's apply_cov, and
+// these are the assertions that make it real. Each names the mutation it dies
+// to, because the interesting failures here are all silent.
+// ---------------------------------------------------------------------------
+
+test "a stroke dragged OUT of a selection is CUT at the boundary" {
+    // MUTATION GUARD: make clipped_cov return s_cov unconditionally (i.e. make
+    // the clip a no-op) and the two "outside" assertions go red at 1.0.
+    var b = doc(200, 60)
+    select.init(200, 60)
+    select.rect(0.0, 0.0, 100.0, 60.0, select.OP_REPLACE())   // left half only
+    round_brush(6.0, 1.0, 0.25)
+    paint.begin(0, 20.0, 30.0)      // press INSIDE the selection
+    paint.seg(180.0, 30.0)          // and drag right out of it
+    paint.commit()
+
+    // Inside: fully painted, exactly - the clip must not dim what it lets
+    // through, and a hard selection edge multiplies by exactly 1.
+    assert_eq(wynimg_pick(b, 20, 30, 3), 1.0)
+    assert_eq(wynimg_pick(b, 50, 30, 3), 1.0)
+    assert_eq(wynimg_pick(b, 99, 30, 3), 1.0)   // the last selected column
+    // Outside: EXACTLY nothing, all the way to the far end of the drag. Not
+    // "faint" - the coverage was multiplied by 0.
+    assert_eq(wynimg_pick(b, 100, 30, 3), 0.0)  // the first unselected column
+    assert_eq(wynimg_pick(b, 150, 30, 3), 0.0)
+    assert_eq(wynimg_pick(b, 180, 30, 3), 0.0)
+    select.release()
+}
+
+test "the clip does not corrupt the stroke's BASE outside the selection" {
+    // The pre-stroke pixels are the `base` snapshot stroke_apply rebuilds from.
+    // Clipping s_cov in place would be one bug; clipping the BASE would be a
+    // worse one - the layer outside the selection would be rebuilt from a
+    // multiplied snapshot and go transparent, i.e. a stroke inside a selection
+    // would ERASE the rest of the layer. This is the assertion that it does not.
+    var b = doc(120, 60)
+    wynimg_fill(b, 0.0, 0.0, 0.4, 1.0)          // opaque blue everywhere
+    select.init(120, 60)
+    select.rect(0.0, 0.0, 60.0, 60.0, select.OP_REPLACE())
+    round_brush(8.0, 1.0, 0.25)
+    paint.begin(0, 20.0, 30.0)
+    paint.seg(100.0, 30.0)
+    paint.commit()
+
+    // Inside the selection: red, painted over the blue.
+    assert_true(wynimg_pick(b, 20, 30, 0) > 0.9)
+    // Outside: the ORIGINAL blue, untouched in every channel, not a dimmed or
+    // transparent version of it.
+    assert_eq(wynimg_pick(b, 100, 30, 3), 1.0)
+    assert_eq(wynimg_pick(b, 100, 30, 0), 0.0)
+    assert_true(pixel.approx(wynimg_pick(b, 100, 30, 2), 0.4, 0.001))
+    // ...including the row the stroke never went near.
+    assert_eq(wynimg_pick(b, 100, 5, 3), 1.0)
+    select.release()
+}
+
+test "a FEATHERED selection edge gives the stroke partial alpha" {
+    // The clip is a multiply, so it is exact on fractional coverage - which is
+    // the property that makes one clipping path enough for hard, antialiased and
+    // feathered selections alike. A threshold-based clip would give 0 or 1 here.
+    //
+    // One box pass at radius 4 is a linear ramp, so the expected values are
+    // countable by hand: 9 taps, coverage falling by 1/9 per column.
+    var b = doc(200, 60)
+    select.init(200, 60)
+    select.rect(0.0, 0.0, 100.0, 60.0, select.OP_REPLACE())
+    select.feather_box(4.0, 1)
+    round_brush(6.0, 1.0, 0.25)
+    paint.begin(0, 20.0, 30.0)
+    paint.seg(180.0, 30.0)
+    paint.commit()
+
+    // The painted alpha IS the selection coverage, column by column, because the
+    // brush laid down coverage 1.0 along the whole spine.
+    assert_eq(wynimg_pick(b, 96, 30, 3), select.cov_at(96, 30))
+    assert_eq(wynimg_pick(b, 98, 30, 3), select.cov_at(98, 30))
+    assert_eq(wynimg_pick(b, 100, 30, 3), select.cov_at(100, 30))
+    assert_eq(wynimg_pick(b, 102, 30, 3), select.cov_at(102, 30))
+    // And it is genuinely partial - stated as numbers so a clip that hardened
+    // the edge could not pass by agreeing with a hardened cov_at.
+    assert_true(pixel.approx(wynimg_pick(b, 98, 30, 3), 0.6667, 0.001))
+    assert_true(pixel.approx(wynimg_pick(b, 100, 30, 3), 0.4444, 0.001))
+    assert_true(pixel.approx(wynimg_pick(b, 102, 30, 3), 0.2222, 0.001))
+    assert_eq(wynimg_pick(b, 104, 30, 3), 0.0)   // past the ramp: nothing
+    select.release()
+}
+
+test "the clip is applied ONCE per apply, so a slow drag does not fade the edge" {
+    // MUTATION GUARD: clip s_cov IN PLACE instead of on a copy and this goes
+    // red. Every seg re-applies the whole coverage buffer, so an in-place
+    // multiply compounds: a 0.44 feathered column would read 0.44^41 after 40
+    // segments, i.e. the user's own dawdling would erase the selection's edge.
+    // The 40-sample and 1-sample strokes must be pixel-identical.
+    var few = doc(200, 60)
+    select.init(200, 60)
+    select.rect(0.0, 0.0, 100.0, 60.0, select.OP_REPLACE())
+    select.feather_box(4.0, 1)
+    round_brush(6.0, 1.0, 0.25)
+    paint.begin(0, 20.0, 30.0)
+    paint.seg(180.0, 30.0)                   // ONE sample
+    paint.commit()
+    var one_edge = wynimg_pick(few, 100, 30, 3)
+
+    var many = doc(200, 60)
+    select.init(200, 60)
+    select.rect(0.0, 0.0, 100.0, 60.0, select.OP_REPLACE())
+    select.feather_box(4.0, 1)
+    round_brush(6.0, 1.0, 0.25)
+    paint.begin(0, 20.0, 30.0)
+    var i = 1
+    while i <= 40 {                          // the same path, 40 samples
+        paint.seg(20.0 + i.to_float() * 4.0, 30.0)
+        i = i + 1
+    }
+    paint.commit()
+
+    assert_eq(wynimg_pick(many, 100, 30, 3), one_edge)
+    assert_true(pixel.approx(one_edge, 0.4444, 0.001))   // not decayed to ~0
+    assert_eq(wynimg_max_diff(few, many), 0.0)           // byte-exact, whole buffer
+    select.release()
+}
+
+test "an EMPTY selection means paint everywhere, not paint nothing" {
+    // THE CONVERSION BUG THIS EXISTS FOR, and it has been made once already in
+    // the filter integration: `select.is_empty()` is true both when there is no
+    // selection buffer and when nothing is selected, and BOTH mean "no
+    // clipping". Multiplying by the all-zeros mask instead makes the brush a
+    // silent no-op - the tool appears broken with no error anywhere.
+    //
+    // Both spellings of "empty" are checked, because they take different paths:
+    // an allocated-but-cleared selection, and a released one.
+    var b = doc(120, 40)
+    select.init(120, 40)
+    select.select_none()
+    assert_true(select.active())              // there IS a buffer...
+    assert_true(select.is_empty())            // ...and it selects nothing
+    round_brush(6.0, 1.0, 0.25)
+    paint.begin(0, 20.0, 20.0)
+    paint.seg(100.0, 20.0)
+    paint.commit()
+    assert_eq(wynimg_pick(b, 20, 20, 3), 1.0)
+    assert_eq(wynimg_pick(b, 60, 20, 3), 1.0)
+    assert_eq(wynimg_pick(b, 100, 20, 3), 1.0)
+
+    // And with no selection object at all.
+    var b2 = doc(120, 40)
+    select.release()
+    assert_false(select.active())
+    round_brush(6.0, 1.0, 0.25)
+    paint.begin(0, 20.0, 20.0)
+    paint.seg(100.0, 20.0)
+    paint.commit()
+    assert_eq(wynimg_pick(b2, 60, 20, 3), 1.0)
+}
+
+test "select_all is indistinguishable from no selection" {
+    // The clip runs for real here (the selection is not empty), so this is the
+    // check that a coverage-1 multiply is the identity rather than nearly it.
+    var b = doc(120, 40)
+    select.release()
+    round_brush(6.0, 1.0, 0.25)
+    paint.begin(0, 20.0, 20.0)
+    paint.seg(100.0, 20.0)
+    paint.commit()
+
+    var b2 = doc(120, 40)
+    select.init(120, 40)
+    select.select_all()
+    assert_false(select.is_empty())
+    round_brush(6.0, 1.0, 0.25)
+    paint.begin(0, 20.0, 20.0)
+    paint.seg(100.0, 20.0)
+    paint.commit()
+
+    assert_eq(wynimg_max_diff(b, b2), 0.0)
+    select.release()
+}
+
+test "the ERASER is clipped by the selection too" {
+    // The eraser is the case a post-hoc clip could not do correctly (source-over
+    // cannot lower alpha, so compositing an unclipped erase back through the
+    // selection leaves the alpha it was asked to remove). Clipping the coverage
+    // instead is right for both tools by construction, and this is the assertion.
+    var b = doc(200, 60)
+    wynimg_fill(b, 0.6, 0.1, 0.1, 1.0)          // opaque red
+    select.init(200, 60)
+    select.rect(0.0, 0.0, 100.0, 60.0, select.OP_REPLACE())
+    round_brush(8.0, 1.0, 0.25)
+    paint.set_tool(paint.TOOL_ERASER())
+    paint.begin(0, 20.0, 30.0)
+    paint.seg(180.0, 30.0)
+    paint.commit()
+
+    // Erased inside...
+    assert_eq(wynimg_pick(b, 50, 30, 3), 0.0)
+    // ...and NOT outside: alpha is untouched, and so is the premultiplied colour
+    // (an eraser that zeroed only alpha would leave a red halo).
+    assert_eq(wynimg_pick(b, 150, 30, 3), 1.0)
+    assert_true(pixel.approx(wynimg_get(b, pixel.px_index(200, 150, 30, 0)),
+                             0.6, 0.001))
+    select.release()
+    paint.set_tool(paint.TOOL_BRUSH())
+}
+
+test "a bucket fill is clipped by the selection" {
+    // The fill shares the coverage/apply path, so it inherits the clip - and the
+    // reported pixel count stays the FLOODED region's size, which is what the
+    // status bar means by "filled N px". Asserting both keeps the two facts from
+    // being conflated: the flood is unclipped, the PAINT is clipped.
+    var b = doc(80, 40)
+    wynimg_fill(b, 0.0, 0.0, 0.0, 1.0)          // one flat black region
+    select.init(80, 40)
+    select.rect(0.0, 0.0, 40.0, 40.0, select.OP_REPLACE())
+    paint.set_tool(paint.TOOL_FILL())
+    paint.set_hsv(0.0, 1.0, 1.0)
+    paint.set_alpha(1.0)
+    paint.set_tolerance(0.05)
+
+    var n = paint.fill_at(0, 20, 20)
+    assert_eq(n, 3200)                          // the whole 80x40 flood
+    assert_true(wynimg_pick(b, 20, 20, 0) > 0.9)      // red inside
+    assert_eq(wynimg_pick(b, 60, 20, 0), 0.0)         // still black outside
+    assert_eq(wynimg_pick(b, 60, 20, 3), 1.0)         // and still opaque
+    select.release()
+    paint.set_tool(paint.TOOL_BRUSH())
+}
+
+test "a selection of the WRONG SIZE refuses the stroke instead of painting unclipped" {
+    // The one way the clip can fail on live data: the selection was allocated for a
+    // different document size, so `wynimg_sel_clip` refuses the dimension mismatch.
+    // The choice then is "paint unclipped" or "paint nothing", and it must be the
+    // second - a brush that ignored the selection because the mask was the wrong
+    // size would overwrite the pixels the selection existed to protect.
+    //
+    // And begin() must leave NO active stroke when it returns 0, because that is its
+    // documented contract and src/ui.wyn relies on it: a 0 means "cannot paint that
+    // layer" and the UI never enters DRAG_STROKE, so a stroke left live would never
+    // be committed or cancelled.
+    var b = doc(64, 64)
+    select.init(32, 32)                    // wrong size for a 64x64 layer
+    select.select_all()
+    round_brush(6.0, 1.0, 0.25)
+    assert_eq(paint.begin(0, 32.0, 32.0), 0)
+    assert_false(paint.stroke_active())
+    assert_eq(wynimg_pick(b, 32, 32, 3), 0.0)   // nothing painted
+    // Nothing to commit, and no record made.
+    assert_eq(paint.seg(40.0, 32.0), 0)
+    assert_eq(paint.commit(), 0)
+    assert_eq(history.depth(), 0)
+    select.release()
+}
+
+test "a clipped stroke is still ONE undo entry, and undo restores everything" {
+    // The clip changes which pixels the stroke writes, not how many records it
+    // makes: history snapshots the layer either side of the whole gesture, so the
+    // clip must be invisible to it.
+    var b = doc(200, 60)
+    wynimg_fill(b, 0.0, 0.0, 0.0, 1.0)
+    select.init(200, 60)
+    select.rect(0.0, 0.0, 100.0, 60.0, select.OP_REPLACE())
+    round_brush(8.0, 1.0, 0.25)
+    paint.set_hsv(0.0, 0.0, 1.0)                // white
+    paint.begin(0, 20.0, 30.0)
+    var i = 1
+    while i <= 20 {
+        paint.seg(20.0 + i.to_float() * 8.0, 30.0)
+        i = i + 1
+    }
+    paint.commit()
+    assert_eq(history.depth(), 1)
+    assert_true(wynimg_pick(b, 50, 30, 0) > 0.9)
+
+    history.undo_any()
+    assert_eq(wynimg_pick(b, 50, 30, 0), 0.0)
+    assert_eq(wynimg_pick(b, 50, 30, 3), 1.0)
+    history.redo_any()
+    assert_true(wynimg_pick(b, 50, 30, 0) > 0.9)
+    assert_eq(wynimg_pick(b, 150, 30, 0), 0.0)  // still clipped after a redo
+    select.release()
 }
 
 test "the C picker ramps agree with the Wyn HSV conversion" {

@@ -413,16 +413,58 @@ long long wynimg_dab_begin(void* strokep, double x, double y, double press) {
 //
 // WHY IT IS OFF BY DEFAULT, and why turning it on would be a BEHAVIOUR CHANGE
 // rather than an improvement: the spline moves where dabs land. A 90-degree
-// corner drawn as two segments becomes a rounded corner, and a straight line
-// entered as three collinear samples stays straight only because Catmull-Rom
-// happens to be linear on collinear input - a curve entered as a polyline gets
-// visibly shorter chords near its ends, where the spline has no fourth point and
-// must extrapolate. Every existing test in this suite states the geometry of the
-// STRAIGHT interpretation: "a drag paints a continuous capsule" measures pixels
-// 10..80 on the line y=16, and "a calligraphic nib is directional" measures exact
-// footprint extents. Making the spline the default would move those pixels, so
-// the flag exists and the default is what the tests describe. It is the caller's
-// (a UI checkbox's) choice, not the kernel's.
+// corner drawn as two segments becomes a rounded corner. Every existing test in
+// this suite states the geometry of the STRAIGHT interpretation: "a drag paints a
+// continuous capsule" measures pixels 10..80 on the line y=16, and "a
+// calligraphic nib is directional" measures exact footprint extents. Making the
+// spline the default would move those pixels, so the flag exists and the default
+// is what the tests describe. It is the caller's (a UI checkbox's) choice, not the
+// kernel's.
+//
+// THE TWO ENDS HAVE NO NEIGHBOUR, AND THE FIX IS NOT p = the endpoint.
+//
+// Catmull-Rom through p1..p2 needs p0 and p3. At the first segment of a stroke
+// there is no p0; at every segment there is no p3, because the pointer has not
+// reported the next sample yet (waiting for it would put the live preview one
+// sample behind the cursor, which reads as latency - that trade is made in favour
+// of the preview).
+//
+// The obvious placeholder is the endpoint itself (p0 = p1, p3 = p2). It is WRONG,
+// measurably: the tangent at an end is (p_next - p_prev)/2, so collapsing the
+// missing neighbour onto the endpoint HALVES the speed there. Dabs are placed by
+// arc length along the chord but drawn at the spline's parameter, so a half-speed
+// end crams them together. Measured on three collinear samples 60 px apart at
+// 8 px spacing: dab centres came out
+//
+//     19 27 35 43 51 59 67 75 83 92 102 111 120 128 134 139
+//
+// - even spacing for the first arm, then 10, 9, 9, 8, 6, 5 through the second.
+// The stroke got visibly denser at every sample boundary, and on a collinear path
+// the spline is not even supposed to bend.
+//
+// REFLECTION is the fix, and it is the standard one: the missing neighbour is
+// the endpoint continued in a straight line,
+//
+//     p0 = 2*p1 - p2      (start of the stroke)
+//     p3 = 2*p2 - p1      (the not-yet-known next sample)
+//
+// which makes the end tangent exactly the chord (p2 - p1) instead of half of it.
+// Three consequences, all asserted in tests/test_paint.wyn:
+//
+//   * a segment with BOTH neighbours reflected is EXACTLY the straight chord (the
+//     t^2 and t^3 coefficients cancel identically), so the FIRST segment of any
+//     stroke - the one with no p0 - is the chord, which is the only defensible
+//     answer when there is no information about the curve yet. That is what the
+//     old `g_run.n < 2` early return produced too; the reflected form reaches it
+//     as a special case of one formula instead of a second code path;
+//   * a one-sample drag is therefore bit-identical smoothed or not, in every
+//     direction, rather than only when it happens to be axis-aligned;
+//   * collinear input stays EVENLY SPACED, so "smoothing on" no longer changes the
+//     dab density of a straight line. That is the bug above.
+//
+// It does not remove Catmull-Rom's OVERSHOOT at a genuine corner - that is
+// inherent to an interpolating spline and is the honest reason smoothing is
+// opt-in - it removes the ARTEFACT that had nothing to do with the curve.
 //
 // t in [0,1] between p1 and p2; p0 and p3 are the neighbours. Standard uniform
 // Catmull-Rom basis.
@@ -439,19 +481,25 @@ static double catmull(double p0, double p1, double p2, double p3, double t) {
 // placement loop below has no second copy for the unsmoothed case.
 static void path_point(double t01, double x0, double y0, double x1, double y1,
                        double* ox, double* oy) {
-    if (!g_brush.smooth || g_run.n < 2) {
+    if (!g_brush.smooth) {
         *ox = x0 + (x1 - x0) * t01;
         *oy = y0 + (y1 - y0) * t01;
         return;
     }
-    // p1..p2 is the current segment; p0 is the previous input point. p3 is not
-    // known yet - the pointer has not reported it - so the segment is drawn with
-    // p3 = p2, which makes the curve leave p2 straight. A one-segment lag that
-    // waited for p3 would smooth better and put the live preview one sample
-    // behind the cursor, which reads as latency; that trade is deliberately made
-    // in favour of the preview.
-    *ox = catmull(g_run.px_, x0, x1, x1, t01);
-    *oy = catmull(g_run.py_, y0, y1, y1, t01);
+    // p1..p2 is the current segment (x0,y0)..(x1,y1). Both missing neighbours are
+    // REFLECTED rather than collapsed onto the endpoint - see the note above; the
+    // collapsed form halves the end tangent and bunches the dabs there.
+    //
+    // g_run.n < 2 is the FIRST segment of the stroke, where there is no previous
+    // input point either, so p0 is reflected too - and then both reflections make
+    // the curve exactly the chord. That is the same answer the old `n < 2` early
+    // return gave, now as a case of one formula rather than a second code path, so
+    // there is no branch that can disagree with the other about where a dab goes.
+    double p0x = 2.0 * x0 - x1, p0y = 2.0 * y0 - y1;
+    if (g_run.n >= 2) { p0x = g_run.px_;  p0y = g_run.py_; }
+    double p3x = 2.0 * x1 - x0, p3y = 2.0 * y1 - y0;
+    *ox = catmull(p0x, x0, x1, p3x, t01);
+    *oy = catmull(p0y, y0, y1, p3y, t01);
 }
 
 // Walks the path from the previous input point to (x,y), stamping a dab every
