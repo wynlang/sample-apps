@@ -905,6 +905,96 @@ fn on_sel_none(id: int) {
     g_msg = "deselected"
 }
 
+// ---- keyboard shortcuts ----------------------------------------------------
+//
+// EVERY SHORTCUT CALLS THE BUTTON'S OWN HANDLER, and that is the whole design.
+// A shortcut that re-implemented "delete the layer" would be a second copy of a
+// rule that already exists (refuse to delete the last layer, record history,
+// rebuild the rows) and the two copies would drift - the keyboard path would keep
+// working after the button's rule changed, which is worse than not having it.
+// So this function is a TABLE, not logic: scancode plus modifier in, one existing
+// `on_*` call out. The id argument every handler takes is unused by all of them
+// (they read global state), so 0 is passed.
+//
+// This became possible only when the toolkit started handing back keys no widget
+// wanted; before that `Ui_events` drained the queue and a second reader saw
+// nothing, which is why this file's older comments justify Pan as a tool and the
+// selection op as button state. Those justifications are still true for the
+// gestures they describe; they are no longer true of the keyboard as such.
+//
+// THE MODIFIER RULE. Cmd/Ctrl chords are document commands (undo, save, select
+// all) and bare letters are tool picks, exactly as every editor does it. A bare
+// letter is only offered here when no text field has focus - the toolkit enforces
+// that, so typing "b" into the filename box cannot also select the Brush.
+fn handle_shortcut(key: int, mod: int) {
+    var cmd = widgets.Ui_mod_is_cmd(mod)
+    var shift = widgets.Ui_mod_shift(mod)
+
+    if cmd == 1 {
+        // Cmd+Z / Cmd+Shift+Z - undo, redo. Shift+Z rather than Cmd+Y because
+        // Y is Windows-only and this build runs on macOS and Linux too.
+        if key == gui.SCANCODE_Z {
+            if shift == 1 { on_redo(0) } else { on_undo(0) }
+            return
+        }
+        if key == gui.SCANCODE_S { on_save(0) return }
+        if key == gui.SCANCODE_O { on_open(0) return }
+        if key == gui.SCANCODE_A { on_sel_all(0) return }
+        if key == gui.SCANCODE_D { on_sel_none(0) return }
+        if key == gui.SCANCODE_I { on_sel_invert(0) return }
+        // Cmd+= and Cmd+- for zoom, with Cmd+0 for fit: the bindings every
+        // browser and editor shares, so they need no discovery.
+        if key == gui.SCANCODE_EQUALS { on_zoom_in(0) return }
+        if key == gui.SCANCODE_MINUS { on_zoom_out(0) return }
+        if key == gui.SCANCODE_0 { on_zoom_fit(0) return }
+        if key == gui.SCANCODE_1 { on_zoom_100(0) return }
+        return
+    }
+
+    // Bare letters: tool selection. The letters are Photoshop's, because a user
+    // arriving from one image editor should not have to relearn them.
+    if key == gui.SCANCODE_B { on_tool_brush(0) return }
+    if key == gui.SCANCODE_E { on_tool_eraser(0) return }
+    if key == gui.SCANCODE_G { on_tool_fill(0) return }
+    if key == gui.SCANCODE_I { on_tool_pick(0) return }
+    if key == gui.SCANCODE_H { on_tool_pan(0) return }
+    if key == gui.SCANCODE_M { on_tool_mrect(0) return }
+    if key == gui.SCANCODE_L { on_tool_lasso(0) return }
+    if key == gui.SCANCODE_T { on_tool_text(0) return }
+
+    // Bracket keys size the brush - the one binding that is muscle memory rather
+    // than a menu equivalent, which is why it earns a key of its own.
+    if key == gui.SCANCODE_LEFTBRACKET { on_radius_down(0) return }
+    if key == gui.SCANCODE_RIGHTBRACKET { on_radius_up(0) return }
+
+    // Escape cancels the gesture in progress rather than quitting. The toolkit
+    // still stops the app on Escape when the app ignores it, so this is a real
+    // override: a user mid-marquee expects Escape to abandon the marquee.
+    if key == gui.SCANCODE_ESCAPE {
+        if paint.stroke_active() {
+            paint.cancel()
+            g_msg = "stroke cancelled"
+            g_dirty = 1
+            return
+        }
+        if g_marq_live == 1 {
+            g_marq_live = 0
+            g_msg = "marquee cancelled"
+            return
+        }
+    }
+}
+
+// Drain one frame's unclaimed keys. Separate from the loop body so the script
+// runner can drive the identical dispatch a keystroke does.
+fn drain_shortcuts(ui: Ui) {
+    var k = 0
+    while k < widgets.Ui_shortcut_count(ui) {
+        handle_shortcut(widgets.Ui_shortcut_at(ui, k), widgets.Ui_shortcut_mod_at(ui, k))
+        k = k + 1
+    }
+}
+
 fn on_sel_invert(id: int) {
     if select.is_empty() {
         // Inverting nothing is selecting everything, which is what a user means
@@ -2373,6 +2463,57 @@ fn run_action(ui: Ui, act: string) -> Ui {
         return ui
     }
 
+    // key:NAME[+cmd][+shift] - a KEYBOARD SHORTCUT, through the identical
+    // dispatch a real keystroke reaches.
+    //
+    // WHY NOT Win_push_key_down HERE. That would be the more faithful driver, but
+    // the shortcut path deliberately runs only for keys the TOOLKIT chose not to
+    // consume, and the toolkit decides that from the polled modifier state - which
+    // a synthetic event does not update under SDL_VIDEODRIVER=dummy. So a pushed
+    // Cmd+Z arrives as a bare Z and tests the wrong branch. Naming the modifier
+    // explicitly tests the dispatch TABLE, which is the part with the branches;
+    // the toolkit's own partition is proved in repos/gui's test_shortcuts.wyn.
+    if act.starts_with("key:") {
+        var spec = act.substring(4, act.len())
+        var kmod = 0
+        if spec.contains("+cmd") {
+            kmod = kmod + gui.KMOD_GUI
+            spec = spec.replace("+cmd", "")
+        }
+        if spec.contains("+shift") {
+            kmod = kmod + gui.KMOD_SHIFT
+            spec = spec.replace("+shift", "")
+        }
+        var kc = 0 - 1
+        if spec == "z" { kc = gui.SCANCODE_Z }
+        if spec == "s" { kc = gui.SCANCODE_S }
+        if spec == "o" { kc = gui.SCANCODE_O }
+        if spec == "a" { kc = gui.SCANCODE_A }
+        if spec == "d" { kc = gui.SCANCODE_D }
+        if spec == "i" { kc = gui.SCANCODE_I }
+        if spec == "b" { kc = gui.SCANCODE_B }
+        if spec == "e" { kc = gui.SCANCODE_E }
+        if spec == "g" { kc = gui.SCANCODE_G }
+        if spec == "h" { kc = gui.SCANCODE_H }
+        if spec == "m" { kc = gui.SCANCODE_M }
+        if spec == "l" { kc = gui.SCANCODE_L }
+        if spec == "t" { kc = gui.SCANCODE_T }
+        if spec == "0" { kc = gui.SCANCODE_0 }
+        if spec == "1" { kc = gui.SCANCODE_1 }
+        if spec == "plus" { kc = gui.SCANCODE_EQUALS }
+        if spec == "minus" { kc = gui.SCANCODE_MINUS }
+        if spec == "lbracket" { kc = gui.SCANCODE_LEFTBRACKET }
+        if spec == "rbracket" { kc = gui.SCANCODE_RIGHTBRACKET }
+        if spec == "escape" { kc = gui.SCANCODE_ESCAPE }
+        if kc == 0 - 1 {
+            print("  key -> unknown key [${spec}]")
+            return ui
+        }
+        handle_shortcut(kc, kmod)
+        print("  key ${spec} -> tool=${paint.tool_name(paint.tool())} sel=${sel_tool_word()} msg=${g_msg}")
+        return ui
+    }
+
     // sel:all|none|invert|feather:N - the whole-document commands, through the
     // same handlers the buttons call.
     if act.starts_with("sel:") {
@@ -2678,6 +2819,12 @@ fn main() -> int {
     var n = 0
     while widgets.Ui_running(ui) == 1 {
         ui = widgets.Ui_events(ui)
+
+        // Keyboard shortcuts, read straight after Ui_events: the toolkit has just
+        // settled focus and recorded whatever no widget claimed. Before the
+        // deferred-request block, so a Cmd+S this frame is serviced this frame
+        // rather than sitting a frame behind the button that does the same thing.
+        drain_shortcuts(ui)
 
         // Service a deferred Open/Save now that the Ui - and so the typed path
         // - is in scope.
