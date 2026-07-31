@@ -73,6 +73,7 @@ fn main() {
         "functions",
         "arrow_bodies",
         "arrow_params",
+        "bitwise",
         "closures",
         "recursion",
         "short_circuit",

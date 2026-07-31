@@ -594,8 +594,12 @@ fn next() {
     if c == "%" { if ch() == "=" { pos = pos + 1; tt = 48; tv = "%="; return } tt = 14; tv = "%"; return }
     if c == "=" { if ch() == "=" { pos = pos + 1; if ch() == "=" { pos = pos + 1; tt = 17; tv = "==="; return } tt = 16; tv = "=="; return } if ch() == ">" { pos = pos + 1; tt = 40; tv = "=>"; return } tt = 15; tv = "="; return }
     if c == "!" { if ch() == "=" { pos = pos + 1; if ch() == "=" { pos = pos + 1; tt = 19; tv = "!=="; return } tt = 18; tv = "!="; return } tt = 24; tv = "!"; return }
-    if c == "<" { if ch() == "=" { pos = pos + 1; tt = 22; tv = "<="; return } tt = 20; tv = "<"; return }
-    if c == ">" { if ch() == "=" { pos = pos + 1; tt = 23; tv = ">="; return } tt = 21; tv = ">"; return }
+    // `<<` and `>>` are checked BEFORE `<=` / `>=`, and `>>>` before `>>`: the
+    // longest match must win or `1 << 4` lexes as `<` then `<`, and `a >>> b`
+    // lexes as `>>` then `>`.
+    if c == "<" { if ch() == "<" { pos = pos + 1; tt = 103; tv = "<<"; return } if ch() == "=" { pos = pos + 1; tt = 22; tv = "<="; return } tt = 20; tv = "<"; return }
+    if c == ">" { if ch() == ">" { pos = pos + 1; if ch() == ">" { pos = pos + 1; tt = 105; tv = ">>>"; return } tt = 104; tv = ">>"; return } if ch() == "=" { pos = pos + 1; tt = 23; tv = ">="; return } tt = 21; tv = ">"; return }
+    if c == "^" { tt = 106; tv = "^"; return }
     if c == "&" { if ch() == "&" { pos = pos + 1; if ch() == "=" { pos = pos + 1; tt = 102; tv = "&&="; return }; tt = 25; tv = "&&"; return } tt = 27; tv = "&"; return }
     if c == "|" { if ch() == "|" { pos = pos + 1; if ch() == "=" { pos = pos + 1; tt = 101; tv = "||="; return }; tt = 26; tv = "||"; return } tt = 28; tv = "|"; return }
     if c == "?" { if ch() == "?" { pos = pos + 1; if ch() == "=" { pos = pos + 1; tt = 100; tv = "??="; return }; tt = 29; tv = "??"; return } if ch() == "." { pos = pos + 1; tt = 96; tv = "?."; return } tt = 97; tv = "?"; return }
@@ -667,16 +671,62 @@ fn p_or() -> string {
 }
 
 fn p_and() -> string {
-    var left = p_eq()
+    var left = p_bitor()
     while tt == 25 {
         next()
         // `a && b`: b is only evaluated when a is truthy.
         var skip = 0
         if vtruthy(left) == 0 { skip = 1 }
         if skip == 1 { noeval = noeval + 1 }
-        var right = p_eq()
+        var right = p_bitor()
         if skip == 1 { noeval = noeval - 1 }
         if skip == 0 { left = right }
+    }
+    return left
+}
+
+// ---- bitwise: | then ^ then & then equality ------------------------------
+//
+// THE ORDER IS JAVASCRIPT'S, and it is the whole reason these are three separate
+// functions rather than one: `a & b | c` must mean `(a & b) | c`, and
+// `1 | 2 ^ 3 & 4` must be `1 | (2 ^ (3 & 4))`. A single level would make them all
+// left-associative peers and quietly give 3 for the second.
+//
+// These sit between `&&` and `==`, so `a & 1 == 1` parses as `a & (1 == 1)` -
+// which is JavaScript's own famous wart, faithfully reproduced rather than
+// silently fixed, because a language implementation that is "better" than the
+// language is the harder thing to debug.
+//
+// Operands go through vtoint, so a float truncates and a numeric string converts,
+// matching JS's ToInt32 closely enough for a teaching interpreter. Wyn's ints are
+// 64-bit where JS coerces to 32, which is visible only past 2^31 - noted here
+// rather than papered over, and it is why `~5` is -6 in both.
+fn p_bitor() -> string {
+    var left = p_bitxor()
+    while tt == 28 {
+        next()
+        var right = p_bitxor()
+        if noeval == 0 { left = vnum(vtonum(left) | vtonum(right)) }
+    }
+    return left
+}
+
+fn p_bitxor() -> string {
+    var left = p_bitand()
+    while tt == 106 {
+        next()
+        var right = p_bitand()
+        if noeval == 0 { left = vnum(vtonum(left) ^ vtonum(right)) }
+    }
+    return left
+}
+
+fn p_bitand() -> string {
+    var left = p_eq()
+    while tt == 27 {
+        next()
+        var right = p_eq()
+        if noeval == 0 { left = vnum(vtonum(left) & vtonum(right)) }
     }
     return left
 }
@@ -694,10 +744,45 @@ fn p_eq() -> string {
     return left
 }
 
-fn p_cmp() -> string {
+// ---- shifts: tighter than a comparison, looser than + ---------------------
+//
+// `1 << 2 + 3` is `1 << 5` in JavaScript, not `(1 << 2) + 3`, and `a << b < c` is
+// `(a << b) < c`. That is what placing this level between p_cmp and p_add buys.
+//
+// `>>` is arithmetic (sign-preserving) and `>>>` is logical. Wyn's `>>` on a
+// signed int is already arithmetic, so `>>` is direct; `>>>` masks to 32 bits
+// FIRST, because a logical shift of a negative number is only meaningful on a
+// fixed width and JS defines it on 32.
+fn p_shift() -> string {
     var left = p_add()
+    while tt == 103 or tt == 104 or tt == 105 {
+        var op = tt
+        next()
+        var right = p_add()
+        if noeval == 0 {
+            var a = vtonum(left)
+            // Only the low 5 bits of the count are used, as JS does: `1 << 32`
+            // is 1, not 0. Without this a large count is undefined behaviour in
+            // C and the answer becomes whatever the hardware happens to do.
+            var n = vtonum(right) % 32
+            if n < 0 { n = n + 32 }
+            if op == 103 { left = vnum(a << n) }
+            if op == 104 { left = vnum(a >> n) }
+            if op == 105 {
+                // Logical: reinterpret as unsigned 32-bit, then shift in zeros.
+                var u = a % 4294967296
+                if u < 0 { u = u + 4294967296 }
+                left = vnum(u >> n)
+            }
+        }
+    }
+    return left
+}
+
+fn p_cmp() -> string {
+    var left = p_shift()
     if tt == 77 {
-        next(); var right = p_add()
+        next(); var right = p_shift()
         if vtag(left) == "o" and vtag(right) == "o" {
             var cls_name = vtostr(right)
             var oid = vdata(left).to_int()
@@ -707,7 +792,7 @@ fn p_cmp() -> string {
         return vbool(0)
     }
     while tt == 20 or tt == 21 or tt == 22 or tt == 23 or tt == 93 {
-        var op = tt; next(); var right = p_add()
+        var op = tt; next(); var right = p_shift()
         if op == 93 {
             if vtag(right) == "o" { left = vbool(ohas(vdata(right).to_int(), vtostr(left))); continue }
             left = vbool(0); continue
@@ -761,6 +846,10 @@ fn p_power() -> string {
 
 fn p_unary() -> string {
     if tt == 11 { next(); return vfloat(0.0 - vtofloat(p_unary())) }
+    // Bitwise NOT. `~5` is -6 because ~x == -(x+1) on two's complement, which
+    // holds at any width - so this is one of the few bitwise results that is
+    // identical whether the operand is treated as 32-bit (JS) or 64-bit (Wyn).
+    if tt == 99 { next(); return vnum(0 - vtonum(p_unary()) - 1) }
     if tt == 24 { next(); if vtruthy(p_unary()) == 1 { return vbool(0) } return vbool(1) }
     if tt == 76 {
         next(); var val = p_unary()
