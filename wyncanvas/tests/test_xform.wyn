@@ -1,0 +1,1074 @@
+// test_xform - the transform engine, asserted on PIXEL VALUES computed by hand
+// from the definitions rather than captured from a previous run.
+//
+// Every claim below is MEASURED: the listed break was applied to
+// csrc/wynimg_xform.c (or src/xform.wyn), the suite was re-run, and the named
+// test was confirmed RED before the code was restored. Where a mutation did NOT
+// kill an assertion that looked like it should, that is recorded too - a test
+// that cannot fail is worse than no test.
+//
+//   * SWAP THE TENT WEIGHTS (`1-t` -> `t`): 5 red, including "bilinear 2x puts
+//     the exact average at the midpoint" and "no DARK HALO". The 2x fixture is
+//     deliberately ASYMMETRIC - a symmetric one is invariant under the swap.
+//
+//   * MAKE rot90 RESAMPLE via the general rotate: "a 90/-90 round trip is
+//     BIT-IDENTICAL" and "180 is two 90s" go red. Those assert EQUALITY, not
+//     approximity, which is exactly what only an index permutation can satisfy.
+//
+//   * AVERAGE UNPREMULTIPLIED COLOUR (unpremultiply, filter, repremultiply):
+//     "no DARK HALO at a fading edge" goes red, plus the midpoint test. This is
+//     the bug the buffer format exists to prevent.
+//
+//   * BREAK THE KEYS COEFFICIENT (-2.5 -> -1.5): "a bicubic resize of a smooth
+//     ramp stays monotonic" goes red - the kernel stops being interpolating.
+//
+//   * DELETE THE MINIFICATION WIDENING (fscale forced to 1.0): both downscale
+//     tests go red. NOTE: this mutation SURVIVED a 4x checkerboard, because at an
+//     even factor the tent's centre lands on a half-integer and takes two equal
+//     taps by luck. The fixture is 3x (48->16) for that reason, and the dot-grid
+//     test covers the even-factor case by asserting total coverage instead.
+//
+//   * DROP THE HALF-PIXEL OFFSETS (`si = i/scale`): 4 red. NOTE: "a 1:1 scale is
+//     bit-identical" does NOT catch this - at scale 1 the two formulas agree - so
+//     the shift is caught by the 2x midpoint values and by scale-vs-affine
+//     agreement, not by the identity test.
+//
+//   * ROUTE NEAREST THROUGH THE FILTER PATH: "nearest 2x replicates each source
+//     pixel exactly" goes red.
+//
+//   * REMOVE THE OVERSHOOT CLAMP in store_px: "bicubic overshoot is CLAMPED"
+//     goes red (negative alpha appears next to a hard step).
+//
+//   * IGNORE A WRONG-SIZED COVERAGE MASK instead of refusing: the masked test
+//     goes red. Silently transforming the whole layer is the failure mode that
+//     destroys work.
+//
+//   * FLIP THE CANVAS ANCHOR SIGN: both canvas tests go red.
+//
+//   * ALWAYS CLAMP TAPS (transparent-border renormalises): the 45-degree
+//     conservation test and the edge-mode test go red.
+//
+//   * REVERSE mat_mul's COMPOSITION ORDER: "mat_mul composes in
+//     apply-second-then-first order" goes red.
+//
+// "canvas resize pads with TRANSPARENT" asserts alpha 0 AND colour 0, because in
+// a premultiplied buffer transparent black and opaque black are the same three
+// RGB values and only alpha tells them apart.
+
+import pixel
+import xform
+
+// ---- fixtures --------------------------------------------------------------
+
+extern fn wynimg_new(w: int, h: int) -> int;
+extern fn wynimg_free(p: int);
+extern fn wynimg_width(p: int) -> int;
+extern fn wynimg_height(p: int) -> int;
+extern fn wynimg_get(p: int, idx: int) -> float;
+extern fn wynimg_set(p: int, idx: int, v: float);
+extern fn wynimg_fill(p: int, r: float, g: float, b: float, a: float);
+extern fn wynimg_pick(p: int, x: int, y: int, chan: int) -> float;
+extern fn wynimg_max_diff(a: int, b: int) -> float;
+
+// Raw STORED (premultiplied) channel of pixel (x,y). Deliberately not
+// wynimg_pick: pick divides by alpha and clamps, which is the right read for a
+// colour but hides a stored value that violates colour <= alpha.
+fn raw(buf: int, x: int, y: int, c: int) -> float {
+    return wynimg_get(buf, pixel.px_index(wynimg_width(buf), x, y, c))
+}
+
+// Writes one PREMULTIPLIED pixel. `r,g,b` are UNPREMULTIPLIED linear values, so
+// every fixture is stated in the units a person reasons in.
+fn put(buf: int, x: int, y: int, r: float, g: float, b: float, a: float) {
+    var w = wynimg_width(buf)
+    wynimg_set(buf, pixel.px_index(w, x, y, 0), r * a)
+    wynimg_set(buf, pixel.px_index(w, x, y, 1), g * a)
+    wynimg_set(buf, pixel.px_index(w, x, y, 2), b * a)
+    wynimg_set(buf, pixel.px_index(w, x, y, 3), a)
+}
+
+fn tol() -> float { return 0.0005 }
+
+// ---- identity and exactness ------------------------------------------------
+
+test "a 1:1 scale is bit-identical to the input, for every kernel" {
+    // The half-pixel convention is what makes this true: an output pixel centre
+    // lands exactly on a source pixel centre, and both bilinear and bicubic
+    // interpolate (k(0)=1, k(+-1)=0), so a single tap of weight 1 is taken.
+    // Drop the -0.5 and every value here moves.
+    var src = wynimg_new(5, 4)
+    wynimg_fill(src, 0.0, 0.0, 0.0, 0.0)
+    put(src, 0, 0, 1.0, 0.0, 0.0, 1.0)
+    put(src, 4, 3, 0.0, 0.25, 0.75, 0.5)
+    put(src, 2, 1, 0.3, 0.6, 0.9, 1.0)
+
+    var k = 0
+    while k < 3 {
+        var out = xform.scale(src, 5, 4, k)
+        assert(out != 0)
+        assert_eq(wynimg_width(out), 5)
+        assert_eq(wynimg_height(out), 4)
+        // max_diff is exactly 0 only if every one of the 80 channels matches.
+        assert_eq(wynimg_max_diff(src, out), 0.0)
+        wynimg_free(out)
+        k = k + 1
+    }
+    wynimg_free(src)
+}
+
+test "nearest of a 2x upscale replicates each source pixel exactly" {
+    // Every output pixel must BE a source pixel, bit for bit - that is the whole
+    // contract of nearest, and the reason it is not routed through the filter
+    // weight machinery.
+    var src = wynimg_new(2, 2)
+    wynimg_fill(src, 0.0, 0.0, 0.0, 0.0)
+    put(src, 0, 0, 1.0, 0.0, 0.0, 1.0)
+    put(src, 1, 0, 0.0, 1.0, 0.0, 1.0)
+    put(src, 0, 1, 0.0, 0.0, 1.0, 1.0)
+    put(src, 1, 1, 1.0, 1.0, 0.0, 0.5)
+
+    var out = xform.scale(src, 4, 4, xform.kern_nearest())
+    assert(out != 0)
+    assert_eq(wynimg_width(out), 4)
+    assert_eq(wynimg_height(out), 4)
+
+    // The 2x2 block at (0,0)..(1,1) is all red; (2,0)..(3,1) all green;
+    // (0,2)..(1,3) all blue; (2,2)..(3,3) the half-alpha yellow (stored 0.5).
+    assert_eq(raw(out, 0, 0, 0), 1.0)
+    assert_eq(raw(out, 1, 1, 0), 1.0)
+    assert_eq(raw(out, 1, 1, 1), 0.0)
+    assert_eq(raw(out, 2, 0, 1), 1.0)
+    assert_eq(raw(out, 3, 1, 1), 1.0)
+    assert_eq(raw(out, 0, 3, 2), 1.0)
+    assert_eq(raw(out, 1, 2, 2), 1.0)
+    assert_eq(raw(out, 3, 3, 3), 0.5)
+    assert_eq(raw(out, 2, 2, 0), 0.5)
+    wynimg_free(out)
+    wynimg_free(src)
+}
+
+test "bilinear of a 2x upscale puts the exact midpoint average at the midpoint" {
+    // A 4x1 source of alphas 0, 1, 0, 1 upscaled 2x horizontally. Output pixel
+    // centres land in source index space at
+    //   x=0 -> -0.25 (clamped tap set), 1 -> 0.25, 2 -> 0.75, 3 -> 1.25, ...
+    // so output 1 is 0.75*src0 + 0.25*src1 and output 2 is 0.25*src0+0.75*src1.
+    // The MIDPOINT between src1 and src2 is output x=3.5, which is not a pixel;
+    // the exact 50/50 average of two neighbours appears when the two taps have
+    // equal weight, i.e. at a half-integer source position. With 4->8 that is
+    // output 1.5, so instead assert the pair 0.75/0.25 and 0.25/0.75 which sum
+    // to exactly the average - swapping the tent weights exchanges them and the
+    // ASYMMETRIC fixture makes that visible.
+    var src = wynimg_new(4, 1)
+    wynimg_fill(src, 0.0, 0.0, 0.0, 0.0)
+    put(src, 0, 0, 1.0, 1.0, 1.0, 1.0)
+    put(src, 1, 0, 0.0, 0.0, 0.0, 0.0)
+    put(src, 2, 0, 1.0, 1.0, 1.0, 1.0)
+    put(src, 3, 0, 0.0, 0.0, 0.0, 0.0)
+
+    var out = xform.scale(src, 8, 1, xform.kern_bilinear())
+    assert(out != 0)
+    assert(pixel.approx(raw(out, 1, 0, 3), 0.75, tol()))
+    assert(pixel.approx(raw(out, 2, 0, 3), 0.25, tol()))
+    assert(pixel.approx(raw(out, 3, 0, 3), 0.25, tol()))
+    assert(pixel.approx(raw(out, 4, 0, 3), 0.75, tol()))
+    wynimg_free(out)
+
+    // And the true midpoint case: a 2x1 source scaled to 3x1 puts output pixel 1
+    // exactly halfway between the two source centres, so its value is the exact
+    // average 0.5 with equal weights. This is the assertion that a weight swap
+    // cannot survive together with the pair above.
+    var s2 = wynimg_new(2, 1)
+    wynimg_fill(s2, 0.0, 0.0, 0.0, 0.0)
+    put(s2, 0, 0, 1.0, 1.0, 1.0, 1.0)
+    put(s2, 1, 0, 0.0, 0.0, 0.0, 0.0)
+    var o2 = xform.scale(s2, 3, 1, xform.kern_bilinear())
+    assert(o2 != 0)
+    assert(pixel.approx(raw(o2, 1, 0, 3), 0.5, tol()))
+    assert(pixel.approx(raw(o2, 1, 0, 0), 0.5, tol()))
+    wynimg_free(o2)
+    wynimg_free(s2)
+    wynimg_free(src)
+}
+
+// ---- exact integer paths ---------------------------------------------------
+
+test "a 90 then -90 round trip is BIT-IDENTICAL" {
+    // EQUALITY, not approximity. Only an index permutation can pass this; the
+    // general rotate at 90 degrees uses cos(pi/2) = 6.1e-17 and returns a
+    // fractionally filtered image that fails it. This assertion IS the proof
+    // that the exact path exists and is taken.
+    var src = wynimg_new(7, 3)
+    wynimg_fill(src, 0.0, 0.0, 0.0, 0.0)
+    put(src, 0, 0, 1.0, 0.0, 0.0, 1.0)
+    put(src, 6, 0, 0.0, 1.0, 0.0, 1.0)
+    put(src, 3, 1, 0.2, 0.4, 0.6, 0.375)
+    put(src, 6, 2, 0.0, 0.0, 1.0, 1.0)
+
+    var cw = xform.rot_cw(src)
+    assert(cw != 0)
+    assert_eq(wynimg_width(cw), 3)
+    assert_eq(wynimg_height(cw), 7)
+    var back = xform.rot_ccw(cw)
+    assert(back != 0)
+    assert_eq(wynimg_width(back), 7)
+    assert_eq(wynimg_height(back), 3)
+    assert_eq(wynimg_max_diff(src, back), 0.0)
+
+    // And 90 lands where it should: source (0,0) goes to (h-1, 0) = (2,0).
+    assert_eq(raw(cw, 2, 0, 0), 1.0)
+    assert_eq(raw(cw, 2, 6, 1), 1.0)
+    wynimg_free(back)
+    wynimg_free(cw)
+    wynimg_free(src)
+}
+
+test "180 is two 90s and four 90s are the identity" {
+    var src = wynimg_new(5, 2)
+    wynimg_fill(src, 0.0, 0.0, 0.0, 0.0)
+    put(src, 0, 0, 1.0, 0.0, 0.0, 1.0)
+    put(src, 4, 1, 0.0, 0.5, 1.0, 0.25)
+
+    var a = xform.rot_cw(src)
+    var b = xform.rot_cw(a)
+    var direct = xform.rot_180(src)
+    assert_eq(wynimg_max_diff(b, direct), 0.0)
+
+    var c = xform.rot_cw(b)
+    var d = xform.rot_cw(c)
+    assert_eq(wynimg_max_diff(src, d), 0.0)
+    wynimg_free(a) wynimg_free(b) wynimg_free(c) wynimg_free(d)
+    wynimg_free(direct)
+    wynimg_free(src)
+
+    // A negative quarter count is 270, so rot90(-1) == rot_ccw.
+    var s2 = wynimg_new(3, 4)
+    wynimg_fill(s2, 0.5, 0.0, 0.0, 1.0)
+    put(s2, 0, 3, 0.0, 1.0, 0.0, 1.0)
+    var neg = xform.rot90(s2, 0 - 1)
+    var ccw = xform.rot_ccw(s2)
+    assert_eq(wynimg_max_diff(neg, ccw), 0.0)
+    wynimg_free(neg) wynimg_free(ccw) wynimg_free(s2)
+}
+
+test "flip twice is the identity, on both axes" {
+    var src = wynimg_new(4, 3)
+    wynimg_fill(src, 0.0, 0.0, 0.0, 0.0)
+    put(src, 0, 0, 1.0, 0.0, 0.0, 1.0)
+    put(src, 3, 0, 0.0, 1.0, 0.0, 1.0)
+    put(src, 1, 2, 0.0, 0.0, 1.0, 0.5)
+
+    var h1 = xform.flip_h(src)
+    // The mirror actually happened: (0,0) is now at (3,0).
+    assert_eq(raw(h1, 3, 0, 0), 1.0)
+    assert_eq(raw(h1, 0, 0, 1), 1.0)
+    var h2 = xform.flip_h(h1)
+    assert_eq(wynimg_max_diff(src, h2), 0.0)
+
+    var v1 = xform.flip_v(src)
+    assert_eq(raw(v1, 1, 0, 2), 0.5)
+    var v2 = xform.flip_v(v1)
+    assert_eq(wynimg_max_diff(src, v2), 0.0)
+
+    wynimg_free(h1) wynimg_free(h2) wynimg_free(v1) wynimg_free(v2)
+    wynimg_free(src)
+}
+
+// ---- rotation by an arbitrary angle ----------------------------------------
+
+test "rotating a solid rect by 45 degrees conserves approximate total alpha" {
+    // Nothing may vanish. The bounding box grows to hold the whole rotated
+    // square, and transparent-border edges antialias, so the total coverage is
+    // preserved to within the boundary pixels' worth of rounding. A dropped tap
+    // or an unnormalised kernel loses energy here and no single-pixel assertion
+    // would notice.
+    var src = wynimg_new(32, 32)
+    wynimg_fill(src, 1.0, 1.0, 1.0, 1.0)
+    var before = xform.alpha_sum(src)
+    assert(pixel.approx(before, 1024.0, 0.01))
+
+    var out = xform.rotate(src, 45.0, xform.kern_bilinear(),
+                           xform.edge_transparent())
+    assert(out != 0)
+    // 32*sqrt(2) = 45.25 -> a 46x46 box.
+    assert_eq(wynimg_width(out), 46)
+    assert_eq(wynimg_height(out), 46)
+    var after = xform.alpha_sum(out)
+    // 1% tolerance: the exact figure depends on how the antialiased rim
+    // discretises, which is a property of the kernel, not of conservation.
+    assert(after > before * 0.99)
+    assert(after < before * 1.01)
+    wynimg_free(out)
+    wynimg_free(src)
+}
+
+test "a 360-degree rotation returns to the original size and near-original pixels" {
+    var src = wynimg_new(16, 16)
+    wynimg_fill(src, 0.0, 0.0, 0.0, 0.0)
+    var y = 4
+    while y < 12 {
+        var x = 4
+        while x < 12 {
+            put(src, x, y, 1.0, 0.5, 0.0, 1.0)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    // 360 degrees: cos = 1, sin = -2.4e-16, so the bounding box is still 16x16
+    // and every tap is essentially integer-aligned. This checks the bounding-box
+    // and centre-correction maths, which a 45-degree test cannot isolate.
+    var out = xform.rotate(src, 360.0, xform.kern_bilinear(), xform.edge_clamp())
+    assert(out != 0)
+    assert_eq(wynimg_width(out), 16)
+    assert_eq(wynimg_height(out), 16)
+    assert(wynimg_max_diff(src, out) < 0.001)
+    wynimg_free(out)
+    wynimg_free(src)
+}
+
+test "clamp-to-edge keeps an opaque frame opaque; transparent-border does not" {
+    // The two edge modes are an explicit parameter because both answers are
+    // right for different pictures. A tiny angle is used so the corner pixel is
+    // still fed mostly by the border - the mode, not the geometry, is what
+    // differs.
+    var src = wynimg_new(16, 16)
+    wynimg_fill(src, 1.0, 1.0, 1.0, 1.0)
+
+    var c = xform.rotate(src, 0.0001, xform.kern_bilinear(), xform.edge_clamp())
+    var t = xform.rotate(src, 0.0001, xform.kern_bilinear(),
+                         xform.edge_transparent())
+    assert(c != 0)
+    assert(t != 0)
+    // Middle of the top edge: clamp extends the opaque row outward.
+    assert(pixel.approx(raw(c, 8, 0, 3), 1.0, tol()))
+    // Transparent-border has no content above, so the same pixel loses coverage.
+    assert(raw(t, 8, 0, 3) < raw(c, 8, 0, 3))
+    wynimg_free(c) wynimg_free(t) wynimg_free(src)
+}
+
+// ---- downscale antialiasing ------------------------------------------------
+
+test "a heavy downscale of a 1px checkerboard does not alias to a solid" {
+    // THE aliasing test. A 1px checkerboard is the highest frequency the grid
+    // can carry; point-sampling it hits one phase and returns a SOLID field -
+    // the entire signal gone. The widened minification footprint averages the
+    // source pixels that fall under each output pixel, so the correct
+    // band-limited answer is a uniform ~0.5.
+    //
+    // THE FACTOR IS 3x, NOT 4x, AND THAT IS THE WHOLE POINT OF THIS FIXTURE.
+    // At an EVEN reduction the tent's centre lands on a half-integer source
+    // position, so even the UNWIDENED filter takes two equal taps and returns
+    // 0.5 by luck - a 4x checkerboard passes with the prefilter deleted, which
+    // is a test that proves nothing. Measured 48->16 (3x): widened gives
+    // 0.506/0.494, unwidened gives 1.0/0.0. So the odd factor is what makes
+    // this assertion detect the missing prefilter, and it must stay odd.
+    var n = 48
+    var src = wynimg_new(n, n)
+    wynimg_fill(src, 0.0, 0.0, 0.0, 0.0)
+    var y = 0
+    while y < n {
+        var x = 0
+        while x < n {
+            // A parenthesised expression cannot open an `if` condition here
+            // (the parser reads `(` as a grouping it then cannot place), so the
+            // parity goes through a named value.
+            var par = x + y
+            if par % 2 == 0 { put(src, x, y, 1.0, 1.0, 1.0, 1.0) }
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    // Both filtered kernels must band-limit. Bicubic is checked too, because it
+    // shares the widening code and a "bicubic looks sharper" tweak that skipped
+    // it would alias identically.
+    var k = 1
+    while k < 3 {
+        var out = xform.scale(src, 16, 16, k)
+        assert(out != 0)
+        assert_eq(wynimg_width(out), 16)
+        // Interior pixels: uniform ~0.5, never 0.0 and never 1.0. The band is
+        // 0.42..0.58 - a tent prefilter is not a perfect box, but a point-
+        // sampled result is exactly 0.0 or 1.0 and cannot fit inside it.
+        var j = 2
+        while j < 14 {
+            var i = 2
+            while i < 14 {
+                var a = raw(out, i, j, 3)
+                assert(a > 0.42)
+                assert(a < 0.58)
+                i = i + 1
+            }
+            j = j + 1
+        }
+        wynimg_free(out)
+        k = k + 1
+    }
+
+    // NEAREST is documented as NOT prefiltering - it is the crisp pixel-art
+    // mode - so it MUST alias here, and asserting that is what stops someone
+    // "fixing" nearest into a second bilinear.
+    //
+    // The assertion is that every output value is EXACTLY 0.0 or 1.0, i.e. a
+    // verbatim source sample with no averaging anywhere. It is put this way
+    // rather than as "the result is solid" because a 3x nearest reduction hits a
+    // DIFFERENT phase on each output pixel (source indices 1,4,7,10... alternate
+    // parity), so it moires rather than flattening - which is aliasing just the
+    // same, and the bimodality is what survives whatever the factor is.
+    var nn = xform.scale(src, 16, 16, xform.kern_nearest())
+    assert(nn != 0)
+    var bimodal = true
+    var q = 0
+    while q < 16 {
+        var p = 0
+        while p < 16 {
+            var a = raw(nn, p, q, 3)
+            if a != 0.0 {
+                if a != 1.0 { bimodal = false }
+            }
+            p = p + 1
+        }
+        q = q + 1
+    }
+    assert_true(bimodal)
+    wynimg_free(nn)
+    wynimg_free(src)
+}
+
+test "a heavy downscale preserves total coverage: sparse dots do not brighten" {
+    // The other half of the prefilter's job, and the half a checkerboard cannot
+    // see. A 1-in-16 dot grid has mean alpha 1/16 = 0.0625. Reduced 4x, each
+    // output pixel covers a 4x4 source block containing exactly one dot, so the
+    // right answer is 0.0625 everywhere.
+    //
+    // WITHOUT the widened footprint the taps land ON the dots and every output
+    // pixel comes back 0.25 - the image is FOUR TIMES too bright and the total
+    // coverage has quadrupled from 3.88 to 16.0. Measured both ways. This is the
+    // assertion that fails at an EVEN reduction factor, where the checkerboard
+    // above passes by phase luck.
+    var src = wynimg_new(32, 32)
+    wynimg_fill(src, 0.0, 0.0, 0.0, 0.0)
+    var j = 0
+    while j < 32 {
+        var i = 0
+        while i < 32 {
+            if i % 4 == 1 {
+                if j % 4 == 1 { put(src, i, j, 1.0, 1.0, 1.0, 1.0) }
+            }
+            i = i + 1
+        }
+        j = j + 1
+    }
+    var out = xform.scale(src, 8, 8, xform.kern_bilinear())
+    assert(out != 0)
+    var y = 1
+    while y < 7 {
+        var x = 1
+        while x < 7 {
+            assert(pixel.approx(raw(out, x, y, 3), 0.0625, 0.02))
+            x = x + 1
+        }
+        y = y + 1
+    }
+    // And in aggregate: 64 source dots at 1/16 scale is ~4 units of coverage,
+    // not 16.
+    var sum = xform.alpha_sum(out)
+    assert(sum > 3.0)
+    assert(sum < 5.0)
+    wynimg_free(out)
+    wynimg_free(src)
+}
+
+test "a downscale of a uniform field is unchanged" {
+    // A prefilter whose weights do not sum to 1 darkens and de-opacifies here,
+    // the same way an unnormalised gaussian does in the blur engine. No pixel
+    // assertion elsewhere in this file would catch that.
+    var src = wynimg_new(64, 64)
+    wynimg_fill(src, 0.5, 0.25, 0.125, 1.0)
+    var k = 1
+    while k < 3 {
+        var out = xform.scale(src, 7, 5, k)
+        assert(out != 0)
+        assert(pixel.approx(raw(out, 3, 2, 0), 0.5, tol()))
+        assert(pixel.approx(raw(out, 3, 2, 1), 0.25, tol()))
+        assert(pixel.approx(raw(out, 3, 2, 3), 1.0, tol()))
+        // Including the CORNER, where clamp-to-edge is what keeps it opaque.
+        assert(pixel.approx(raw(out, 0, 0, 3), 1.0, tol()))
+        assert(pixel.approx(raw(out, 6, 4, 3), 1.0, tol()))
+        wynimg_free(out)
+        k = k + 1
+    }
+    wynimg_free(src)
+}
+
+// ---- bicubic ---------------------------------------------------------------
+
+test "a bicubic resize of a smooth ramp stays monotonic" {
+    // Catmull-Rom overshoots at a STEP; on a smooth (linear) ramp it must not
+    // invent a wiggle. Non-monotonicity here would mean the kernel is not a
+    // valid interpolating cubic - e.g. wrong Keys coefficients.
+    var n = 16
+    var src = wynimg_new(n, 1)
+    var i = 0
+    while i < n {
+        var v = i.to_float() / (n - 1).to_float()
+        put(src, i, 0, v, v, v, 1.0)
+        i = i + 1
+    }
+    var out = xform.scale(src, 61, 1, xform.kern_bicubic())
+    assert(out != 0)
+    var prev = 0.0 - 1.0
+    var x = 0
+    while x < 61 {
+        var v = raw(out, x, 0, 0)
+        assert(v >= prev - 0.0000001)
+        prev = v
+        x = x + 1
+    }
+    // Endpoints are interpolated exactly, so the ramp still spans 0..1.
+    assert(pixel.approx(raw(out, 0, 0, 0), 0.0, 0.02))
+    assert(pixel.approx(raw(out, 60, 0, 0), 1.0, 0.02))
+    wynimg_free(out)
+    wynimg_free(src)
+}
+
+test "bicubic overshoot at a hard step is CLAMPED into the premultiplied domain" {
+    // The decision, tested: overshoot is clamped to alpha in [0,1] and colour in
+    // [0, alpha]. Unclamped, Catmull-Rom's negative lobes put a NEGATIVE alpha
+    // next to a hard edge, which is not a representable premultiplied pixel and
+    // makes a backdrop BRIGHTER when composited. Removing the clamp in store_px
+    // turns this red.
+    var src = wynimg_new(8, 1)
+    wynimg_fill(src, 0.0, 0.0, 0.0, 0.0)
+    var i = 4
+    while i < 8 {
+        put(src, i, 0, 1.0, 1.0, 1.0, 1.0)
+        i = i + 1
+    }
+    var out = xform.scale(src, 32, 1, xform.kern_bicubic())
+    assert(out != 0)
+    var x = 0
+    while x < 32 {
+        var a = raw(out, x, 0, 3)
+        var r = raw(out, x, 0, 0)
+        assert(a >= 0.0)
+        assert(a <= 1.0)
+        assert(r >= 0.0)
+        // colour <= alpha is the premultiplied invariant.
+        assert(r <= a + 0.0000001)
+        x = x + 1
+    }
+    wynimg_free(out)
+    wynimg_free(src)
+}
+
+// ---- crop and canvas -------------------------------------------------------
+
+test "crop takes the right rectangle, pixel for pixel" {
+    var src = wynimg_new(8, 8)
+    wynimg_fill(src, 0.0, 0.0, 0.0, 0.0)
+    // A unique marker in each corner of the rect we will ask for: (2,3)..(5,6).
+    put(src, 2, 3, 1.0, 0.0, 0.0, 1.0)
+    put(src, 5, 3, 0.0, 1.0, 0.0, 1.0)
+    put(src, 2, 6, 0.0, 0.0, 1.0, 1.0)
+    put(src, 5, 6, 1.0, 1.0, 0.0, 1.0)
+    // And a pixel just OUTSIDE it, which must not appear.
+    put(src, 6, 6, 0.5, 0.5, 0.5, 1.0)
+
+    var out = xform.crop(src, 2, 3, 4, 4)
+    assert(out != 0)
+    assert_eq(wynimg_width(out), 4)
+    assert_eq(wynimg_height(out), 4)
+    assert_eq(raw(out, 0, 0, 0), 1.0)
+    assert_eq(raw(out, 3, 0, 1), 1.0)
+    assert_eq(raw(out, 0, 3, 2), 1.0)
+    assert_eq(raw(out, 3, 3, 0), 1.0)
+    assert_eq(raw(out, 3, 3, 1), 1.0)
+    // The neighbour at source (6,6) would land at (4,3) - off the end - so
+    // nothing inside the crop carries its 0.5.
+    assert_eq(raw(out, 1, 1, 0), 0.0)
+    wynimg_free(out)
+
+    // A rect hanging off the edge is not an error; the uncovered part is
+    // transparent. This is what "crop to the marquee" needs.
+    var over = xform.crop(src, 6, 6, 4, 4)
+    assert(over != 0)
+    assert_eq(wynimg_width(over), 4)
+    assert_eq(raw(over, 0, 0, 0), 0.5)
+    assert_eq(raw(over, 3, 3, 3), 0.0)
+    wynimg_free(over)
+    wynimg_free(src)
+}
+
+test "canvas resize pads with TRANSPARENT, not black" {
+    // In a premultiplied buffer, transparent black and opaque black BOTH store
+    // 0,0,0 in RGB. Only alpha distinguishes them, so asserting colour alone
+    // proves nothing - this checks alpha 0 AND colour 0.
+    var src = wynimg_new(4, 4)
+    wynimg_fill(src, 1.0, 1.0, 1.0, 1.0)
+
+    var out = xform.canvas(src, 8, 8, xform.anchor_top_left())
+    assert(out != 0)
+    assert_eq(wynimg_width(out), 8)
+    assert_eq(wynimg_height(out), 8)
+    // Original content, untouched.
+    assert_eq(raw(out, 0, 0, 3), 1.0)
+    assert_eq(raw(out, 3, 3, 3), 1.0)
+    // The pad.
+    assert_eq(raw(out, 7, 7, 3), 0.0)
+    assert_eq(raw(out, 7, 7, 0), 0.0)
+    assert_eq(raw(out, 7, 7, 1), 0.0)
+    assert_eq(raw(out, 7, 7, 2), 0.0)
+    assert_eq(raw(out, 4, 0, 3), 0.0)
+    assert_eq(raw(out, 0, 4, 3), 0.0)
+    wynimg_free(out)
+
+    // Centre anchor: a 4x4 into an 8x8 leaves 2 on each side.
+    var ctr = xform.canvas(src, 8, 8, xform.anchor_centre())
+    assert(ctr != 0)
+    assert_eq(raw(ctr, 1, 1, 3), 0.0)
+    assert_eq(raw(ctr, 2, 2, 3), 1.0)
+    assert_eq(raw(ctr, 5, 5, 3), 1.0)
+    assert_eq(raw(ctr, 6, 6, 3), 0.0)
+    wynimg_free(ctr)
+
+    // Bottom-right anchor puts the content against the far corner.
+    var br = xform.canvas(src, 8, 8, xform.anchor_bottom_right())
+    assert(br != 0)
+    assert_eq(raw(br, 7, 7, 3), 1.0)
+    assert_eq(raw(br, 3, 3, 3), 0.0)
+    assert_eq(raw(br, 4, 4, 3), 1.0)
+    wynimg_free(br)
+
+    // CROP AND CANVAS ARE DIFFERENT OPERATIONS. Same size argument, different
+    // result: crop(0,0,8,8) takes a rectangle of the picture and pads the rest
+    // the same way here, but canvas with a bottom-right anchor MOVES the content.
+    // If canvas were quietly implemented as crop-at-origin these would agree.
+    var cr = xform.crop(src, 0, 0, 8, 8)
+    assert(wynimg_max_diff(cr, br) > 0.5)
+    wynimg_free(cr)
+    wynimg_free(src)
+}
+
+test "canvas resize can shrink, cropping symmetrically about the anchor" {
+    var src = wynimg_new(8, 8)
+    wynimg_fill(src, 0.0, 0.0, 0.0, 0.0)
+    put(src, 4, 4, 1.0, 0.0, 0.0, 1.0)
+    var out = xform.canvas(src, 4, 4, xform.anchor_centre())
+    assert(out != 0)
+    assert_eq(wynimg_width(out), 4)
+    // (8-4)/2 = 2, so source (4,4) lands at (2,2).
+    assert_eq(raw(out, 2, 2, 0), 1.0)
+    wynimg_free(out)
+    wynimg_free(src)
+}
+
+// ---- premultiplied correctness ---------------------------------------------
+
+test "a transform of a semi-transparent pixel preserves its unpremultiplied colour" {
+    // A uniform field of 50%-opaque saturated red. Any resample of it must come
+    // back as 50%-opaque saturated red: the stored value is 0.5 and the
+    // unpremultiplied colour is 1.0. Averaging unpremultiplied colour would work
+    // here too - which is why the NEXT test does it at an edge, where the two
+    // behaviours diverge.
+    var src = wynimg_new(16, 16)
+    wynimg_fill(src, 0.5, 0.0, 0.0, 0.5)
+    var k = 0
+    while k < 3 {
+        var out = xform.scale(src, 9, 11, k)
+        assert(out != 0)
+        assert(pixel.approx(raw(out, 4, 5, 3), 0.5, tol()))
+        assert(pixel.approx(raw(out, 4, 5, 0), 0.5, tol()))
+        // Read through pick (which unpremultiplies) - the colour is still 1.0.
+        assert(pixel.approx(wynimg_pick(out, 4, 5, 0), 1.0, tol()))
+        wynimg_free(out)
+        k = k + 1
+    }
+    wynimg_free(src)
+}
+
+test "filtering premultiplied data gives no DARK HALO at a fading edge" {
+    // THE dark-halo test, and the reason this engine works on premultiplied
+    // data at all.
+    //
+    // Two pixels: opaque WHITE, then fully transparent. The transparent pixel's
+    // COLOUR is undefined and stored as 0 (black). Scaled up, the pixel that
+    // straddles the boundary must be WHITE at partial coverage - stored
+    // (0.5,0.5,0.5,0.5), i.e. an unpremultiplied colour of 1.0.
+    //
+    // Unpremultiply-then-average gives colour (1+0)/2 = 0.5 GREY at alpha 0.5,
+    // which stores as 0.25: the white has gone grey purely because it faded out.
+    // That 0.25-vs-0.5 gap is the halo, and this assertion is what catches it.
+    var src = wynimg_new(2, 1)
+    wynimg_fill(src, 0.0, 0.0, 0.0, 0.0)
+    put(src, 0, 0, 1.0, 1.0, 1.0, 1.0)
+
+    var out = xform.scale(src, 4, 1, xform.kern_bilinear())
+    assert(out != 0)
+    // Output x=1 is 0.75*src0 + 0.25*src1 -> alpha 0.75, stored colour 0.75.
+    // Output x=2 is 0.25/0.75 -> alpha 0.25, stored colour 0.25.
+    // In both, stored colour == alpha, i.e. unpremultiplied WHITE.
+    assert(pixel.approx(raw(out, 1, 0, 0), raw(out, 1, 0, 3), tol()))
+    assert(pixel.approx(raw(out, 2, 0, 0), raw(out, 2, 0, 3), tol()))
+    assert(pixel.approx(raw(out, 2, 0, 3), 0.25, tol()))
+    assert(pixel.approx(wynimg_pick(out, 2, 0, 0), 1.0, tol()))
+    wynimg_free(out)
+    wynimg_free(src)
+}
+
+// ---- affine ----------------------------------------------------------------
+
+test "an identity affine is bit-identical and a pure translate shifts exactly" {
+    var src = wynimg_new(6, 5)
+    wynimg_fill(src, 0.0, 0.0, 0.0, 0.0)
+    put(src, 1, 1, 1.0, 0.0, 0.0, 1.0)
+    put(src, 4, 3, 0.0, 1.0, 0.0, 0.75)
+
+    var id = xform.affine(src, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 6, 5,
+                          xform.kern_bilinear(), xform.edge_transparent())
+    assert(id != 0)
+    assert_eq(wynimg_max_diff(src, id), 0.0)
+    wynimg_free(id)
+
+    // An INTEGER translate is exact too: the taps land on pixel centres.
+    var tr = xform.affine(src, 1.0, 0.0, 0.0, 1.0, 2.0, 1.0, 6, 5,
+                          xform.kern_bilinear(), xform.edge_transparent())
+    assert(tr != 0)
+    assert(pixel.approx(raw(tr, 3, 2, 0), 1.0, tol()))
+    assert(pixel.approx(raw(tr, 1, 1, 3), 0.0, tol()))
+    wynimg_free(tr)
+    wynimg_free(src)
+}
+
+test "an affine scale matches the dedicated scale on an upscale" {
+    // Both paths must agree where they overlap, or a caller composing a matrix
+    // gets a different answer than one calling scale() - the kind of divergence
+    // that only shows up as a seam between two layers.
+    var src = wynimg_new(8, 8)
+    wynimg_fill(src, 0.0, 0.0, 0.0, 0.0)
+    put(src, 2, 2, 1.0, 0.5, 0.25, 1.0)
+    put(src, 5, 5, 0.0, 0.0, 1.0, 0.5)
+
+    var byscale = xform.scale(src, 16, 16, xform.kern_bilinear())
+    var byaff = xform.affine(src, 2.0, 0.0, 0.0, 2.0, 0.0, 0.0, 16, 16,
+                             xform.kern_bilinear(), xform.edge_clamp())
+    assert(byscale != 0)
+    assert(byaff != 0)
+    // Not bit-identical - separable-with-clamp and 2D-with-clamp round
+    // differently at the border - but they must agree to well within a
+    // perceptible amount.
+    assert(wynimg_max_diff(byscale, byaff) < 0.02)
+    wynimg_free(byscale) wynimg_free(byaff)
+    wynimg_free(src)
+}
+
+test "affine auto-sizes to the transformed bounding box" {
+    var src = wynimg_new(10, 4)
+    wynimg_fill(src, 1.0, 1.0, 1.0, 1.0)
+    // A pure 3x scale in x, 2x in y, with ow/oh <= 0 so the box is computed.
+    var out = xform.affine(src, 3.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0, 0,
+                           xform.kern_bilinear(), xform.edge_clamp())
+    assert(out != 0)
+    assert_eq(wynimg_width(out), 30)
+    assert_eq(wynimg_height(out), 8)
+    wynimg_free(out)
+    wynimg_free(src)
+}
+
+test "a singular affine matrix is refused rather than silently losing the layer" {
+    var src = wynimg_new(4, 4)
+    wynimg_fill(src, 1.0, 1.0, 1.0, 1.0)
+    // Determinant 0: both axes map onto the same line.
+    assert_eq(xform.affine(src, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 4, 4,
+                           xform.kern_bilinear(), xform.edge_clamp()), 0)
+    assert_eq(xform.affine(src, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0,
+                           xform.kern_bilinear(), xform.edge_clamp()), 0)
+    wynimg_free(src)
+}
+
+test "ONE composed affine beats two passes: scale+rotate stays sharper" {
+    // The claim in the header, measured. A hard edge scaled 2x and then rotated
+    // 30 degrees in TWO passes is filtered twice, so its transition is wider
+    // than the same transform composed into one matrix. "Wider" is measured as
+    // the count of intermediate (neither 0 nor near-1) alpha values along a row.
+    var n = 24
+    var src = wynimg_new(n, n)
+    wynimg_fill(src, 0.0, 0.0, 0.0, 0.0)
+    var y = 0
+    while y < n {
+        var x = 0
+        while x < n {
+            if x >= 8 and x < 16 and y >= 8 and y < 16 {
+                put(src, x, y, 1.0, 1.0, 1.0, 1.0)
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    var two_a = xform.scale(src, 48, 48, xform.kern_bilinear())
+    var two = xform.rotate(two_a, 30.0, xform.kern_bilinear(),
+                           xform.edge_transparent())
+    assert(two != 0)
+
+    // The same thing as one matrix: rotate-about-centre composed with scale 2.
+    var cx = 24.0
+    var cy = 24.0
+    var ra = xform.mat_rotate(30.0, cx, cy, 0)
+    var rb = xform.mat_rotate(30.0, cx, cy, 1)
+    var rc = xform.mat_rotate(30.0, cx, cy, 2)
+    var rd = xform.mat_rotate(30.0, cx, cy, 3)
+    var re = xform.mat_rotate(30.0, cx, cy, 4)
+    var rf = xform.mat_rotate(30.0, cx, cy, 5)
+    var ma = xform.mat_mul(ra, rb, rc, rd, re, rf, 2.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0)
+    var mb = xform.mat_mul(ra, rb, rc, rd, re, rf, 2.0, 0.0, 0.0, 2.0, 0.0, 0.0, 1)
+    var mc = xform.mat_mul(ra, rb, rc, rd, re, rf, 2.0, 0.0, 0.0, 2.0, 0.0, 0.0, 2)
+    var md = xform.mat_mul(ra, rb, rc, rd, re, rf, 2.0, 0.0, 0.0, 2.0, 0.0, 0.0, 3)
+    var me = xform.mat_mul(ra, rb, rc, rd, re, rf, 2.0, 0.0, 0.0, 2.0, 0.0, 0.0, 4)
+    var mf = xform.mat_mul(ra, rb, rc, rd, re, rf, 2.0, 0.0, 0.0, 2.0, 0.0, 0.0, 5)
+    var one = xform.affine(src, ma, mb, mc, md, me, mf, 0, 0,
+                           xform.kern_bilinear(), xform.edge_transparent())
+    assert(one != 0)
+
+    // Both cover the same area, so total alpha is comparable.
+    var sa_one = xform.alpha_sum(one)
+    var sa_two = xform.alpha_sum(two)
+    assert(sa_one > 0.0)
+    assert(sa_two > 0.0)
+    // The composed pass has FEWER partially-covered pixels: a double-filtered
+    // edge is a wider ramp.
+    var soft_one = soft_count(one)
+    var soft_two = soft_count(two)
+    assert(soft_one < soft_two)
+
+    wynimg_free(one) wynimg_free(two) wynimg_free(two_a)
+    wynimg_free(src)
+}
+
+// Count of pixels whose alpha is strictly between 0.02 and 0.98 - the width of
+// the antialiased rim. A second resampling pass widens it, which is what
+// "two passes visibly soften" means numerically.
+fn soft_count(buf: int) -> int {
+    var w = wynimg_width(buf)
+    var h = wynimg_height(buf)
+    var n = 0
+    var y = 0
+    while y < h {
+        var x = 0
+        while x < w {
+            var a = raw(buf, x, y, 3)
+            if a > 0.02 and a < 0.98 { n = n + 1 }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return n
+}
+
+// ---- coverage mask ---------------------------------------------------------
+
+test "a transform through a coverage mask is restricted to the covered region" {
+    // Matches how filters already work: the mask's R channel is linear
+    // coverage. It is in OUTPUT space, because a transform moves pixels so
+    // "the selected region" can only mean a region of the answer.
+    var src = wynimg_new(8, 8)
+    wynimg_fill(src, 1.0, 1.0, 1.0, 1.0)
+
+    var mask = wynimg_new(16, 16)
+    wynimg_fill(mask, 0.0, 0.0, 0.0, 1.0)
+    // Cover the left half of the OUTPUT only.
+    var y = 0
+    while y < 16 {
+        var x = 0
+        while x < 8 {
+            wynimg_set(mask, pixel.px_index(16, x, y, 0), 1.0)
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    var out = xform.scale_masked(src, 16, 16, xform.kern_bilinear(), mask)
+    assert(out != 0)
+    assert(pixel.approx(raw(out, 2, 8, 3), 1.0, tol()))
+    assert_eq(raw(out, 12, 8, 3), 0.0)
+    // The gate multiplies all four channels, so an uncovered pixel is
+    // transparent AND colourless - still a valid premultiplied pixel.
+    assert_eq(raw(out, 12, 8, 0), 0.0)
+    wynimg_free(out)
+
+    // A HALF-covered output pixel is half there, not all-or-nothing: coverage is
+    // a float mask, exactly as in select.wyn.
+    var half = wynimg_new(16, 16)
+    wynimg_fill(half, 0.5, 0.0, 0.0, 1.0)
+    var h2 = xform.scale_masked(src, 16, 16, xform.kern_bilinear(), half)
+    assert(h2 != 0)
+    assert(pixel.approx(raw(h2, 8, 8, 3), 0.5, tol()))
+    wynimg_free(h2)
+    wynimg_free(half)
+
+    // A MASK OF THE WRONG SIZE REFUSES THE CALL. Ignoring it would transform the
+    // whole layer when the caller asked for a selection - the failure mode that
+    // destroys a user's work.
+    var wrong = wynimg_new(8, 8)
+    wynimg_fill(wrong, 1.0, 0.0, 0.0, 1.0)
+    assert_eq(xform.scale_masked(src, 16, 16, xform.kern_bilinear(), wrong), 0)
+    wynimg_free(wrong)
+    wynimg_free(mask)
+    wynimg_free(src)
+}
+
+test "a masked rotate is restricted the same way" {
+    var src = wynimg_new(16, 16)
+    wynimg_fill(src, 1.0, 1.0, 1.0, 1.0)
+    // 16*sqrt(2) = 22.6 -> a 23x23 output box.
+    var mask = wynimg_new(23, 23)
+    wynimg_fill(mask, 0.0, 0.0, 0.0, 1.0)
+    var y = 0
+    while y < 12 {
+        var x = 0
+        while x < 23 {
+            wynimg_set(mask, pixel.px_index(23, x, y, 0), 1.0)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    var out = xform.rotate_masked(src, 45.0, xform.kern_bilinear(),
+                                  xform.edge_transparent(), mask)
+    assert(out != 0)
+    assert_eq(wynimg_width(out), 23)
+    assert(raw(out, 11, 6, 3) > 0.5)
+    assert_eq(raw(out, 11, 20, 3), 0.0)
+    wynimg_free(out) wynimg_free(mask) wynimg_free(src)
+}
+
+// ---- undo contract and safety ---------------------------------------------
+
+test "every transform returns a NEW handle and leaves the original intact" {
+    // The property that makes these commands undoable by OP_PIXELS: the caller
+    // still holds a live buffer with the pre-transform pixels.
+    var src = wynimg_new(4, 4)
+    wynimg_fill(src, 1.0, 0.0, 0.0, 1.0)
+
+    var a = xform.scale(src, 8, 8, xform.kern_bilinear())
+    var b = xform.rotate(src, 17.0, xform.kern_bilinear(), xform.edge_clamp())
+    var c = xform.flip_h(src)
+    var d = xform.rot_cw(src)
+    var e = xform.crop(src, 1, 1, 2, 2)
+    var f = xform.canvas(src, 6, 6, xform.anchor_centre())
+
+    assert(a != src) assert(b != src) assert(c != src)
+    assert(d != src) assert(e != src) assert(f != src)
+    // The source still reads back exactly as it was written.
+    assert_eq(raw(src, 0, 0, 0), 1.0)
+    assert_eq(raw(src, 3, 3, 3), 1.0)
+    assert_eq(wynimg_width(src), 4)
+
+    wynimg_free(a) wynimg_free(b) wynimg_free(c)
+    wynimg_free(d) wynimg_free(e) wynimg_free(f)
+    wynimg_free(src)
+}
+
+test "a stale or null handle is a refusal, never a crash" {
+    // Handles are generation-tagged, so a freed handle resolves to NULL inside C
+    // and every entry point takes the null path. Asserted rather than assumed
+    // because a transform allocates, and an allocation keyed off a stale
+    // WynImg* is exactly the use-after-free the handle table exists to prevent.
+    var dead = wynimg_new(4, 4)
+    wynimg_fill(dead, 1.0, 1.0, 1.0, 1.0)
+    wynimg_free(dead)
+
+    assert_eq(xform.scale(dead, 8, 8, xform.kern_bilinear()), 0)
+    assert_eq(xform.rotate(dead, 30.0, xform.kern_bicubic(),
+                           xform.edge_clamp()), 0)
+    assert_eq(xform.flip_h(dead), 0)
+    assert_eq(xform.rot_cw(dead), 0)
+    assert_eq(xform.crop(dead, 0, 0, 2, 2), 0)
+    assert_eq(xform.canvas(dead, 8, 8, xform.anchor_centre()), 0)
+    assert_eq(xform.affine(dead, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 4, 4,
+                           xform.kern_bilinear(), xform.edge_clamp()), 0)
+    assert_eq(xform.alpha_sum(dead), 0.0 - 1.0)
+
+    assert_eq(xform.scale(0, 8, 8, xform.kern_bilinear()), 0)
+    assert_eq(xform.flip_h(0), 0)
+}
+
+test "a non-positive size or a bad anchor is refused" {
+    var src = wynimg_new(4, 4)
+    wynimg_fill(src, 1.0, 1.0, 1.0, 1.0)
+    assert_eq(xform.scale(src, 0, 8, xform.kern_bilinear()), 0)
+    assert_eq(xform.scale(src, 8, 0 - 1, xform.kern_bilinear()), 0)
+    assert_eq(xform.crop(src, 0, 0, 0, 4), 0)
+    assert_eq(xform.canvas(src, 8, 8, 9), 0)
+    assert_eq(xform.canvas(src, 8, 8, 0 - 1), 0)
+    assert_eq(xform.scale_by(src, 0.0, 1.0, xform.kern_bilinear()), 0)
+    // A scale factor small enough to round to zero still yields at least 1px,
+    // because a 0-wide buffer is not a document.
+    var tiny = xform.scale_by(src, 0.01, 0.01, xform.kern_bilinear())
+    assert(tiny != 0)
+    assert_eq(wynimg_width(tiny), 1)
+    assert_eq(wynimg_height(tiny), 1)
+    wynimg_free(tiny)
+    wynimg_free(src)
+}
+
+test "the kernel table agrees between Wyn and C" {
+    // A cheap guard on the FFI contract: if C gains a kernel and the Wyn
+    // accessors do not, this is the assertion that says so.
+    assert_eq(xform.kernel_count(), 3)
+    assert_eq(xform.kern_nearest(), 0)
+    assert_eq(xform.kern_bilinear(), 1)
+    assert_eq(xform.kern_bicubic(), 2)
+    assert_eq(xform.kern_name(0), "nearest")
+    assert_eq(xform.kern_name(2), "bicubic")
+    assert_eq(xform.edge_transparent(), 0)
+    assert_eq(xform.edge_clamp(), 1)
+    assert_true(xform.masked_mask_is_output_space())
+}
+
+test "mat_mul composes in apply-second-then-first order" {
+    // Scale by 2 then translate by 5 must give dx = 2x + 5, i.e. a=2, e=5.
+    // The other order gives a=2, e=10. A composed transform that gets this
+    // backwards puts the layer in the wrong place, which is the single most
+    // visible transform bug.
+    var a = xform.mat_mul(1.0, 0.0, 0.0, 1.0, 5.0, 7.0,
+                          2.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0)
+    var e = xform.mat_mul(1.0, 0.0, 0.0, 1.0, 5.0, 7.0,
+                          2.0, 0.0, 0.0, 2.0, 0.0, 0.0, 4)
+    var f = xform.mat_mul(1.0, 0.0, 0.0, 1.0, 5.0, 7.0,
+                          2.0, 0.0, 0.0, 2.0, 0.0, 0.0, 5)
+    assert(pixel.approx(a, 2.0, 0.000001))
+    assert(pixel.approx(e, 5.0, 0.000001))
+    assert(pixel.approx(f, 7.0, 0.000001))
+
+    // A rotate-about-centre matrix leaves the centre FIXED - that is what the
+    // translation term is for, and it is the part everyone gets wrong.
+    var cx = 8.0
+    var cy = 6.0
+    var ra = xform.mat_rotate(37.0, cx, cy, 0)
+    var rb = xform.mat_rotate(37.0, cx, cy, 1)
+    var rc = xform.mat_rotate(37.0, cx, cy, 2)
+    var rd = xform.mat_rotate(37.0, cx, cy, 3)
+    var re = xform.mat_rotate(37.0, cx, cy, 4)
+    var rf = xform.mat_rotate(37.0, cx, cy, 5)
+    assert(pixel.approx(ra * cx + rb * cy + re, cx, 0.000001))
+    assert(pixel.approx(rc * cx + rd * cy + rf, cy, 0.000001))
+}
+
+// ---- an sRGB-edge sanity check --------------------------------------------
+
+test "a transform stays in linear light: it never touches the transfer function" {
+    // sRGB conversion happens only at I/O edges. A resize that decoded or
+    // encoded would shift every midtone, and the shift is large: sRGB 0.5 is
+    // linear 0.214. So a uniform field whose value came through
+    // pixel.srgb_to_linear must come back at that same LINEAR value.
+    var lin = pixel.srgb_to_linear(0.5)
+    assert(pixel.approx(lin, 0.21404, 0.0005))
+    var src = wynimg_new(16, 16)
+    wynimg_fill(src, lin, lin, lin, 1.0)
+    var out = xform.scale(src, 7, 7, xform.kern_bicubic())
+    assert(out != 0)
+    assert(pixel.approx(raw(out, 3, 3, 0), lin, tol()))
+    // If a stray encode happened, this would read ~0.5 instead of ~0.214.
+    assert(raw(out, 3, 3, 0) < 0.3)
+    wynimg_free(out)
+    wynimg_free(src)
+}

@@ -1,0 +1,357 @@
+// xform - geometric transforms over LINEAR PREMULTIPLIED float32 RGBA.
+//
+// EVERY FUNCTION HERE RETURNS A NEW BUFFER HANDLE, OR 0 ON FAILURE. It never
+// mutates its input. That is not politeness, it is the property that makes a
+// transform UNDOABLE by the machinery this project already has: src/history.wyn
+// records an OP_PIXELS entry as "the layer's buffer handle before" and "after",
+// so a command that hands back a fresh handle and leaves the original alive is
+// already a complete undo record - the caller swaps the layer's handle and keeps
+// the old one in the entry. A transform that resized a buffer in place could not
+// be recorded that way at all (the old pixels would be gone), and one that wrote
+// into the existing handle would make Undo restore a buffer that had already
+// been overwritten. So: new handle out, caller owns both, caller frees the loser.
+//
+// WHY PREMULTIPLIED DATA IS WHAT MAKES A FILTERED RESIZE CORRECT. Everything
+// here that is not an exact integer permutation is a WEIGHTED AVERAGE of
+// neighbouring pixels - the same operation as the blur in src/filter.wyn, and
+// correct for the same reason. Averaging PREMULTIPLIED samples averages colour
+// contribution and coverage with the same weights, so a fully transparent
+// neighbour contributes nothing. Averaging UNPREMULTIPLIED colour drags the
+// undefined (stored as 0, i.e. black) colour of transparent pixels into the
+// result and gives every soft edge a DARK HALO - the identical argument the blur
+// makes, and the reason both engines can share one buffer format.
+//
+// ONE PASS, NOT TWO. `affine` takes a full 2x3 matrix so scale + rotate +
+// translate composes into a SINGLE resampling pass. Doing it as two calls
+// resamples the image twice, and the effective kernel becomes the convolution of
+// the two kernels: the result is visibly softer than the one-pass answer for no
+// gain. Compose the matrices (see `mat_mul`), not the images.
+//
+// RIGHT ANGLES AND FLIPS ARE EXACT. `flip` and `rot90` permute whole pixels and
+// resample nothing, so a 90 then -90 round trip is BIT-IDENTICAL. The general
+// rotate at 90 degrees would not be: cos(pi/2) is 6.1e-17, not 0, so the taps
+// miss the pixel centres by a hair and a lossless operation becomes a slightly
+// blurred, no-longer-reversible one. tests/test_xform.wyn asserts EQUALITY
+// (not approximity) across that round trip, which is what proves the exact path
+// was taken.
+//
+// CALL CONVENTION -- v1.20.0 codegen constraint, see the long note at the top of
+// src/pixel.wyn. `extern fn`s are emitted UNPREFIXED into each importing unit,
+// so importers call them BARE; a `pub fn` here must reach them as
+// `wynimg::xf_scale(...)`, because both the bare and the dotted spellings get
+// double-prefixed to `xform_wynimg_*`.
+//
+// This module declares its OWN externs rather than adding them to src/pixel.wyn,
+// so the transform engine is one file's worth of surface area - the same choice
+// src/filter.wyn and src/text.wyn made. Re-declaring wynimg_new / wynimg_free
+// with identical signatures is safe: an extern is emitted once per compilation
+// unit.
+
+import pixel
+
+// ---- externs (csrc/wynimg_xform.c) -----------------------------------------
+//
+// Handles are `int`, never `ptr`: this file matches src/filter.wyn, which is the
+// engine it is nearest to. C takes them as `void*` and resolves every one
+// through wynimg_deref(), so a stale handle is a null-path no-op rather than a
+// use-after-free. Wyn `float` <-> C `double`, Wyn `int` <-> C `long long`;
+// getting that wrong returns silent garbage (measured 5.25e-315 for a 0.875f).
+
+extern fn wynimg_xf_scale(src: int, ow: int, oh: int, kern: int, mask: int) -> int;
+extern fn wynimg_xf_affine(src: int, a: float, b: float, c: float, d: float,
+                           e: float, f: float, ow: int, oh: int,
+                           kern: int, edge: int, mask: int) -> int;
+extern fn wynimg_xf_rotate(src: int, degrees: float,
+                           kern: int, edge: int, mask: int) -> int;
+extern fn wynimg_xf_flip(src: int, axis: int) -> int;
+extern fn wynimg_xf_rot90(src: int, quarters: int) -> int;
+extern fn wynimg_xf_crop(src: int, x: int, y: int, w: int, h: int) -> int;
+extern fn wynimg_xf_canvas(src: int, w: int, h: int, anchor: int) -> int;
+extern fn wynimg_xf_alpha_sum(p: int) -> float;
+extern fn wynimg_xf_kernel_count() -> int;
+
+// Buffer lifecycle, re-declared here (see the note above).
+extern fn wynimg_new(w: int, h: int) -> int;
+extern fn wynimg_free(p: int);
+extern fn wynimg_width(p: int) -> int;
+extern fn wynimg_height(p: int) -> int;
+
+// ---- resampling kernels ----------------------------------------------------
+//
+// The integer order is the FFI contract with csrc/wynimg_xform.c.
+//
+// NEAREST replicates source values exactly and is the mode for pixel art - and
+// the only mode whose output can be asserted bit-for-bit against the input.
+// BILINEAR is the tent filter: cheap, no ringing, softens a little.
+// BICUBIC is Catmull-Rom (Keys a = -0.5), which INTERPOLATES - k(0)=1, k(+-1)=0 -
+// so a 1:1 resample is the identity and integer-aligned taps reproduce the
+// source. It has negative lobes, so it OVERSHOOTS at a hard step; the engine
+// CLAMPS the result into the valid premultiplied domain (alpha in [0,1], colour
+// in [0, alpha]) because an unclamped overshoot is a negative alpha, which is not
+// a representable pixel and makes a backdrop BRIGHTER when composited. The
+// in-gamut half of the ringing is kept - that is the acutance a user picks
+// bicubic for.
+pub fn kern_nearest() -> int  { return 0 }
+pub fn kern_bilinear() -> int { return 1 }
+pub fn kern_bicubic() -> int  { return 2 }
+pub fn kernel_count() -> int  { return wynimg::xf_kernel_count() }
+
+pub fn kern_name(k: int) -> string {
+    if k == 0 { return "nearest" }
+    if k == 1 { return "bilinear" }
+    if k == 2 { return "bicubic" }
+    return "bilinear"
+}
+
+// ---- edge behaviour --------------------------------------------------------
+//
+// An explicit parameter, not a policy, because the two answers are both right
+// for different pictures.
+//
+// TRANSPARENT: a tap outside the source contributes ZERO and the weights are
+// deliberately NOT renormalised, so alpha falls off across the boundary and a
+// rotated layer gets an antialiased edge for free. This is what you want for a
+// layer floating on a document.
+//
+// CLAMP: tap indices are clamped to the border, extending the edge colour
+// outward with the weights still summing to 1, so an opaque photo keeps an
+// opaque frame. This is what you want for a background - transparent-border on a
+// full-frame photo puts a soft transparent hairline all the way round it.
+pub fn edge_transparent() -> int { return 0 }
+pub fn edge_clamp() -> int       { return 1 }
+
+// ---- canvas anchors --------------------------------------------------------
+//
+// Row-major: 0 TL 1 TC 2 TR / 3 ML 4 C 5 MR / 6 BL 7 BC 8 BR. Centring uses
+// integer division, so an odd leftover goes right/bottom.
+pub fn anchor_top_left() -> int     { return 0 }
+pub fn anchor_top_centre() -> int   { return 1 }
+pub fn anchor_top_right() -> int    { return 2 }
+pub fn anchor_mid_left() -> int     { return 3 }
+pub fn anchor_centre() -> int       { return 4 }
+pub fn anchor_mid_right() -> int    { return 5 }
+pub fn anchor_bottom_left() -> int  { return 6 }
+pub fn anchor_bottom_centre() -> int { return 7 }
+pub fn anchor_bottom_right() -> int  { return 8 }
+
+// ---- scale -----------------------------------------------------------------
+
+// Resamples `src` to exactly ow x oh. 0 on failure (dead handle, non-positive
+// size, allocation failure, or a mask whose size does not match the OUTPUT).
+//
+// ANTIALIASED ON DOWNSCALE. When the scale factor is below 1 the filter
+// footprint is widened by 1/scale, so a 4x reduction averages four source
+// pixels per axis instead of taking one tap. That is the "widen the
+// reconstruction filter so it doubles as a prefilter" scheme; it is chosen over
+// building a mip pyramid because a pyramid only has power-of-two levels and
+// would still need this for the fractional remainder. Without it a downscale
+// point-samples: measured, a 1px checkerboard reduced 3x returns 1.0/0.0 instead
+// of ~0.5, and a 1-in-16 dot grid reduced 4x returns 0.25 instead of 0.0625 -
+// four times too bright. tests/test_xform.wyn asserts both, and its header
+// records why the checkerboard fixture must use an ODD factor.
+//
+// NEAREST does NOT widen, deliberately: "nearest" is the mode a user picks to
+// keep pixel art crisp and to read true sample values, and a nearest that
+// averaged would be a bilinear with extra steps. Its downscale therefore DOES
+// alias, which is the documented meaning of the mode rather than a defect.
+//
+// A 1:1 scale is bit-identical to the input for every kernel, because both
+// bilinear and bicubic interpolate and the half-pixel convention is right.
+pub fn scale(src: int, ow: int, oh: int, kern: int) -> int {
+    return wynimg::xf_scale(src, ow, oh, kern, 0)
+}
+
+// Same, restricted to a coverage mask in OUTPUT space (see `masked` below).
+pub fn scale_masked(src: int, ow: int, oh: int, kern: int, mask: int) -> int {
+    return wynimg::xf_scale(src, ow, oh, kern, mask)
+}
+
+// Scale by a factor per axis, rounding to at least 1 pixel. The size, not the
+// factor, is the primitive - a factor is inherently lossy about which integer
+// size was meant, and every caller that cares (canvas fit, export at 2x) has an
+// exact size in mind.
+pub fn scale_by(src: int, fx: float, fy: float, kern: int) -> int {
+    if fx <= 0.0 or fy <= 0.0 { return 0 }
+    var w = wynimg::width(src)
+    var h = wynimg::height(src)
+    if w <= 0 or h <= 0 { return 0 }
+    var nw = (w.to_float() * fx + 0.5).to_int()
+    var nh = (h.to_float() * fy + 0.5).to_int()
+    if nw < 1 { nw = 1 }
+    if nh < 1 { nh = 1 }
+    return wynimg::xf_scale(src, nw, nh, kern, 0)
+}
+
+// ---- rotate ----------------------------------------------------------------
+
+// Rotates about the source centre by an arbitrary angle, sizing the output to
+// the bounding box of the rotated rectangle so NOTHING is cropped off.
+//
+// POSITIVE DEGREES TURN CLOCKWISE ON SCREEN. Image y grows downward, so the
+// textbook matrix reads as clockwise here; choosing the other sign because it
+// looks more mathematical is how a UI ends up with a rotate button that turns
+// the wrong way.
+//
+// At an exact multiple of 90 you should call `rot90` instead: this path
+// resamples, and cos(90 degrees) is 6.1e-17 rather than 0, so it produces a
+// fractionally blurred, no-longer-reversible copy of an operation that is
+// lossless.
+pub fn rotate(src: int, degrees: float, kern: int, edge: int) -> int {
+    return wynimg::xf_rotate(src, degrees, kern, edge, 0)
+}
+
+pub fn rotate_masked(src: int, degrees: float, kern: int, edge: int,
+                     mask: int) -> int {
+    return wynimg::xf_rotate(src, degrees, kern, edge, mask)
+}
+
+// ---- affine ----------------------------------------------------------------
+
+// The full 2x3 transform, mapping SOURCE continuous coordinates to DESTINATION:
+//     dx = a*x + b*y + e
+//     dy = c*x + d*y + f
+// The engine inverts it and walks the OUTPUT, which is the only way to fill every
+// output pixel exactly once (a forward scatter leaves holes wherever the map
+// expands).
+//
+// Pass ow/oh <= 0 for an AUTO bounding box: the output is sized to the
+// transformed source rectangle and translated so that box starts at (0,0).
+//
+// A SINGULAR MATRIX IS REFUSED (0). A zero determinant collapses the image onto
+// a line; there is no inverse to sample with, and handing back an empty buffer
+// would look like a working transform that silently lost the layer.
+//
+// LIMITATION, stated rather than hidden: the sampler uses a UNIT footprint, so a
+// heavy MINIFICATION expressed as an affine aliases the way an unprefiltered
+// downscale does (anisotropic/EWA footprints are not implemented). Downscale
+// with `scale` first and affine the remainder - which is also the one case where
+// two resampling passes are justified.
+pub fn affine(src: int, a: float, b: float, c: float, d: float,
+              e: float, f: float, ow: int, oh: int,
+              kern: int, edge: int) -> int {
+    return wynimg::xf_affine(src, a, b, c, d, e, f, ow, oh, kern, edge, 0)
+}
+
+pub fn affine_masked(src: int, a: float, b: float, c: float, d: float,
+                     e: float, f: float, ow: int, oh: int,
+                     kern: int, edge: int, mask: int) -> int {
+    return wynimg::xf_affine(src, a, b, c, d, e, f, ow, oh, kern, edge, mask)
+}
+
+// ---- matrix composition ----------------------------------------------------
+//
+// SIX SCALARS, NOT A STRUCT. Returning a struct across a Wyn module boundary
+// miscompiles here (see src/layer.wyn's parallel-array note), so a matrix is
+// six floats and `mat_mul` returns ONE of them, selected by index 0..5 in the
+// order a,b,c,d,e,f. Ugly, and it is the shape that survives the compiler.
+//
+// This exists so a caller can build scale-then-rotate-then-translate as one
+// matrix and make ONE `affine` call. `mat_mul(m, n)` is "apply n, then m", the
+// standard composition order.
+pub fn mat_mul(a1: float, b1: float, c1: float, d1: float, e1: float, f1: float,
+               a2: float, b2: float, c2: float, d2: float, e2: float, f2: float,
+               which: int) -> float {
+    if which == 0 { return a1 * a2 + b1 * c2 }
+    if which == 1 { return a1 * b2 + b1 * d2 }
+    if which == 2 { return c1 * a2 + d1 * c2 }
+    if which == 3 { return c1 * b2 + d1 * d2 }
+    if which == 4 { return a1 * e2 + b1 * f2 + e1 }
+    if which == 5 { return c1 * e2 + d1 * f2 + f1 }
+    return 0.0
+}
+
+// One component of a rotate-about-(cx,cy) matrix, in the same 0..5 order. Given
+// so a caller composing a transform does not have to rediscover the
+// centre-correction translation (centre - R*centre), which is the part everybody
+// gets wrong and which shows up as a layer that flies off screen when rotated.
+pub fn mat_rotate(degrees: float, cx: float, cy: float, which: int) -> float {
+    var th = degrees * 3.14159265358979323846 / 180.0
+    var co = Math.cos(th)
+    var si = Math.sin(th)
+    if which == 0 { return co }
+    if which == 1 { return 0.0 - si }
+    if which == 2 { return si }
+    if which == 3 { return co }
+    if which == 4 { return cx - (co * cx - si * cy) }
+    if which == 5 { return cy - (si * cx + co * cy) }
+    return 0.0
+}
+
+// ---- exact integer paths ---------------------------------------------------
+//
+// These permute whole 4-float pixels and resample NOTHING, so they are lossless
+// and exactly invertible. No mask parameter, deliberately: gating by coverage
+// multiplies pixel values, which would destroy the bit-exactness that is the
+// entire reason these exist. Restrict-to-selection belongs on the resampling
+// paths, where the values are being recomputed anyway.
+
+// Mirror left/right. Applied twice it is the identity, bit for bit.
+pub fn flip_h(src: int) -> int { return wynimg::xf_flip(src, 0) }
+
+// Mirror top/bottom. Applied twice it is the identity, bit for bit.
+pub fn flip_v(src: int) -> int { return wynimg::xf_flip(src, 1) }
+
+// Right-angle rotation. `quarters` is in units of 90 degrees CLOCKWISE and is
+// reduced mod 4, so -1 means 270 and a UI can just add or subtract without
+// normalising. Width and height swap for 1 and 3. 0 is an exact clone, so
+// "rotate by nothing" is still a new handle like every other function here.
+pub fn rot90(src: int, quarters: int) -> int {
+    return wynimg::xf_rot90(src, quarters)
+}
+
+pub fn rot_cw(src: int) -> int   { return wynimg::xf_rot90(src, 1) }
+pub fn rot_ccw(src: int) -> int  { return wynimg::xf_rot90(src, 3) }
+pub fn rot_180(src: int) -> int  { return wynimg::xf_rot90(src, 2) }
+
+// ---- crop and canvas resize ------------------------------------------------
+
+// CROP DISCARDS. The result is exactly w x h taken from (x,y) of the source,
+// pixel for pixel, with no resampling.
+//
+// A rect hanging off the edge is not an error: the parts with no source come
+// back TRANSPARENT. Refusing would make "crop to the marquee" fail whenever the
+// marquee was dragged past the border, which is most of the time.
+pub fn crop(src: int, x: int, y: int, w: int, h: int) -> int {
+    return wynimg::xf_crop(src, x, y, w, h)
+}
+
+// CANVAS RESIZE PADS. The distinction from crop is the whole point: crop chooses
+// a rectangle OF the picture, canvas-resize changes the document size and places
+// the existing pixels inside it, so growing the canvas adds TRANSPARENCY, not
+// picture.
+//
+// The new area is transparent and NOT black. In a premultiplied buffer those are
+// indistinguishable in RGB - both store 0,0,0 - and differ only in alpha, which
+// is why tests/test_xform.wyn asserts alpha 0 AND colour 0 rather than trusting
+// that a black-looking pad is a transparent one.
+//
+// Shrinking with an anchor is well defined and crops symmetrically, so this is
+// also the general "reframe the document" operation.
+pub fn canvas(src: int, w: int, h: int, anchor: int) -> int {
+    return wynimg::xf_canvas(src, w, h, anchor)
+}
+
+// ---- restricted application ------------------------------------------------
+
+// Whether a coverage mask is required to match the OUTPUT size. It is, and the
+// reason is worth stating: a transform MOVES pixels, so "the selected region"
+// can only mean a region of the answer, not of the input. The mask's R channel
+// is linear coverage - the same convention as src/select.wyn's buffers, as
+// paint.wyn's stroke coverage, and as a layer mask in wynimg_composite - so a
+// selection composes with a transform by exactly the multiply it already uses
+// everywhere else.
+//
+// A mask of the wrong size REFUSES the whole call (0) rather than being ignored.
+// Silently transforming the entire layer when the caller asked for a selection
+// is the failure mode that destroys a user's work.
+pub fn masked_mask_is_output_space() -> bool { return true }
+
+// ---- measurement -----------------------------------------------------------
+
+// Total stored alpha over the buffer.
+//
+// This exists so a test can assert a rotation CONSERVES COVERAGE - nothing
+// vanished off the edge and nothing was invented - which is the one property of
+// a resampled rotation that no single-pixel assertion can express. -1.0 when
+// refused; a real sum of clamped alpha is never negative.
+pub fn alpha_sum(p: int) -> float { return wynimg::xf_alpha_sum(p) }
