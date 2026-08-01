@@ -1,48 +1,94 @@
-// Word Counter -- Count word frequency in source files
-// Demonstrates: HashMap, string interpolation, File.read
+// word-counter -- rank the most frequent words in a file.
+//
+// Demonstrates a HashMap used the way you actually use one: tally every token, then
+// rank the tallies. The previous version built the same HashMap and then threw it
+// away - it printed the counts of nine HARDCODED keywords instead of the words that
+// were actually common, so "word frequency" was a promise the output did not keep.
+//
+// Also shows: `.lines()` and `.split()` instead of a hand-rolled character scan,
+// string interpolation, and a small struct sorted by a field.
+//
+//   wyn run cli-tools/word-counter/src/main.wyn <file>
+//   wyn run cli-tools/word-counter/src/main.wyn        # falls back to this source
+
+// One ranked entry. A struct, so the sort is by a named field rather than by decoding
+// a packed integer.
+struct Count { word: string, n: int }
+
+// Lowercase and strip anything that is not a letter or digit, so "Cat," and "cat"
+// count as one word. Done in Wyn rather than shelling out, because it is the kind of
+// text munging the language should be comfortable with.
+fn normalize(w: string) -> string {
+    var out = ""
+    for ch in w.lower().chars() {
+        if (ch >= "a" and ch <= "z") or (ch >= "0" and ch <= "9") { out = out + ch }
+    }
+    return out
+}
 
 fn main() {
-    print("=== Word Frequency Counter ===")
+    print("\x1b[1;36m═══ word frequency ═══\x1b[0m")
     print("")
 
-    var args = System.args()
-    var filepath = "src/main.wyn"
-    if args.len() > 1 { filepath = args[1] }
-    var content = File.read(filepath)
-    if content.len() == 0 {
-        print("Error: could not read input file")
-        return 1
+    // A file argument if given; otherwise this source, found whether the app is run
+    // from its own directory or from the repo root.
+    var path = ""
+    args = System.args()
+    if args.len() > 1 { path = args[1] }
+    else if File.exists("src/main.wyn") == 1 { path = "src/main.wyn" }
+    else if File.exists("cli-tools/word-counter/src/main.wyn") == 1 { path = "cli-tools/word-counter/src/main.wyn" }
+    if path == "" or File.exists(path) == 0 {
+        print("  \x1b[31mnot found:\x1b[0m ${path}   (pass a file path)")
+        return
     }
 
+    // Tally every word. get_int returns 0 for an absent key, so the first sight of a
+    // word starts it at 1 with no special case.
     var counts = HashMap.new()
-    var line_start = 0
-    var total_words = 0
-    var total_len = content.len()
-
-    for idx in 0..total_len {
-        var ch = content[idx]
-        if ch == " " or ch == "\n" or ch == "\t" or ch == "(" or ch == ")" or ch == "{" or ch == "}" or ch == "," or ch == ":" {
-            if idx > line_start {
-                var word = content.substring(line_start, idx).trim()
-                if word.len() > 0 {
-                    var current = counts.get_int(word)
-                    counts.insert_int(word, current + 1)
-                    total_words += 1
-                }
-            }
-            line_start = idx + 1
+    var total = 0
+    for line in File.read(path).lines() {
+        for raw in line.split(" ") {
+            var w = normalize(raw)
+            if w.len() == 0 { continue }
+            counts.insert_int(w, counts.get_int(w) + 1)
+            total += 1
         }
     }
 
-    print("Total words: ${total_words}")
+    // Rank. Pull the keys into structs, then a selection sort by count - the whole
+    // point of building the HashMap, and the step the old version skipped.
+    var ranked = []
+    for k in counts.keys() { ranked.push(Count { word: k, n: counts.get_int(k) }) }
+
+    var i = 0
+    while i < ranked.len() {
+        var max = i
+        var j = i + 1
+        while j < ranked.len() {
+            if ranked[j].n > ranked[max].n { max = j }
+            j += 1
+        }
+        if max != i {
+            var tmp = ranked[i]
+            ranked[i] = ranked[max]
+            ranked[max] = tmp
+        }
+        i += 1
+    }
+
+    print("  \x1b[90m${total} words, ${ranked.len()} distinct\x1b[0m")
     print("")
 
-    var keywords = ["fn", "var", "return", "if", "for", "print", "int", "string", "HashMap"]
-    for i in 0..9 {
-        var kw = keywords[i]
-        var c = counts.get_int(kw)
-        if c > 0 {
-            print("  ${kw}: ${c}")
-        }
+    // The top 15, as a bar chart scaled to the most common word.
+    var top = ranked[0].n
+    var shown = 0
+    for c in ranked {
+        if shown >= 15 { break }
+        var bar = ""
+        var width = c.n * 30 / top
+        for b in 0..width { bar = bar + "█" }
+        print("  ${c.word.pad_right(16, " ")}\x1b[36m${bar}\x1b[0m ${c.n}")
+        shown += 1
     }
+    print("")
 }
