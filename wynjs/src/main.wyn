@@ -731,15 +731,96 @@ fn p_bitand() -> string {
     return left
 }
 
+// Strict equality: same tag AND same value. No coercion whatsoever.
+//
+// AN OBJECT COMPARES BY IDENTITY, NOT BY CONTENT, and that needs its own branch
+// because `vtostr` renders every object as the string "[object Object]" - so
+// comparing rendered text made any two objects equal, and `{x:1} === {x:2}` was
+// true. Arrays and functions have the same problem for the same reason.
+//
+// The identity is the value's own payload: `vdata` of an "o"/"a"/"f" tagged value
+// is its store index, which is exactly what a reference IS in this interpreter. So
+// comparing payloads gives reference equality for these tags and value equality
+// for the primitives, which is the rule JavaScript actually has.
+fn strict_eq(a: string, b: string) -> int {
+    var ta = vtag(a)
+    if ta != vtag(b) { return 0 }
+    if ta == "o" or ta == "a" or ta == "f" {
+        if vdata(a) == vdata(b) { return 1 }
+        return 0
+    }
+    if vtostr(a) != vtostr(b) { return 0 }
+    return 1
+}
+
+// LOOSE equality, `==`, which is NOT strict equality with a different spelling.
+//
+// It was implemented as strict for both operators, so `1 == "1"` was false and
+// `null == undefined` was false - two of the handful of facts every JavaScript
+// programmer knows. This is the abstract-equality algorithm, in the order the spec
+// applies it:
+//
+//   1. null and undefined are loosely equal to each other AND TO NOTHING ELSE.
+//      That exception first, because it is the one rule people rely on
+//      (`x == null` as "absent") and the one a numeric coercion would get wrong,
+//      since Number(null) is 0 and `0 == null` must still be false.
+//   2. Same tag -> strict comparison. Two strings, two numbers, two booleans
+//      compare directly; there is nothing to coerce.
+//   3. Otherwise compare NUMERICALLY, which is what covers number/string,
+//      boolean/number and boolean/string in one line - a boolean is 1 or 0 and a
+//      numeric string is its value.
+//   4. An object against a primitive is false here. The spec calls ToPrimitive on
+//      the object; this interpreter has no valueOf/toString dispatch to call, and
+//      guessing would be worse than being predictable. Two objects compare by
+//      identity through step 2, which is correct.
+fn loose_eq(a: string, b: string) -> int {
+    var ta = vtag(a)
+    var tb = vtag(b)
+
+    // 1. null/undefined
+    if ta == "N" or ta == "u" {
+        if tb == "N" or tb == "u" { return 1 }
+        return 0
+    }
+    if tb == "N" or tb == "u" { return 0 }
+
+    // 2. same type
+    if ta == tb { return strict_eq(a, b) }
+
+    // 4. object vs primitive - no ToPrimitive available.
+    if ta == "o" or ta == "a" or ta == "f" { return 0 }
+    if tb == "o" or tb == "a" or tb == "f" { return 0 }
+
+    // 3. numeric comparison.
+    //
+    // A STRING THAT IS NOT A NUMBER IS NaN, AND NaN EQUALS NOTHING. vtofloat
+    // returns 0.0 for such a string, so comparing through it made `"abc" == 0`
+    // true - which is the one thing loose equality is famous for NOT doing.
+    // Empty and whitespace-only strings are the exception: Number("") is 0, so
+    // `"" == 0` and `"  " == false` really are true.
+    if ta == "s" { if numeric_or_empty(a) == 0 { return 0 } }
+    if tb == "s" { if numeric_or_empty(b) == 0 { return 0 } }
+    if vtofloat(a) == vtofloat(b) { return 1 }
+    return 0
+}
+
+// Would Number(s) be a number rather than NaN? Empty/whitespace counts, since
+// Number("") is 0.
+fn numeric_or_empty(v: string) -> int {
+    var d = vdata(v).trim()
+    if d.len() == 0 { return 1 }
+    return vis_num_str("s:" + d)
+}
+
 fn p_eq() -> string {
     var left = p_cmp()
     while tt == 16 or tt == 17 or tt == 18 or tt == 19 {
         var op = tt; next(); var right = p_cmp()
-        if op == 16 or op == 17 {
-            if vtag(left) == vtag(right) and vtostr(left) == vtostr(right) { left = vbool(1) } else { left = vbool(0) }
-        } else {
-            if vtag(left) == vtag(right) and vtostr(left) == vtostr(right) { left = vbool(0) } else { left = vbool(1) }
-        }
+        // 16 == | 17 === | 18 != | 19 !==
+        if op == 17 { left = vbool(strict_eq(left, right)) }
+        if op == 19 { left = vbool(1 - strict_eq(left, right)) }
+        if op == 16 { left = vbool(loose_eq(left, right)) }
+        if op == 18 { left = vbool(1 - loose_eq(left, right)) }
     }
     return left
 }

@@ -74,6 +74,7 @@ fn main() {
         "arrow_bodies",
         "arrow_params",
         "bitwise",
+        "loose_equality",
         "closures",
         "recursion",
         "short_circuit",
