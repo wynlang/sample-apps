@@ -1,49 +1,146 @@
-// httpcheck -- HTTP endpoint health checker
-// Demonstrates: structs, string interpolation, System.exec
-// Non-interactive: prints and exits
+// httpcheck -- check a list of HTTP endpoints, all at the same time.
+//
+// Demonstrates:
+//   * `spawn` + `await_all` - every endpoint is fetched CONCURRENTLY. Checking six URLs
+//     sequentially costs the sum of six round trips; here it costs the slowest single
+//     one, and the program prints both numbers so you can see the difference rather
+//     than take it on trust.
+//   * a struct returned THROUGH a future, so a check hands back its url, code, latency
+//     and verdict together instead of one int.
+//   * `enum` + `match` for the verdict, so "up", "redirected", "client error", "server
+//     error" and "unreachable" are five distinct answers rather than a >= comparison
+//     repeated at every call site.
+//   * ONE curl invocation per endpoint. The previous version ran curl twice per URL -
+//     once for the status code and once for the timing - which doubled the network cost
+//     to fetch two numbers that one call already returns.
+//
+//   wyn run sysadmin/httpcheck/src/main.wyn
+//   wyn run sysadmin/httpcheck/src/main.wyn https://example.com https://wynlang.com
 
-fn status_icon(code: int) -> string {
-    if code >= 200 and code < 300 { return "\x1b[32m✓\x1b[0m" }
-    if code >= 300 and code < 400 { return "\x1b[33m→\x1b[0m" }
-    return "\x1b[31m✗\x1b[0m"
+// Five outcomes, not a boolean. A 404 and a connection failure are both "not 200" and
+// mean completely different things: one is a working server telling you the path is
+// wrong, the other is no server at all.
+enum Health { Up, Redirect, ClientError, ServerError, Unreachable }
+
+struct Result {
+    url: string,
+    code: int,
+    ms: int,
+    health: Health
 }
 
-fn check(url: string, label: string) -> int {
-    var code_str = System.exec("curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 3 '${url}' 2>/dev/null").trim()
-    var code = code_str.to_int()
-    var time_str = System.exec("curl -s -o /dev/null -w '%{time_total}' --connect-timeout 2 --max-time 3 '${url}' 2>/dev/null").trim()
-    var icon = status_icon(code)
-    var cs = code.to_string()
-    if code == 0 { cs = "---" }
-    print("  ${label.pad_right(22, " ")}${icon}       ${cs.pad_right(6, " ")}${time_str}s")
-    return code
+fn icon(h: Health) -> string => match h {
+    Health.Up => "\x1b[32m✓\x1b[0m",
+    Health.Redirect => "\x1b[36m→\x1b[0m",
+    Health.ClientError => "\x1b[33m!\x1b[0m",
+    Health.ServerError => "\x1b[31m✗\x1b[0m",
+    Health.Unreachable => "\x1b[90m∅\x1b[0m"
+}
+
+fn verdict(h: Health) -> string => match h {
+    Health.Up => "\x1b[32mup\x1b[0m",
+    Health.Redirect => "\x1b[36mredirect\x1b[0m",
+    Health.ClientError => "\x1b[33mclient err\x1b[0m",
+    Health.ServerError => "\x1b[31mserver err\x1b[0m",
+    Health.Unreachable => "\x1b[90munreachable\x1b[0m"
+}
+
+// Classify once, here, so no call site repeats a range comparison.
+fn classify(code: int) -> Health {
+    if code == 0 { return Health.Unreachable }
+    if code >= 500 { return Health.ServerError }
+    if code >= 400 { return Health.ClientError }
+    if code >= 300 { return Health.Redirect }
+    return Health.Up
+}
+
+// Shorten a URL for the table without hiding which host it is.
+fn short(url: string) -> string {
+    var s = url.replace("https://", "").replace("http://", "")
+    if s.len() <= 30 { return s }
+    return s.substring(0, 29) + "…"
+}
+
+// Fetch one endpoint. Runs on its own coroutine when spawned.
+//
+// ONE curl call: `-w` prints the status code and the total time in a single line, so
+// there is no second request to fetch the timing. `--max-time` bounds how long a dead
+// host can hold up the scan - which matters much less now that the checks overlap, but
+// still bounds the worst case.
+fn check(url: string) -> Result {
+    var out = System.exec("curl -s -o /dev/null -w '%{http_code} %{time_total}' --connect-timeout 2 --max-time 4 '${url}' 2>/dev/null").trim()
+    var parts = out.split(" ")
+    var code = 0
+    var secs = 0.0
+    if parts.len() >= 1 { code = parts[0].to_int() }
+    if parts.len() >= 2 { secs = parts[1].to_float() }
+    return Result {
+        url: url,
+        code: code,
+        ms: (secs * 1000.0).to_int(),
+        health: classify(code)
+    }
 }
 
 fn main() {
     print("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
-    print("\x1b[1;36m║\x1b[0m           \x1b[1mhttpcheck\x1b[0m -- HTTP Health Checker                  \x1b[1;36m║\x1b[0m")
+    print("\x1b[1;36m║\x1b[0m         \x1b[1mhttpcheck\x1b[0m -- concurrent endpoint health check        \x1b[1;36m║\x1b[0m")
     print("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
     print("")
 
-    print("  ${"Endpoint".pad_right(22, " ")}Status  Code  Time")
-    print("  ${"────────────────────".pad_right(22, " ")}──────  ────  ────")
+    var urls = []
+    args = System.args()
+    for i in 1..args.len() { urls.push(args[i]) }
+    if urls.len() == 0 {
+        urls = [
+            "https://example.com",
+            "https://httpbin.org/status/200",
+            "https://httpbin.org/status/301",
+            "https://httpbin.org/status/404",
+            "https://httpbin.org/status/500",
+            "http://localhost:8080"
+        ]
+    }
+
+    print("  checking \x1b[1m${urls.len()}\x1b[0m endpoints concurrently...")
+    print("")
+
+    // THE POINT OF THIS FILE. Every request is in flight before any result is read, so
+    // the wall-clock cost is one round trip rather than the sum of them.
+    var t0 = Time.now_millis()
+    var futures = []
+    for u in urls { futures.push(spawn check(u)) }
+    var results = await_all(futures)
+    var wall = Time.now_millis() - t0
+
+    print("  ${"ENDPOINT".pad_right(32, " ")}${"".pad_right(3, " ")}${"CODE".pad_right(7, " ")}${"VERDICT".pad_right(14, " ")}TIME")
+    print("  ${"────────".pad_right(32, " ")}${"".pad_right(3, " ")}${"────".pad_right(7, " ")}${"───────".pad_right(14, " ")}────")
 
     var up = 0
-    var down = 0
-
-    var c1 = check("https://example.com", "example.com")
-    if c1 >= 200 and c1 < 400 { up += 1 } else { down += 1 }
-
-    var c2 = check("https://httpbin.org/status/200", "httpbin 200")
-    if c2 >= 200 and c2 < 400 { up += 1 } else { down += 1 }
-
-    var c3 = check("https://httpbin.org/status/404", "httpbin 404")
-    if c3 >= 200 and c3 < 400 { up += 1 } else { down += 1 }
-
-    var c4 = check("http://localhost:8080", "localhost:8080")
-    if c4 >= 200 and c4 < 400 { up += 1 } else { down += 1 }
+    var sum_ms = 0
+    var slowest = 0
+    for r in results {
+        // The tally comes from the same enum the row prints, so the summary cannot
+        // disagree with the table above it.
+        match r.health {
+            Health.Up => { up += 1 }
+            Health.Redirect => { up += 1 }
+            Health.ClientError => { }
+            Health.ServerError => { }
+            Health.Unreachable => { }
+        }
+        sum_ms += r.ms
+        if r.ms > slowest { slowest = r.ms }
+        var code_col = "---"
+        if r.code > 0 { code_col = r.code.to_string() }
+        print("  ${short(r.url).pad_right(32, " ")} ${icon(r.health)} ${code_col.pad_right(7, " ")}${verdict(r.health).pad_right(23, " ")}\x1b[90m${r.ms}ms\x1b[0m")
+    }
 
     print("")
-    print("  \x1b[32m● Up: ${up}\x1b[0m  \x1b[31m● Down: ${down}\x1b[0m")
+    print("  \x1b[32m● ${up} reachable\x1b[0m   \x1b[31m● ${results.len() - up} not\x1b[0m")
+    // The measured payoff. `sum_ms` is what a sequential loop would have cost; `wall` is
+    // what the concurrent version actually took.
+    print("  \x1b[90m${wall}ms wall-clock; the requests total ${sum_ms}ms of waiting")
+    print("  slowest single request ${slowest}ms - that is the floor concurrency buys you\x1b[0m")
     print("")
 }
