@@ -1,60 +1,113 @@
-// Log Parser -- Parse structured logs, extract errors, generate report
-// Demonstrates: File.read, string interpolation, structs, pattern matching
+// log-parser -- parse a structured log, classify every line, and report.
+//
+// The previous version read a HARDCODED, WRONG path
+// ("../sample-apps/data-processing/log-parser/sample.log") and so, run from anywhere,
+// found an empty string and reported "Total lines: 0 / INFO: 0 / WARN: 0 / ERROR: 0".
+// A log parser that parses nothing.
+//
+// Rewritten to actually work and to show the language off:
+//   * an `enum Level { Info, Warn, Error, Other }` with `match`, so a line's severity
+//     is one value and every place that colours or counts it is a match with no
+//     fallthrough - not a chain of `.contains()` calls that can disagree.
+//   * a `struct Entry { ts, level, msg }` per line, collected into a list.
+//   * `.lines()` / `.split()` instead of a hand-rolled character scan.
+//   * a per-level tally and a bar chart, so the summary is derived from the same
+//     entries that were printed.
+//
+//   wyn run data-processing/log-parser/src/main.wyn [logfile]
+
+enum Level { Info, Warn, Error, Other }
+
+struct Entry {
+    ts: string,
+    level: Level,
+    msg: string
+}
+
+fn classify(word: string) -> Level => match word {
+    "INFO" => Level.Info,
+    "WARN" => Level.Warn,
+    "ERROR" => Level.Error,
+    _ => Level.Other
+}
+
+fn colour(l: Level) -> string => match l {
+    Level.Info => "\x1b[32m",
+    Level.Warn => "\x1b[33m",
+    Level.Error => "\x1b[31m",
+    Level.Other => "\x1b[90m"
+}
+
+fn tag(l: Level) -> string => match l {
+    Level.Info => "INFO",
+    Level.Warn => "WARN",
+    Level.Error => "ERROR",
+    Level.Other => "----"
+}
 
 fn main() {
-    print("=== Log Parser ===")
+    print("\x1b[1;36m═══ log parser ═══\x1b[0m")
     print("")
 
-    var content = File.read("../sample-apps/data-processing/log-parser/sample.log")
-    var line_start = 0
-    var total_len = content.len()
+    // The file argument, or sample.log found whether run from the app or the repo root.
+    var path = ""
+    args = System.args()
+    if args.len() > 1 { path = args[1] }
+    else if File.exists("sample.log") == 1 { path = "sample.log" }
+    else if File.exists("data-processing/log-parser/sample.log") == 1 { path = "data-processing/log-parser/sample.log" }
+    if path == "" or File.exists(path) == 0 {
+        print("  \x1b[31mno log file\x1b[0m (pass a path, or run from the app directory)")
+        return
+    }
 
-    var info_count = 0
-    var warn_count = 0
-    var error_count = 0
-    var total_lines = 0
+    // Parse: `TIMESTAMP(19 chars) LEVEL rest`. A line too short to hold a timestamp is
+    // skipped rather than mis-sliced.
+    var entries = []
+    for line in File.read(path).lines() {
+        var t = line.trim()
+        if t.len() < 21 { continue }
+        var ts = t.substring(0, 19)
+        var rest = t.substring(20, t.len()).trim()
+        var sp = rest.index_of(" ")
+        if sp < 0 { continue }
+        var level = classify(rest.substring(0, sp))
+        var msg = rest.substring(sp + 1, rest.len()).trim()
+        entries.push(Entry { ts: ts, level: level, msg: msg })
+    }
 
-    var errors = ["", "", "", "", "", "", "", "", "", ""]
-    var error_idx = 0
+    // Tally by level. A HashMap keyed by the tag, so adding a level needs no new
+    // counter variable.
+    var counts = HashMap.new()
+    for e in entries { counts.insert_int(tag(e.level), counts.get_int(tag(e.level)) + 1) }
 
-    print("Errors found:")
-
-    for idx in 0..total_len {
-        if content[idx] == "\n" {
-            var line = content.substring(line_start, idx)
-            var trimmed = line.trim()
-            line_start = idx + 1
-
-            if trimmed.len() < 20 { continue }
-            total_lines += 1
-
-            if trimmed.contains("ERROR") {
-                error_count += 1
-                var ts = trimmed.substring(0, 19)
-                var msg_start = trimmed.index_of("ERROR") + 6
-                var msg = trimmed.substring(msg_start, trimmed.len())
-                print("  [${ts}] ${msg}")
-                if error_idx < 10 {
-                    errors[error_idx] = msg
-                    error_idx += 1
-                }
-            } else if trimmed.contains("WARN") {
-                warn_count += 1
-            } else if trimmed.contains("INFO") {
-                info_count += 1
-            }
+    // The errors and warnings, in full, coloured by level - the lines someone reading a
+    // log actually cares about.
+    print("  \x1b[1mattention\x1b[0m")
+    var flagged = 0
+    for e in entries {
+        var show = false
+        match e.level {
+            Level.Error => { show = true }
+            Level.Warn => { show = true }
+            Level.Info => { }
+            Level.Other => { }
+        }
+        if show {
+            print("  ${colour(e.level)}${tag(e.level).pad_right(6, " ")}\x1b[0m \x1b[90m${e.ts}\x1b[0m  ${e.msg}")
+            flagged += 1
         }
     }
+    if flagged == 0 { print("  \x1b[32mnothing to worry about\x1b[0m") }
 
+    // Summary as a bar chart, one row per level that occurred.
     print("")
-    print("=== Summary ===")
-    print("  Total lines: ${total_lines}")
-    print("  INFO:        ${info_count}")
-    print("  WARN:        ${warn_count}")
-    print("  ERROR:       ${error_count}")
-
-    if error_count > 0 {
-        print("")
-        print("  ⚠ ${error_count} errors require attention!")
+    print("  \x1b[1m${entries.len()}\x1b[0m lines")
+    for lvl in [Level.Info, Level.Warn, Level.Error, Level.Other] {
+        var n = counts.get_int(tag(lvl))
+        if n == 0 { continue }
+        var bar = ""
+        for b in 0..n { bar = bar + "█" }
+        print("  ${colour(lvl)}${tag(lvl).pad_right(6, " ")}\x1b[0m ${colour(lvl)}${bar}\x1b[0m ${n}")
     }
+    print("")
 }
