@@ -150,6 +150,115 @@ else
   ok "bare g is still the bucket fill, not group"
 fi
 
+# ---- THE PANEL SHOWS THE TREE ----------------------------------------------
+#
+# Groups were invisible in the layer panel: a flat list, so a grouped layer looked
+# like a sibling of its own group. The panel now indents by depth and a group with
+# children carries a twisty.
+#
+# The coordinates below are derived once, from the layout functions, rather than
+# guessed: LAYERS_Y = VIEW_Y+12+SV_SIZE+92 = 46+12+150+92 = 300, ROW_H = 24, and
+# PANEL_X = WIN_W-PANEL_W = 1180-250 = 930. A depth-0 row band starts at x=936 and
+# a depth-1 row starts 12px further right, at 948 - so x=938 is INSIDE a depth-0
+# row and OUTSIDE a depth-1 one, which is the whole discrimination.
+panel_script() {
+    rm -f src/ui.wyn.out src/ui.wyn.c
+    SDL_VIDEODRIVER=dummy WYNCANVAS_FRAMES=5 WYNCANVAS_SCRIPT="$1" \
+        "$WYN" run src/ui.wyn 2>&1 | grep -E '^  (row|rows|winpx|clickat|fold|unfold)'
+}
+
+OUT=$(panel_script 'group,rows')
+if printf '%s' "$OUT" | grep -q 'row 0 .*depth=1'; then
+  ok "the grouped layer is drawn INDENTED (depth=1)"
+else
+  bad "no indented row"; printf '%s\n' "$OUT"|sed 's/^/        /'
+fi
+if printf '%s' "$OUT" | grep -q 'rows drawn=3 of 3'; then
+  ok "all three rows are drawn while the group is open"
+else
+  bad "wrong open row count"; printf '%s\n' "$OUT"|sed 's/^/        /'
+fi
+
+# INDENTATION IS VISIBLE IN PIXELS, not just in a number. x=938 on the top row is
+# the row's own band when that row is at depth 0, and panel background once the row
+# has been indented - which no state assertion can distinguish.
+OUT=$(panel_script 'rows,winpx:938:310')
+FLAT=$(printf '%s' "$OUT" | sed -n 's/.*winpx(938,310)=\(.*\)/\1/p')
+OUT=$(panel_script 'group,rows,winpx:938:310')
+IND=$(printf '%s' "$OUT" | sed -n 's/.*winpx(938,310)=\(.*\)/\1/p')
+if [ -n "$FLAT" ] && [ -n "$IND" ] && [ "$FLAT" != "$IND" ]; then
+  ok "the indent is VISIBLE: x=938 changes colour once grouped ($FLAT -> $IND)"
+else
+  bad "indent not visible in pixels (flat=${FLAT:-none} indented=${IND:-none})"
+fi
+
+# ---- collapsing hides the children -----------------------------------------
+OUT=$(panel_script 'group,fold:1,rows')
+if printf '%s' "$OUT" | grep -q 'rows drawn=2 of 3'; then
+  ok "collapsing a group removes its child from the panel (3 -> 2 rows)"
+else
+  bad "fold did not hide the child"; printf '%s\n' "$OUT"|sed 's/^/        /'
+fi
+OUT=$(panel_script 'group,fold:1,unfold:1,rows')
+if printf '%s' "$OUT" | grep -q 'rows drawn=3 of 3'; then
+  ok "expanding brings it back"
+else
+  bad "unfold did not restore"; printf '%s\n' "$OUT"|sed 's/^/        /'
+fi
+
+# THE PAINTER ITSELF SKIPS THE HIDDEN ROW, checked in pixels. The `rows` action
+# above reports what the panel SHOULD draw by applying the same row_hidden rule; it
+# cannot prove the painter applied it. Measured by mutation: deleting the painter's
+# skip left every check above green. The third row band (y = 300 + 2*24 + 10 = 358)
+# is a drawn row while the group is open and bare panel once it is folded.
+OUT=$(panel_script 'group,rows,winpx:960:358')
+OPENPX=$(printf '%s' "$OUT" | sed -n 's/.*winpx(960,358)=\(.*\)/\1/p')
+OUT=$(panel_script 'group,fold:1,rows,winpx:960:358')
+FOLDPX=$(printf '%s' "$OUT" | sed -n 's/.*winpx(960,358)=\(.*\)/\1/p')
+if [ -n "$OPENPX" ] && [ -n "$FOLDPX" ] && [ "$OPENPX" != "$FOLDPX" ]; then
+  ok "the PAINTER stops drawing the folded row ($OPENPX -> $FOLDPX)"
+else
+  bad "the third row band did not change (open=${OPENPX:-none} folded=${FOLDPX:-none})"
+fi
+
+# ---- A CLICK LANDS ON THE ROW THAT WAS DRAWN -------------------------------
+#
+# The painter and the click-target loop are two separate walks, and after a fold they
+# agree only if BOTH derive y from the count of DRAWN rows. Placing targets by layer
+# index instead - which is what the code did before - puts every target where the row
+# would be if nothing were folded, so a click selects a layer the user cannot see.
+# That is invisible to every other check in this file.
+#
+# Row 1 (y = 300 + 24 + 10 = 334) is the GROUP while open, and `ramp` once folded.
+OUT=$(panel_script 'group,rows,clickat:1050:334')
+if printf '%s' "$OUT" | grep -q 'clickat(1050,334) -> active=1'; then
+  ok "open: clicking visible row 1 selects the group (layer 1)"
+else
+  bad "open-row click selected the wrong layer"; printf '%s\n' "$OUT"|sed 's/^/        /'
+fi
+OUT=$(panel_script 'group,fold:1,clickat:1050:334')
+if printf '%s' "$OUT" | grep -q 'clickat(1050,334) -> active=0'; then
+  ok "FOLDED: the same pixel now selects layer 0, following the painter"
+else
+  bad "folded-row click did not follow the painter"; printf '%s\n' "$OUT"|sed 's/^/        /'
+fi
+
+# ---- the twisty folds; the name selects ------------------------------------
+# Two meanings in one row, split by x. The twisty is checked BEFORE the visibility
+# box because on a group row those two columns would otherwise overlap.
+OUT=$(panel_script 'group,clickat:938:334,rows')
+if printf '%s' "$OUT" | grep -q 'collapsed'; then
+  ok "clicking the twisty column collapses the group"
+else
+  bad "twisty click did not fold"; printf '%s\n' "$OUT"|sed 's/^/        /'
+fi
+OUT=$(panel_script 'group,clickat:1050:334')
+if printf '%s' "$OUT" | grep -q 'active: group'; then
+  ok "clicking the NAME selects the group instead of folding it"
+else
+  bad "name click did not select"; printf '%s\n' "$OUT"|sed 's/^/        /'
+fi
+
 # ---- and the document still renders ----------------------------------------
 # A structural change that broke compositing would leave every check above green.
 OUT=$(run_script 'group,px:32:32')

@@ -21,7 +21,11 @@ separately, which is a visibly different picture. Groups nest, hiding one hides 
 contents, and membership survives a `.wync` round trip (format v2; a v1 file still
 loads, with every layer top-level). `[G]` / `]G[` in the layer panel, or Cmd+G /
 Cmd+Shift+G, wrap the active layer in a new group or take it back out; grouping a
-layer that is already grouped nests rather than flattening.
+layer that is already grouped nests rather than flattening. The panel INDENTS by
+depth and a group with children carries a `-`/`+` twisty that collapses it; a
+collapsed group's contents leave the panel entirely, and the click targets follow,
+so a click always selects the row that was drawn. Fold state is a view property -
+it is not saved in the `.wync` and does not make the document dirty.
 
 Honest limitations of what *is* implemented:
 

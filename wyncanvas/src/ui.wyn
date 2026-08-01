@@ -199,6 +199,89 @@ var g_ants_ready = 0
 //
 // The slider stores an INT (the toolkit's val/vmin/vmax are ints) while every
 // filter parameter is a float, so the conversion happens in exactly one place.
+// ---- collapsed groups in the layer panel ------------------------------------
+//
+// Which GROUP rows are collapsed, as a string of one character per layer index
+// ("c" collapsed, anything else open). A string rather than a [bool] because it is
+// indexed by layer index and a shorter-than-expected read is then a plain
+// out-of-range check rather than a crash - and because the layer store SHIFTS rows
+// on every add/remove, so this has to be cheap to rebuild and forgiving of being
+// out of date. A missing character reads as open, so a newly inserted layer is
+// visible by default, which is the only safe direction: a layer hidden by a stale
+// fold flag is a layer the user cannot find.
+//
+// NOT stored in the layer module. Fold state is a VIEW property - it is not part
+// of the document, does not belong in .wync, and must not make the document dirty.
+// The same argument src/ui.wyn already makes for the selection.
+// The pointer x the TOOLKIT saw, published for handlers.
+//
+// A handler receives only a widget id and cannot reach the Ui, so a row handler that
+// needs to know WHERE in the row the click landed has to read a global. It used to
+// read gui.Win_mouse_x() - the platform's POLLED position - which is wrong twice
+// over: a synthetic press never updates it (so every layer click in a headless test
+// looked like a click at x=0, i.e. a twisty hit), and even live it is the pointer's
+// position NOW rather than where the click was. Ui_mouse_x is the position the
+// toolkit dispatched from, which is the one the handler is being told about.
+var g_click_mx = 0
+
+var g_folded = ""
+
+// Bumped by every fold change, so the frame loop knows to rebuild the click
+// targets. The existing trigger is `layer.count() != g_row_count`, which cannot
+// see a fold: collapsing a group changes which rows are DRAWN without changing how
+// many layers exist, so the targets would keep the positions they had while the
+// group was open and a click would select the wrong layer. This is the smallest
+// signal that closes that gap.
+var g_fold_gen = 0
+var g_rows_fold_gen = 0
+
+fn is_folded(li: int) -> bool {
+    if li < 0 { return false }
+    if li >= g_folded.len() { return false }
+    return g_folded.substring(li, li + 1) == "c"
+}
+
+fn set_folded(li: int, on: bool) {
+    if li < 0 { return }
+    g_fold_gen = g_fold_gen + 1
+    var f = g_folded
+    while f.len() <= li { f = f + "o" }
+    var head = f.substring(0, li)
+    var tail = f.substring(li + 1, f.len())
+    if on { g_folded = head + "c" + tail } else { g_folded = head + "o" + tail }
+}
+
+// Is this layer hidden because an ANCESTOR group is collapsed?
+//
+// Walks the parent chain rather than checking one level, so collapsing an outer
+// group hides a nested group's children too. The guard is against a corrupt chain
+// (undo replay writes the store), where the alternative is a hang.
+fn row_hidden(li: int) -> bool {
+    var p = layer.parent(li)
+    var guard = 0
+    while p != 0 - 1 {
+        if is_folded(p) { return true }
+        guard = guard + 1
+        if guard > layer.count() { return false }
+        p = layer.parent(p)
+    }
+    return false
+}
+
+// How deep this layer sits, for indentation.
+fn row_depth(li: int) -> int {
+    var d = 0
+    var p = layer.parent(li)
+    var guard = 0
+    while p != 0 - 1 {
+        d = d + 1
+        guard = guard + 1
+        if guard > layer.count() { return d }
+        p = layer.parent(p)
+    }
+    return d
+}
+
 var g_strength_id = -1
 var g_strength = 100
 
@@ -1003,8 +1086,27 @@ fn on_flt_curve(id: int) { run_filter("curve") }
 fn on_layer_row(id: int) {
     var li = layer_of_widget(id)
     if li < 0 { return }
-    var mx = gui.Win_mouse_x()
-    if mx < PANEL_X() + 28 {
+    var mx = g_click_mx
+
+    // THE TWISTY, on a group with children: fold instead of selecting. Checked
+    // BEFORE the visibility box, because on a group row the two would otherwise
+    // overlap - the twisty sits at ind+9 and the box at ind+11 - and the row's
+    // meaning would depend on a two-pixel difference. A group's fold control wins
+    // its own column, and the visibility box moves right with the indent.
+    var ind = row_depth(li) * 12
+    if layer.kind(li) == layer.KIND_GROUP() {
+        if layer.child_count(li) > 0 {
+            if mx < PANEL_X() + 22 + ind {
+                var was_folded = is_folded(li)
+                set_folded(li, not was_folded)
+                if was_folded { g_msg = "expanded " + layer.name(li) }
+                else { g_msg = "collapsed " + layer.name(li) }
+                return
+            }
+        }
+    }
+
+    if mx < PANEL_X() + 28 + ind {
         var was = layer.visible(li)
         // Hoisted, not written inline as `record_visible(li, was, was == false)`.
         // A comparison passed DIRECTLY as a `bool` argument is typed `int` and
@@ -2114,14 +2216,24 @@ fn paint_layers(ui: Ui) {
                  235, 235, 240)
 
     var n = layer.count()
+    // `k` counts LAYERS walked; `vis` counts rows actually DRAWN. They diverge the
+    // moment a group is collapsed, and conflating them would leave a gap where a
+    // hidden row used to be - which reads as a rendering glitch rather than as a
+    // fold. build_form's click targets are placed by the same two counters, so the
+    // row a user clicks is the row that was painted.
     var k = 0
+    var vis = 0
     var stop = 0
     while k < n {
         if stop == 1 {
             k = n
         } else {
             var li = n - 1 - k                 // top of the stack first
-            var y = LAYERS_Y() + k * ROW_H()
+            if row_hidden(li) {
+                k = k + 1
+                continue
+            }
+            var y = LAYERS_Y() + vis * ROW_H()
             if y + ROW_H() > VIEW_Y() + VIEW_H() {
                 stop = 1
             } else {
@@ -2145,19 +2257,36 @@ fn paint_layers(ui: Ui) {
                     rg = rg + 14
                     rb = rb + 14
                 }
-                gui.Win_rect(g_win, PANEL_X() + 6, y, PANEL_W() - 12,
+                // INDENT BY DEPTH, so nesting is visible at a glance. The row
+                // BACKGROUND is indented too, not just the text: a full-width band
+                // with indented text reads as a long name, whereas an indented band
+                // reads as containment, which is the whole point.
+                var ind = row_depth(li) * 12
+                gui.Win_rect(g_win, PANEL_X() + 6 + ind, y, PANEL_W() - 12 - ind,
                              ROW_H() - 3, rr, rg, rb)
                 if li == g_active {
-                    gui.Win_rect_outline(g_win, PANEL_X() + 6, y,
-                                         PANEL_W() - 12, ROW_H() - 3,
+                    gui.Win_rect_outline(g_win, PANEL_X() + 6 + ind, y,
+                                         PANEL_W() - 12 - ind, ROW_H() - 3,
                                          110, 160, 210)
                 }
 
+                // A TWISTY ONLY ON A GROUP THAT HAS CHILDREN. Drawing one on an
+                // empty group invites a click that does nothing; drawing one on a
+                // raster layer is a lie about what the row is.
+                if layer.kind(li) == layer.KIND_GROUP() {
+                    if layer.child_count(li) > 0 {
+                        var mark = "-"
+                        if is_folded(li) { mark = "+" }
+                        gui.Win_text(g_win, g_font, mark, PANEL_X() + 9 + ind,
+                                     y + 3, 210, 210, 225)
+                    }
+                }
+
                 // Visibility box, from the layer module.
-                gui.Win_rect_outline(g_win, PANEL_X() + 11, y + 4, 13, 13,
+                gui.Win_rect_outline(g_win, PANEL_X() + 11 + ind, y + 4, 13, 13,
                                      130, 130, 150)
                 if layer.visible(li) {
-                    gui.Win_rect(g_win, PANEL_X() + 14, y + 7, 7, 7,
+                    gui.Win_rect(g_win, PANEL_X() + 14 + ind, y + 7, 7, 7,
                                  120, 200, 130)
                 }
 
@@ -2174,14 +2303,15 @@ fn paint_layers(ui: Ui) {
                 var meta = pixel.blend_name(layer.blend_mode(li)) + " "
                            + pct.to_string() + "%"
                 var mw = gui.Win_text_width(g_font, meta)
-                gui.Win_clip(g_win, PANEL_X() + 30, y,
-                             PANEL_W() - 44 - mw, ROW_H() - 3)
-                gui.Win_text(g_win, g_font, layer.name(li), PANEL_X() + 31,
+                gui.Win_clip(g_win, PANEL_X() + 30 + ind, y,
+                             PANEL_W() - 44 - mw - ind, ROW_H() - 3)
+                gui.Win_text(g_win, g_font, layer.name(li), PANEL_X() + 31 + ind,
                              y + 3, fr, fg, fb)
                 gui.Win_clip(g_win, 0, 0, 0, 0)
                 gui.Win_text(g_win, g_font, meta,
                              PANEL_X() + PANEL_W() - 10 - mw, y + 3,
                              150, 160, 175)
+                vis = vis + 1
                 k = k + 1
             }
         }
@@ -2379,13 +2509,28 @@ fn build_form(win: int, font: int) -> Ui {
     ui = widgets.Ui_button(ui, "Non", 5, sy + 26, 44, 24, on_sel_none)
     ui = widgets.Ui_button(ui, "SInv", 5, sy + 52, 44, 24, on_sel_invert)
 
-    var i = 0
-    while i < layer.count() {
-        var y = LAYERS_Y() + (layer.count() - 1 - i) * ROW_H()
-        ui = widgets.Ui_button(ui, layer.name(i), PANEL_X() + 6, y,
-                               PANEL_W() - 12, ROW_H() - 3, on_layer_row)
-        remember_row(widgets.Ui_last_id(ui), i)
-        i = i + 1
+    // CLICK TARGETS ARE PLACED BY THE SAME TWO COUNTERS AS THE PAINTER, walking the
+    // stack top-first and skipping rows a collapsed group hides. Placing them by
+    // layer index instead - which is what the previous `(count-1-i) * ROW_H()`
+    // did - would put every target at the position the row would occupy if
+    // nothing were folded, so after one collapse a click would select a layer the
+    // user cannot see. The two loops MUST agree, and the only way to be sure is
+    // for both to derive y from the count of DRAWN rows.
+    var vrow = 0
+    var i2 = 0
+    while i2 < layer.count() {
+        var li2 = layer.count() - 1 - i2
+        if row_hidden(li2) {
+            i2 = i2 + 1
+            continue
+        }
+        var y = LAYERS_Y() + vrow * ROW_H()
+        var ind2 = row_depth(li2) * 12
+        ui = widgets.Ui_button(ui, layer.name(li2), PANEL_X() + 6 + ind2, y,
+                               PANEL_W() - 12 - ind2, ROW_H() - 3, on_layer_row)
+        remember_row(widgets.Ui_last_id(ui), li2)
+        vrow = vrow + 1
+        i2 = i2 + 1
     }
 
     return ui
@@ -2396,6 +2541,11 @@ fn build_form(win: int, font: int) -> Ui {
 // widget->layer table cannot dispatch a click to a layer that no longer exists.
 fn rebuild_rows(ui: Ui) -> Ui {
     g_row_count = 0
+    // Record the fold generation this rebuild is FOR. Without it the trigger
+    // `g_fold_gen != g_rows_fold_gen` stays true forever and the whole form is
+    // rebuilt every frame - which works, and quietly makes the editor rebuild
+    // dozens of widgets per frame for no reason.
+    g_rows_fold_gen = g_fold_gen
     return build_form(g_win, g_font)
 }
 
@@ -2832,6 +2982,70 @@ fn run_action(ui: Ui, act: string) -> Ui {
         print("  ungroup -> ${g_msg} parent(${g_active})=${layer.parent(g_active)}")
         return ui
     }
+    // clickat:x:y - a real press+release at a WINDOW coordinate, through the
+    // toolkit's own dispatch.
+    //
+    // `click:LABEL` finds a widget by name; this one goes by POSITION, which is the
+    // only way to test that the layer panel's click targets sit where the painter
+    // drew its rows. Those are two independent loops, and after a fold they agree
+    // only if both derive y from the count of DRAWN rows - a bug here selects a
+    // layer the user cannot see, and no label-based click can detect it.
+    if act.starts_with("clickat:") {
+        var cp = act.substring(8, act.len()).split(":")
+        if cp.len() < 2 {
+            print("  clickat needs x:y")
+            return ui
+        }
+        var cx2 = cp[0].to_int()
+        var cy2 = cp[1].to_int()
+        // A REAL MOUSE-MOVE FIRST, and this is not ceremony. Handlers that need to
+        // know WHERE in a row the click landed read gui.Win_mouse_x() - the layer
+        // panel splits a row into a fold twisty, a visibility box and the name that
+        // way. A synthetic press does not update the platform's polled pointer, so
+        // without this every such handler reads a stale 0 and behaves as though the
+        // click were at the far left: every layer click looked like a twisty hit.
+        // Pushing the move through the queue makes the poll agree with the press.
+        gui.Win_push_mouse_move(g_win, cx2, cy2)
+        var cu2 = widgets.Ui_events(ui)
+        // The handler reads g_click_mx, so it has to hold this click's x - the same
+        // value the frame loop publishes for a human's click.
+        g_click_mx = cx2
+        cu2 = widgets.Ui_press(cu2, cx2, cy2)
+        cu2 = widgets.Ui_release(cu2, cx2, cy2)
+        print("  clickat(${cx2},${cy2}) -> active=${g_active} msg=${g_msg}")
+        return cu2
+    }
+
+    // fold:N / unfold:N - collapse or expand the group at layer index N, through
+    // the same state the twisty click sets.
+    if act.starts_with("fold:") {
+        set_folded(act.substring(5, act.len()).to_int(), true)
+        print("  fold -> ${g_folded}")
+        return ui
+    }
+    if act.starts_with("unfold:") {
+        set_folded(act.substring(7, act.len()).to_int(), false)
+        print("  unfold -> ${g_folded}")
+        return ui
+    }
+    // rows - the rows the panel would actually DRAW, in order, with their indent.
+    // This is what a click maps through, so it is the thing worth asserting.
+    if act == "rows" {
+        var rn = layer.count()
+        var rk = 0
+        var rv = 0
+        while rk < rn {
+            var rli = rn - 1 - rk
+            if row_hidden(rli) == false {
+                print("  row ${rv} layer=${rli} name=${layer.name(rli)} depth=${row_depth(rli)} folded=${is_folded(rli)}")
+                rv = rv + 1
+            }
+            rk = rk + 1
+        }
+        print("  rows drawn=${rv} of ${rn}")
+        return ui
+    }
+
     // tree - the whole layer tree, one row per layer, for asserting structure.
     if act == "tree" {
         var ti = 0
@@ -3118,7 +3332,7 @@ fn main() -> int {
             ui = run_action(ui, acts[s])
             // A structural change replaces the stack, so the rows must be
             // rebuilt - the same rebuild the frame loop does.
-            if layer.count() != g_row_count {
+            if layer.count() != g_row_count or g_fold_gen != g_rows_fold_gen {
                 ui = rebuild_rows(ui)
             }
             s = s + 1
@@ -3127,6 +3341,10 @@ fn main() -> int {
 
     var n = 0
     while widgets.Ui_running(ui) == 1 {
+        // Published BEFORE Ui_events, because Ui_events is what fires the handlers
+        // that read it. Taken from the toolkit's own tracked position, which is the
+        // point a click was dispatched from - see the note on g_click_mx.
+        g_click_mx = widgets.Ui_mouse_x(ui)
         ui = widgets.Ui_events(ui)
 
         // The strength slider's value, copied out each frame.
@@ -3153,7 +3371,7 @@ fn main() -> int {
             if g_req == REQ_SAVE { save_doc(path) }
             if g_req == REQ_TEXT { commit_text(widgets.Ui_text(ui, g_text_id)) }
             g_req = REQ_NONE
-            if layer.count() != g_row_count {
+            if layer.count() != g_row_count or g_fold_gen != g_rows_fold_gen {
                 ui = rebuild_rows(ui)
             }
         }
