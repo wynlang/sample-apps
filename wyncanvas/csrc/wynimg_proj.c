@@ -128,6 +128,13 @@
 // existing .wync unloadable for one new int32.
 #define WYNPROJ_VERSION 2
 
+// Marks the optional selection trailer. A MAGIC WORD, not a bare 0/1 flag: the
+// trailer is identified by its own signature, so a truncated or garbage tail is
+// recognised as "not a trailer" instead of being read as a coverage buffer whose
+// dimensions come from whatever bytes happen to be there. Chosen to be implausible
+// as the start of anything else in this format.
+#define WYNPROJ_SEL_MAGIC 0x53454C31u   /* "SEL1" */
+
 // A layer name is a UI label, not a payload. 4096 bytes is absurdly generous
 // for one and small enough that a corrupt length is rejected instead of
 // becoming a multi-gigabyte allocation.
@@ -253,6 +260,13 @@ static long long  g_stage_w = 0;
 static long long  g_stage_h = 0;
 static int        g_stage_open = 0;
 
+// The selection, staged like a layer blob. `has` rather than a null check on the
+// blob, because a document can legitimately have an EMPTY selection buffer and that
+// is different from having none: "no selection" means paint everywhere, so the two
+// must not be conflated on the way back in.
+static ProjBlob   g_stage_sel;
+static int        g_stage_has_sel = 0;
+
 static void blob_clear(ProjBlob* b) {
     free(b->data);
     b->data = NULL;
@@ -272,6 +286,11 @@ static void stage_reset(void) {
     g_stage_w = 0;
     g_stage_h = 0;
     g_stage_open = 0;
+    // The selection blob is freed here with the layers'. Missing this leaks one
+    // compressed document-sized buffer per save, which is the kind of leak that
+    // only shows up after an hour of work.
+    blob_clear(&g_stage_sel);
+    g_stage_has_sel = 0;
 }
 
 // Compresses a buffer's raw float32 bytes into `out`. Returns a WYNPROJ_E_*
@@ -315,6 +334,19 @@ long long wynproj_save_begin(long long w, long long h) {
     g_stage_h = h;
     g_stage_open = 1;
     return WYNPROJ_OK;
+}
+
+// Stage the SELECTION for this save. Optional: a document with no selection simply
+// never calls this, and the trailer is then absent.
+//
+// Called between save_begin and save_finish, like a layer, so it shares the same
+// staging lifetime and the same failure handling - a compression error surfaces here
+// rather than half-way through writing the file.
+long long wynproj_save_selection(void* sel) {
+    if (!g_stage_open) return WYNPROJ_E_NO_DOC;
+    blob_clear(&g_stage_sel);
+    g_stage_has_sel = 0;
+    return blob_from_handle(sel, &g_stage_sel, &g_stage_has_sel);
 }
 
 long long wynproj_save_layer(const char* name, long long kind, long long blend,
@@ -430,6 +462,27 @@ long long wynproj_save_finish(const char* path) {
         if (L->has_mask) w_blob(&o, &L->mask);
     }
 
+    // ---- the selection trailer, and why it is a TRAILER --------------------
+    //
+    // AN OPTIONAL TRAILER RATHER THAN A VERSION BUMP. The file ends exactly after
+    // the last layer's last blob, and the loader tracks the real size on disk - so
+    // "is there more?" is a legal question to ask. A v2 file with no trailer is
+    // therefore still a valid v2 file, and a v2 reader that predates this change
+    // reads such a file identically: it stops after the layers and never looks.
+    //
+    // The alternative, v3, would have made every document written since groups
+    // landed unreadable by the version gate for one optional buffer. The gate
+    // refuses a FUTURE version, so bumping is the one change that cannot be made
+    // additively.
+    //
+    // A one-word presence flag rather than relying on end-of-file, because "no
+    // selection" and "an empty selection" are different documents - the first means
+    // paint everywhere - and a reader must not have to infer which from a length.
+    if (g_stage_has_sel) {
+        w_u32(&o, WYNPROJ_SEL_MAGIC);
+        w_blob(&o, &g_stage_sel);
+    }
+
     // fclose can fail where fwrite did not: buffered bytes are flushed here,
     // so a full disk surfaces at close. Reporting success then would tell the
     // user their document is saved when it is not.
@@ -462,6 +515,10 @@ static long long  g_load_h = 0;
 
 // Frees every handle the load table still owns. Handles removed by
 // wynproj_take_* are already zeroed and are therefore skipped.
+// The loaded selection, or NULL if the file had no trailer. Declared with the other
+// g_load_* state because load_reset and the trailer read both touch it.
+static void* g_load_sel = NULL;
+
 static void load_reset(void) {
     for (long long i = 0; i < g_load_len; i++) {
         free(g_load[i].name);
@@ -473,6 +530,11 @@ static void load_reset(void) {
     g_load_len = 0;
     g_load_w = 0;
     g_load_h = 0;
+    // Freed here unless the caller TOOK it (take_selection nulls the slot), which is
+    // the same ownership rule the layer buffers follow: release frees whatever the
+    // caller did not adopt.
+    wynimg_free(g_load_sel);
+    g_load_sel = NULL;
 }
 
 // Cursor over the file. `total` is the real size on disk, so every declared
@@ -691,6 +753,30 @@ long long wynproj_load(const char* path) {
         }
     }
 
+    // ---- the optional selection trailer ------------------------------------
+    //
+    // `in.pos < in.total` is the whole test: the layers are done, and anything left
+    // is a trailer. A file without one - every .wync written before this - simply
+    // has nothing here, which is why this needed no version bump.
+    //
+    // A MALFORMED TRAILER IS NOT A FAILED LOAD. The document itself parsed
+    // completely by this point, and refusing it over a bad tail would lose the
+    // user's layers to recover a selection they can trivially redraw. So a wrong
+    // magic word, or a blob that will not decompress, leaves g_load_sel NULL and the
+    // load still succeeds - the same "refuse to guess, but do not overreact"
+    // reasoning the version gate uses, applied to something optional.
+    if (in.pos + 4 <= in.total) {
+        unsigned int smagic = 0;
+        if (rd_u32(&in, &smagic) == WYNPROJ_OK && smagic == WYNPROJ_SEL_MAGIC) {
+            void* sh = NULL;
+            if (rd_blob(&in, &sh) == WYNPROJ_OK) {
+                g_load_sel = sh;
+            } else if (sh) {
+                wynimg_free(sh);
+            }
+        }
+    }
+
     fclose(f);
     return WYNPROJ_OK;
 
@@ -720,6 +806,19 @@ long long wynproj_layer_visible(long long i) { return load_valid(i) ? g_load[i].
 double    wynproj_layer_amount(long long i)  { return load_valid(i) ? (double)g_load[i].amount : 0.0; }
 // -1 for a top-level layer, and for EVERY layer in a v1 file.
 long long wynproj_layer_parent(long long i)  { return load_valid(i) ? g_load[i].parent : -1; }
+
+// Did the loaded file carry a selection?
+long long wynproj_has_selection(void) { return g_load_sel ? 1 : 0; }
+
+// TAKE the loaded selection: ownership transfers to the caller and the slot is
+// cleared, so release() will not free it. Mirrors take_buffer/take_mask - a
+// "get" that left the pointer here would be freed underneath the caller by the
+// release that always follows a load.
+void* wynproj_take_selection(void) {
+    void* h = g_load_sel;
+    g_load_sel = NULL;
+    return h;
+}
 
 // Borrowing accessors: the table keeps ownership, so these are safe to read
 // repeatedly (tests do) without risking a double free.
@@ -802,6 +901,19 @@ long long wynproj_poke_byte(const char* path, long long off, long long val) {
     FILE* f = fopen(path, "r+b");
     if (!f) return 0;
     if (fseek(f, (long)off, SEEK_SET) != 0) { fclose(f); return 0; }
+    unsigned char b = (unsigned char)(val & 0xFF);
+    size_t n = fwrite(&b, 1, 1, f);
+    int bad = (fclose(f) != 0);
+    return (n == 1 && !bad) ? 1 : 0;
+}
+
+// Append one byte to a file. A test helper, so a corrupt-trailer case can be built
+// from a real save rather than a hand-written file that would be a second copy of the
+// format. 1 on success.
+long long wynproj_append_byte(const char* path, long long val) {
+    if (!path) return 0;
+    FILE* f = fopen(path, "ab");
+    if (!f) return 0;
     unsigned char b = (unsigned char)(val & 0xFF);
     size_t n = fwrite(&b, 1, 1, f);
     int bad = (fclose(f) != 0);

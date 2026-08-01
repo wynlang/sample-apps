@@ -190,6 +190,34 @@ pub fn init(w: int, h: int) -> int {
     return m
 }
 
+// ADOPT an existing coverage buffer as the current selection.
+//
+// For loading a saved selection: the document format hands back a buffer it
+// decompressed, and this installs it rather than copying into a fresh one - a
+// document-sized copy per open, for no gain.
+//
+// OWNERSHIP TRANSFERS. On success this module owns `m` and will free it on the next
+// init/release; on failure it does NOT, and the caller must free it. Returning a bool
+// rather than swallowing the error is what makes that split visible at the call site.
+//
+// The dimension check is the reason this is not just an assignment: a coverage buffer
+// that disagrees with the document makes every later clip read out of bounds, and it
+// can only come from a corrupt or hand-edited file. Refusing costs the user a
+// selection they can redraw; accepting costs them the process.
+pub fn adopt(m: int, w: int, h: int) -> bool {
+    if m == 0 { return false }
+    if w <= 0 { return false }
+    if h <= 0 { return false }
+    if wynimg::width(m) != w { return false }
+    if wynimg::height(m) != h { return false }
+    if s_sel != 0 { wynimg::free(s_sel) }
+    s_sel = m
+    s_w = w
+    s_h = h
+    s_gen = s_gen + 1
+    return true
+}
+
 // The current selection's coverage buffer, or 0 if there is none. Handed out so
 // the compositor can multiply by it directly; nobody should free it.
 pub fn handle() -> int { return s_sel }

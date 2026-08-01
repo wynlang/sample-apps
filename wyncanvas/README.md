@@ -61,7 +61,12 @@ Honest limitations of what *is* implemented:
   same length by construction. It is a real column rather than a seat in `h_b`,
   because `h_b` holds the OP_PIXELS "after" snapshot that `discard_above` frees -
   a mask parked there would be freed while the layer still referenced it.
-- A `.wync` file does not store the selection.
+- A `.wync` file **stores the selection**, as an optional trailer after the last
+  layer - so it is absent from a document that has none, and every file written
+  before the feature still loads unchanged (no version bump). A feathered
+  selection keeps its soft edge; an empty selection is preserved as distinct from
+  no selection; a mismatched or corrupt trailer is ignored rather than costing the
+  layers.
 
 ### What "the brush works" means here, and how it is checked
 

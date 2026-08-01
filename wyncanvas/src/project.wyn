@@ -52,6 +52,7 @@ extern fn wynproj_save_begin(w: int, h: int) -> int;
 extern fn wynproj_save_layer(name: string, kind: int, blend: int, opacity: float,
                              visible: int, amount: float, buf: int, mask: int,
                              parent: int) -> int;
+extern fn wynproj_save_selection(sel: int) -> int;
 extern fn wynproj_save_finish(path: string) -> int;
 
 extern fn wynproj_load(path: string) -> int;
@@ -65,6 +66,8 @@ extern fn wynproj_layer_opacity(i: int) -> float;
 extern fn wynproj_layer_visible(i: int) -> int;
 extern fn wynproj_layer_amount(i: int) -> float;
 extern fn wynproj_layer_parent(i: int) -> int;
+extern fn wynproj_has_selection() -> int;
+extern fn wynproj_take_selection() -> int;
 extern fn wynproj_layer_buffer(i: int) -> int;
 extern fn wynproj_layer_mask(i: int) -> int;
 extern fn wynproj_take_buffer(i: int) -> int;
@@ -91,6 +94,7 @@ extern fn wynproj_err_open_write() -> int;
 // reader would be untestable from Wyn. These build the damaged fixtures from a
 // good file instead of committing binary blobs nobody can review.
 extern fn wynproj_poke_byte(path: string, off: int, val: int) -> int;
+extern fn wynproj_append_byte(path: string, val: int) -> int;
 extern fn wynproj_truncate_copy(src: string, dst: string, len: int) -> int;
 extern fn wynproj_file_len(path: string) -> int;
 
@@ -138,7 +142,7 @@ pub fn error_message(code: int) -> string { return "${wynproj::error_message(cod
 // The walk stops at the first staging failure and still calls `save_finish`, so
 // the staging area is cleared rather than left holding a partial document that
 // would bleed into the next save.
-pub fn save(path: string, w: int, h: int) -> int {
+pub fn save(path: string, w: int, h: int, sel: int) -> int {
     var rc = wynproj::save_begin(w, h)
     if rc != 0 {
         wynproj::save_finish(path)
@@ -157,6 +161,27 @@ pub fn save(path: string, w: int, h: int) -> int {
             return rc
         }
         i = i + 1
+    }
+
+    // The selection, if the caller passed one. Staged AFTER every layer, because
+    // that is the order the trailer is written in - and skipped entirely when `sel`
+    // is 0, which keeps a document without a selection byte-identical to what this
+    // function produced before the trailer existed.
+    //
+    // A HANDLE PARAMETER RATHER THAN `import select`. This module owns the FORMAT,
+    // not the editor's current state: reaching into another module's globals would
+    // make "what gets saved" depend on load order, and would stop a test from saving
+    // a selection it built itself. `save_doc` in src/ui.wyn passes select.handle().
+    //
+    // An EMPTY selection buffer is still a selection and is still saved: "no
+    // selection" means paint everywhere, so collapsing the two would change what the
+    // document means on reload.
+    if sel != 0 {
+        rc = wynproj::save_selection(sel)
+        if rc != 0 {
+            wynproj::save_finish(path)
+            return rc
+        }
     }
     return wynproj::save_finish(path)
 }
@@ -197,6 +222,20 @@ pub fn layer_amount(i: int) -> float { return wynproj::layer_amount(i) }
 // document has no groups, so every layer in one is top-level.
 pub fn layer_parent(i: int) -> int { return wynproj::layer_parent(i) }
 
+// ---- the selection ---------------------------------------------------------
+//
+// Stored as an OPTIONAL TRAILER after the last layer, so a file without one is a
+// perfectly valid file and every .wync written before this still loads. That is why
+// there is no version bump: the gate refuses a FUTURE version, so bumping is the
+// one change that cannot be made additively.
+
+// Did the loaded file carry a selection?
+pub fn has_selection() -> bool { return wynproj::has_selection() == 1 }
+
+// TAKE the loaded selection - ownership transfers to the caller, so `release()`
+// will not free it. Same rule as take_buffer/take_mask. 0 if there was none.
+pub fn take_selection() -> int { return wynproj::take_selection() }
+
 // BORROWED handles: the table keeps ownership, so these are safe to read
 // repeatedly. Use them to inspect a file; use `take_*` to keep a buffer.
 // 0 means the layer has none - which is the normal state of an adjustment
@@ -226,6 +265,9 @@ pub fn file_len(path: string) -> int { return wynproj::file_len(path) }
 pub fn poke_byte(path: string, off: int, val: int) -> int {
     return wynproj::poke_byte(path, off, val)
 }
+
+// Append one byte. For building a corrupt-TRAILER fixture from a real save.
+pub fn append_byte(path: string, val: int) -> int { return wynproj::append_byte(path, val) }
 
 // Copies the first `len` bytes of `src` to `dst`. Returns the bytes written,
 // or -1. Builds a file truncated at a chosen offset.

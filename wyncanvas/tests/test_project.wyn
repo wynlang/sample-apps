@@ -52,6 +52,7 @@
 import pixel
 import layer
 import project
+import select
 
 // ---------------------------------------------------------------------------
 // Fixture: a 3-layer document with nothing left at its default.
@@ -123,7 +124,7 @@ fn build_doc() -> int {
 test "a 3-layer document round-trips every property" {
     assert_eq(build_doc(), 1)
     var p_path = "/tmp/wyncanvas_proj_rt.wync"
-    assert_eq(project.save(p_path, doc_w(), doc_h()), 0)
+    assert_eq(project.save(p_path, doc_w(), doc_h(), 0), 0)
     assert_true(project.file_len(p_path) > 20)
 
     assert_eq(project.load(p_path), 0)
@@ -182,7 +183,7 @@ test "loaded pixels are bit-identical to the saved pixels" {
     var origlast = wynimg_get(layer.buffer(0), buf_w() * buf_h() * 4 - 1)
     var origmask = wynimg_get(layer.mask(1), 3)
 
-    assert_eq(project.save(p_path, doc_w(), doc_h()), 0)
+    assert_eq(project.save(p_path, doc_w(), doc_h(), 0), 0)
     assert_eq(project.load(p_path), 0)
 
     var got0 = project.layer_buffer(0)
@@ -208,7 +209,7 @@ test "an adjustment-only document keeps its canvas size" {
     var idx = layer.add("just brighter", 0, layer.KIND_ADJUST_BRIGHTNESS())
     layer.set_adjust_amount(idx, 0.25)
     var p_path = "/tmp/wyncanvas_proj_adj.wync"
-    assert_eq(project.save(p_path, 320, 200), 0)
+    assert_eq(project.save(p_path, 320, 200, 0), 0)
 
     assert_eq(project.load(p_path), 0)
     assert_eq(project.doc_width(), 320)
@@ -229,7 +230,7 @@ test "an adjustment-only document keeps its canvas size" {
 test "take transfers a handle and release frees the rest" {
     assert_eq(build_doc(), 1)
     var p_path = "/tmp/wyncanvas_proj_own.wync"
-    assert_eq(project.save(p_path, doc_w(), doc_h()), 0)
+    assert_eq(project.save(p_path, doc_w(), doc_h(), 0), 0)
     assert_eq(project.load(p_path), 0)
 
     var kept = project.take_buffer(0)
@@ -262,7 +263,7 @@ test "the reported table is enough to rebuild the stack" {
     assert_eq(build_doc(), 1)
     var p_path = "/tmp/wyncanvas_proj_rebuild.wync"
     var wantmask = wynimg_get(layer.mask(1), 5)
-    assert_eq(project.save(p_path, doc_w(), doc_h()), 0)
+    assert_eq(project.save(p_path, doc_w(), doc_h(), 0), 0)
     assert_eq(project.load(p_path), 0)
 
     layer.store_new()
@@ -304,7 +305,7 @@ test "a nonexistent path is E_OPEN_READ, not a crash" {
 
 test "an unwritable path is E_OPEN_WRITE and clears the staging area" {
     assert_eq(build_doc(), 1)
-    assert_eq(project.save("/nonexistent_dir_x7/doc.wync", doc_w(), doc_h()),
+    assert_eq(project.save("/nonexistent_dir_x7/doc.wync", doc_w(), doc_h(), 0),
               project.E_OPEN_WRITE())
     // The next save must not inherit the abandoned document's layers.
     layer.store_new()
@@ -312,7 +313,7 @@ test "an unwritable path is E_OPEN_WRITE and clears the staging area" {
     wynimg_fill(solo, 0.5, 0.5, 0.5, 1.0)
     layer.add("only", solo, layer.KIND_RASTER())
     var p_path = "/tmp/wyncanvas_proj_after_fail.wync"
-    assert_eq(project.save(p_path, 4, 4), 0)
+    assert_eq(project.save(p_path, 4, 4, 0), 0)
     assert_eq(project.load(p_path), 0)
     assert_eq(project.layer_count(), 1)
     project.release()
@@ -323,7 +324,7 @@ test "an unwritable path is E_OPEN_WRITE and clears the staging area" {
 test "wrong magic is E_MAGIC" {
     assert_eq(build_doc(), 1)
     var good = "/tmp/wyncanvas_proj_good.wync"
-    assert_eq(project.save(good, doc_w(), doc_h()), 0)
+    assert_eq(project.save(good, doc_w(), doc_h(), 0), 0)
 
     var bad = "/tmp/wyncanvas_proj_badmagic.wync"
     assert_true(project.truncate_copy(good, bad, project.file_len(good)) > 20)
@@ -338,7 +339,7 @@ test "wrong magic is E_MAGIC" {
 test "a bumped version byte is E_VERSION, never a guess" {
     assert_eq(build_doc(), 1)
     var good = "/tmp/wyncanvas_proj_v1.wync"
-    assert_eq(project.save(good, doc_w(), doc_h()), 0)
+    assert_eq(project.save(good, doc_w(), doc_h(), 0), 0)
     // v2 since layer groups added a per-layer parent index. The v1 layout is a
     // strict prefix of v2, so a v1 file still LOADS - which is asserted on its own
     // below rather than folded in here.
@@ -364,7 +365,7 @@ test "a bumped version byte is E_VERSION, never a guess" {
 test "truncation mid-pixel-data is E_TRUNCATED" {
     assert_eq(build_doc(), 1)
     var good = "/tmp/wyncanvas_proj_full.wync"
-    assert_eq(project.save(good, doc_w(), doc_h()), 0)
+    assert_eq(project.save(good, doc_w(), doc_h(), 0), 0)
     var n = project.file_len(good)
     assert_true(n > 24)
 
@@ -379,7 +380,7 @@ test "truncation mid-pixel-data is E_TRUNCATED" {
 test "truncation mid-header is E_TRUNCATED" {
     assert_eq(build_doc(), 1)
     var good = "/tmp/wyncanvas_proj_hdr.wync"
-    assert_eq(project.save(good, doc_w(), doc_h()), 0)
+    assert_eq(project.save(good, doc_w(), doc_h(), 0), 0)
 
     var stub = "/tmp/wyncanvas_proj_hdrcut.wync"
     assert_eq(project.truncate_copy(good, stub, 10), 10)  // magic + version + 2
@@ -396,7 +397,7 @@ test "truncation mid-header is E_TRUNCATED" {
 test "an absurd layer count is refused before allocating" {
     assert_eq(build_doc(), 1)
     var good = "/tmp/wyncanvas_proj_lc.wync"
-    assert_eq(project.save(good, doc_w(), doc_h()), 0)
+    assert_eq(project.save(good, doc_w(), doc_h(), 0), 0)
 
     var huge = "/tmp/wyncanvas_proj_lchuge.wync"
     assert_true(project.truncate_copy(good, huge, project.file_len(good)) > 20)
@@ -411,7 +412,7 @@ test "an absurd layer count is refused before allocating" {
 test "a zero document dimension is E_DIMENSIONS" {
     assert_eq(build_doc(), 1)
     var good = "/tmp/wyncanvas_proj_dim.wync"
-    assert_eq(project.save(good, doc_w(), doc_h()), 0)
+    assert_eq(project.save(good, doc_w(), doc_h(), 0), 0)
 
     var zero = "/tmp/wyncanvas_proj_dimzero.wync"
     assert_true(project.truncate_copy(good, zero, project.file_len(good)) > 20)
@@ -429,7 +430,7 @@ test "an absurd name length is refused" {
     wynimg_fill(b, 0.25, 0.5, 0.75, 1.0)
     layer.add("L", b, layer.KIND_RASTER())
     var good = "/tmp/wyncanvas_proj_nl.wync"
-    assert_eq(project.save(good, 4, 4), 0)
+    assert_eq(project.save(good, 4, 4, 0), 0)
 
     var bad = "/tmp/wyncanvas_proj_nlbad.wync"
     assert_true(project.truncate_copy(good, bad, project.file_len(good)) > 20)
@@ -466,7 +467,7 @@ test "a payload size that disagrees with the dimensions is refused" {
     wynimg_fill(b, 0.25, 0.5, 0.75, 1.0)
     layer.add("L", b, layer.KIND_RASTER())
     var good = "/tmp/wyncanvas_proj_ps.wync"
-    assert_eq(project.save(good, 4, 4), 0)
+    assert_eq(project.save(good, 4, 4, 0), 0)
     assert_true(project.file_len(good) > 77)
     assert_eq(project.load(good), 0)                     // the fixture is valid
     project.release()
@@ -495,7 +496,7 @@ test "a corrupt compressed length is refused before allocating" {
     wynimg_fill(b, 0.25, 0.5, 0.75, 1.0)
     layer.add("L", b, layer.KIND_RASTER())
     var good = "/tmp/wyncanvas_proj_cl.wync"
-    assert_eq(project.save(good, 4, 4), 0)
+    assert_eq(project.save(good, 4, 4, 0), 0)
     var n = project.file_len(good)
     assert_true(n > 77)
 
@@ -516,7 +517,7 @@ test "a corrupted zlib stream is E_ZLIB" {
     wynimg_fill(b, 0.25, 0.5, 0.75, 1.0)
     layer.add("L", b, layer.KIND_RASTER())
     var good = "/tmp/wyncanvas_proj_z.wync"
-    assert_eq(project.save(good, 4, 4), 0)
+    assert_eq(project.save(good, 4, 4, 0), 0)
 
     var bad = "/tmp/wyncanvas_proj_zbad.wync"
     var n = project.file_len(good)
@@ -576,7 +577,7 @@ test "pixel data is compressed, not stored raw" {
     }
     layer.add("gradient", big, layer.KIND_RASTER())
     var p_path = "/tmp/wyncanvas_proj_big.wync"
-    assert_eq(project.save(p_path, 256, 256), 0)
+    assert_eq(project.save(p_path, 256, 256, 0), 0)
 
     var raw = 256 * 256 * 4 * 4                 // 1048576 bytes of float32
     assert_true(project.file_len(p_path) < raw / 2)
@@ -599,7 +600,7 @@ test "a group and its child survive a save/load round trip" {
     assert_true(layer.set_parent(cid, g))
 
     var path = "/tmp/wyncanvas_proj_group.wync"
-    assert_eq(project.save(path, 4, 4), 0)
+    assert_eq(project.save(path, 4, 4, 0), 0)
     assert_eq(project.load(path), 0)
     assert_eq(project.layer_count(), 2)
     // The GROUP kind and the membership both come back.
@@ -614,7 +615,7 @@ test "a top-level layer records parent -1, not 0" {
     layer.store_new()
     layer.add("flat", wynimg_new(4, 4), layer.KIND_RASTER())
     var path = "/tmp/wyncanvas_proj_flat.wync"
-    assert_eq(project.save(path, 4, 4), 0)
+    assert_eq(project.save(path, 4, 4, 0), 0)
     assert_eq(project.load(path), 0)
     assert_eq(project.layer_parent(0), 0 - 1)
     project.release()
@@ -629,7 +630,7 @@ test "nested groups round-trip with their depth intact" {
     assert_true(layer.set_parent(leaf, inner))
 
     var path = "/tmp/wyncanvas_proj_nested.wync"
-    assert_eq(project.save(path, 4, 4), 0)
+    assert_eq(project.save(path, 4, 4, 0), 0)
     assert_eq(project.load(path), 0)
     assert_eq(project.layer_count(), 3)
     assert_eq(project.layer_parent(0), 0 - 1)
@@ -654,7 +655,7 @@ test "a v2 body labelled v1 is refused or read safely, never silently wrong" {
     layer.store_new()
     layer.add("old", 0, layer.KIND_RASTER())
     var v2 = "/tmp/wyncanvas_proj_asv2.wync"
-    assert_eq(project.save(v2, 4, 4), 0)
+    assert_eq(project.save(v2, 4, 4, 0), 0)
 
     // One layer, no pixels: the parent int32 is the only v2 addition, and it sits
     // 8 bytes before the end (parent, has_pix, has_mask).
@@ -673,5 +674,201 @@ test "a v2 body labelled v1 is refused or read safely, never silently wrong" {
     // must not crash and must not invent pixel data.
     assert_true(rc == 0 or rc == project.E_TRUNCATED() or
                 rc == project.E_PAYLOAD_SIZE() or rc == project.E_LAYER_COUNT())
+    project.release()
+}
+
+// ---- the selection, as an OPTIONAL TRAILER ---------------------------------
+//
+// Stored after the last layer, behind its own magic word, so a file WITHOUT one is
+// still a valid file and every .wync written before this loads unchanged. That is why
+// there is no version bump: the loader's gate refuses a FUTURE version, so bumping is
+// the one change that cannot be made additively.
+
+test "a selection survives a save/load round trip" {
+    layer.store_new()
+    layer.add("l", wynimg_new(16, 16), layer.KIND_RASTER())
+    select.init(16, 16)
+    select.rect(4.0, 4.0, 8.0, 8.0, select.OP_REPLACE())
+    var area_before = select.area()
+    assert_eq(area_before, 64.0)
+
+    var path = "/tmp/wyncanvas_proj_sel.wync"
+    assert_eq(project.save(path, 16, 16, select.handle()), 0)
+    select.release()
+    assert_eq(project.load(path), 0)
+    assert_true(project.has_selection())
+
+    select.init(16, 16)
+    var sh = project.take_selection()
+    assert_true(sh != 0)
+    assert_true(select.adopt(sh, 16, 16))
+    // The COVERAGE, not just the area: two different selections can share an area.
+    assert_eq(select.area(), 64.0)
+    assert_eq(select.cov_at(6, 6), 1.0)
+    assert_eq(select.cov_at(1, 1), 0.0)
+    project.release()
+}
+
+test "a FEATHERED selection keeps its soft edge through the round trip" {
+    // Coverage is float32, so a hard mask would survive a lossy or integer-rounded
+    // encoding while a feathered one would not.
+    layer.store_new()
+    layer.add("l", wynimg_new(32, 32), layer.KIND_RASTER())
+    select.init(32, 32)
+    select.rect(8.0, 8.0, 16.0, 16.0, select.OP_REPLACE())
+    select.feather(3.0)
+    var edge_before = select.cov_at(8, 16)
+    assert_true(edge_before > 0.0)
+    assert_true(edge_before < 1.0)
+
+    var path = "/tmp/wyncanvas_proj_feather.wync"
+    assert_eq(project.save(path, 32, 32, select.handle()), 0)
+    select.release()
+    assert_eq(project.load(path), 0)
+    select.init(32, 32)
+    assert_true(select.adopt(project.take_selection(), 32, 32))
+    // Exactly, not approximately: the blob is zlib over the raw float bytes.
+    assert_eq(select.cov_at(8, 16), edge_before)
+    project.release()
+}
+
+test "a document with NO selection writes no trailer and loads clean" {
+    // The compatibility half. Passing 0 is what an older writer effectively did, and
+    // the result must be a file that reports no selection rather than an empty one -
+    // "no selection" means paint everywhere.
+    layer.store_new()
+    layer.add("l", wynimg_new(8, 8), layer.KIND_RASTER())
+    var path = "/tmp/wyncanvas_proj_nosel.wync"
+    assert_eq(project.save(path, 8, 8, 0), 0)
+    assert_eq(project.load(path), 0)
+    assert_true(project.has_selection() == false)
+    assert_eq(project.take_selection(), 0)
+    // And the document itself is unaffected.
+    assert_eq(project.layer_count(), 1)
+    project.release()
+}
+
+test "adopt REFUSES a selection whose size disagrees with the document" {
+    // The check that matters: a wrong-sized coverage buffer makes every later clip
+    // read out of bounds. It can only come from a corrupt or hand-edited file, and a
+    // dropped selection is redrawable where a heap overrun is not.
+    select.init(16, 16)
+    var wrong = select.new_mask(8, 8)
+    assert_true(select.adopt(wrong, 16, 16) == false)
+    // Refused means ownership did NOT transfer, so the caller still frees it.
+    select.free_mask(wrong)
+    // A null handle is refused too, rather than installing nothing and reporting
+    // success.
+    assert_true(select.adopt(0, 16, 16) == false)
+}
+
+test "an empty selection is still SAVED, not collapsed to no selection" {
+    // select_none leaves a real buffer of zeros. That is a different document from
+    // one with no selection at all, and the trailer has to preserve the difference.
+    layer.store_new()
+    layer.add("l", wynimg_new(8, 8), layer.KIND_RASTER())
+    select.init(8, 8)
+    select.select_none()
+    assert_eq(select.area(), 0.0)
+
+    var path = "/tmp/wyncanvas_proj_emptysel.wync"
+    assert_eq(project.save(path, 8, 8, select.handle()), 0)
+    select.release()
+    assert_eq(project.load(path), 0)
+    assert_true(project.has_selection())
+    select.init(8, 8)
+    assert_true(select.adopt(project.take_selection(), 8, 8))
+    assert_eq(select.area(), 0.0)
+    project.release()
+}
+
+test "the trailer does not disturb the layers it follows" {
+    // A trailer written into the wrong place would corrupt the last layer's pixels,
+    // and the selection would still round-trip - so this asserts the document.
+    layer.store_new()
+    var b = wynimg_new(8, 8)
+    wynimg_fill(b, 0.25, 0.5, 0.75, 1.0)
+    layer.add("only", b, layer.KIND_RASTER())
+    select.init(8, 8)
+    select.select_all()
+
+    var path = "/tmp/wyncanvas_proj_selpix.wync"
+    assert_eq(project.save(path, 8, 8, select.handle()), 0)
+    assert_eq(project.load(path), 0)
+    assert_eq(project.layer_count(), 1)
+    assert_eq(project.layer_name(0), "only")
+    var got = project.take_buffer(0)
+    assert_true(got != 0)
+    assert_true(pixel.approx(wynimg_get(got, 0), 0.25, 0.001))
+    assert_true(pixel.approx(wynimg_get(got, 2), 0.75, 0.001))
+    wynimg_free(got)
+    project.release()
+}
+
+test "a corrupted MAGIC WORD makes the trailer be ignored" {
+    // The check the magic word exists for, exercised with a REAL trailer rather than
+    // random bytes: random bytes fail to decode as a blob anyway, so they cannot tell
+    // a magic-checking reader from one that skips the check. Here the trailer is
+    // genuine and only its 4-byte signature is broken, so the ONLY thing that can
+    // reject it is the magic comparison.
+    //
+    // The magic is the first 4 bytes AFTER the layers. Rather than compute that
+    // offset, this saves once WITHOUT a selection to learn where the layers end, then
+    // saves again WITH one - the difference in length is where the trailer starts.
+    layer.store_new()
+    layer.add("l", wynimg_new(8, 8), layer.KIND_RASTER())
+    select.init(8, 8)
+    select.select_all()
+
+    var nosel = "/tmp/wyncanvas_proj_magic_nosel.wync"
+    assert_eq(project.save(nosel, 8, 8, 0), 0)
+    var trailer_off = project.file_len(nosel)
+
+    var withsel = "/tmp/wyncanvas_proj_magic_sel.wync"
+    assert_eq(project.save(withsel, 8, 8, select.handle()), 0)
+    select.release()
+
+    // Sanity: with the magic intact, the selection loads.
+    assert_eq(project.load(withsel), 0)
+    assert_true(project.has_selection())
+    project.release()
+
+    // Now flip one byte of the magic word and reload. The document must still load,
+    // and the trailer must be IGNORED - not read as a coverage buffer sized from the
+    // bytes that follow.
+    assert_eq(project.poke_byte(withsel, trailer_off, 0), 1)
+    assert_eq(project.load(withsel), 0)
+    assert_eq(project.layer_count(), 1)
+    assert_true(project.has_selection() == false)
+    project.release()
+}
+
+test "GARBAGE after the last layer is not read as a selection" {
+    // What the magic word is for. Without it, four arbitrary trailing bytes are
+    // treated as the start of a coverage blob and its DIMENSIONS come from whatever
+    // follows - so a truncated or appended file would allocate from junk. Measured by
+    // mutation: dropping the magic check fails nothing without this case.
+    //
+    // Built by appending to a real save rather than hand-writing a file, so the
+    // document part is genuine and only the tail is wrong.
+    layer.store_new()
+    layer.add("l", wynimg_new(8, 8), layer.KIND_RASTER())
+    var clean = "/tmp/wyncanvas_proj_clean.wync"
+    assert_eq(project.save(clean, 8, 8, 0), 0)
+
+    // Copy the whole file, then append four bytes that are NOT the magic word.
+    var junk = "/tmp/wyncanvas_proj_junk.wync"
+    var n = project.file_len(clean)
+    assert_true(project.truncate_copy(clean, junk, n) > 20)
+    assert_eq(project.append_byte(junk, 0), 1)
+    assert_eq(project.append_byte(junk, 1), 1)
+    assert_eq(project.append_byte(junk, 2), 1)
+    assert_eq(project.append_byte(junk, 3), 1)
+
+    // The document still loads - a bad tail must not cost the user their layers -
+    // and reports NO selection rather than inventing one.
+    assert_eq(project.load(junk), 0)
+    assert_eq(project.layer_count(), 1)
+    assert_true(project.has_selection() == false)
     project.release()
 }

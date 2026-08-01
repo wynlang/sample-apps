@@ -1355,7 +1355,9 @@ fn save_doc(path: string) {
         save_png(path)
         return
     }
-    var rc = project.save(path, g_doc_w, g_doc_h)
+    // The live selection travels with the document. `select.handle()` is 0 when there
+    // is none, which is exactly what project.save reads as "write no trailer".
+    var rc = project.save(path, g_doc_w, g_doc_h, select.handle())
     if rc == project.OK() {
         g_msg = "wrote " + path + " (" + layer.count().to_string() + " layers)"
         return
@@ -1443,9 +1445,20 @@ fn open_wync(path: string) {
     g_active = layer.count() - 1
     view.set_doc(g_doc_w, g_doc_h)
     view.zoom_fit()
-    // The selection is document-sized coverage, so it cannot survive a document
-    // of different dimensions. Reallocated empty rather than kept and clipped.
+    // The selection is document-sized coverage, so the OLD one cannot survive a
+    // document of different dimensions - it is replaced, never kept and clipped.
     select.init(g_doc_w, g_doc_h)
+    // ...but the SAVED selection comes back, when the file carried one. Adopted with
+    // take_selection so `release()` below does not free it, and only when its
+    // dimensions match the document: a mismatch means a hand-edited or corrupt file,
+    // and installing a wrong-sized coverage buffer would make every later clip read
+    // out of bounds. A dropped selection is redrawable; that is not.
+    if project.has_selection() {
+        var sh = project.take_selection()
+        if sh != 0 {
+            if select.adopt(sh, g_doc_w, g_doc_h) == false { wynimg_free(sh) }
+        }
+    }
     g_msg = "opened " + path + " (" + n.to_string() + " layers)"
     g_dirty = 1
 }
