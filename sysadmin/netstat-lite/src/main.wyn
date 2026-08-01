@@ -11,8 +11,8 @@ fn main() {
     // Hostname and IPs
     var hostname = System.exec("hostname").trim()
     var ip = System.exec("ifconfig 2>/dev/null | grep 'inet ' | grep -v 127.0.0.1 | head -1 | awk '{print $2}'").trim()
-    print("  \x1b[1mHost:\x1b[0m " + hostname)
-    print("  \x1b[1mIP:\x1b[0m   " + ip)
+    print("  \x1b[1mHost:\x1b[0m ${hostname}")
+    print("  \x1b[1mIP:\x1b[0m   ${ip}")
     print("")
 
     // Network interfaces
@@ -31,11 +31,11 @@ fn main() {
             if trimmed.contains("flags=") {
                 // Interface name line
                 var name = trimmed.split_at(":", 0)
-                print("  \x1b[1;37m" + name + "\x1b[0m")
+                print("  \x1b[1;37m${name}\x1b[0m")
             } else if trimmed.contains("inet ") {
-                print("    \x1b[32m" + trimmed + "\x1b[0m")
+                print("    \x1b[32m${trimmed}\x1b[0m")
             } else {
-                print("    \x1b[90m" + trimmed + "\x1b[0m")
+                print("    \x1b[90m${trimmed}\x1b[0m")
             }
         }
     }
@@ -56,9 +56,9 @@ fn main() {
                 line_num += 1
                 if line.len() == 0 { continue }
                 if line_num == 1 {
-                    print("  \x1b[1;37m" + line + "\x1b[0m")
+                    print("  \x1b[1;37m${line}\x1b[0m")
                 } else {
-                    print("  " + line)
+                    print("  ${line}")
                 }
             }
         }
@@ -80,13 +80,13 @@ fn main() {
                 var line = conns.substring(line_start, idx).trim()
                 line_start = idx + 1
                 if line.len() > 0 {
-                    print("  " + line)
+                    print("  ${line}")
                     conn_count += 1
                 }
             }
         }
         print("")
-        print("  \x1b[90m" + conn_count.to_string() + " established connection(s) shown\x1b[0m")
+        print("  \x1b[90m${conn_count} established connection(s) shown\x1b[0m")
     } else {
         print("  \x1b[90mNo established connections\x1b[0m")
     }
@@ -104,7 +104,7 @@ fn main() {
                 var line = dns.substring(line_start, idx).trim()
                 line_start = idx + 1
                 if line.len() > 0 {
-                    print("  " + line)
+                    print("  ${line}")
                 }
             }
         }

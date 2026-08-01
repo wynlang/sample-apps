@@ -66,24 +66,24 @@ fn main() {
     var data1 = [64, 34, 25, 12, 22, 11, 90, 1, 45, 78]
     var data2 = [64, 34, 25, 12, 22, 11, 90, 1, 45, 78]
     var n = data1.len()
-    print("Input:     " + data1.join(", "))
+    print("Input:     ${data1.join(", ")}")
 
     // Bubble sort (in-place)
     bubble_sort(data1, n)
     var check1 = ""
     if is_sorted(data1) == 1 { check1 = " ✓" } else { check1 = " ✗" }
-    print("Bubble:    " + data1.join(", ") + check1)
+    print("Bubble:    ${data1.join(", ")}${check1}")
 
     // Quicksort (in-place)
     quicksort(data2, 0, n - 1)
     var check2 = ""
     if is_sorted(data2) == 1 { check2 = " ✓" } else { check2 = " ✗" }
-    print("Quicksort: " + data2.join(", ") + check2)
+    print("Quicksort: ${data2.join(", ")}${check2}")
 
     // Built-in sort
     var data3 = [64, 34, 25, 12, 22, 11, 90, 1, 45, 78]
     data3.sort()
-    print("Built-in:  " + data3.join(", ") + " ✓")
+    print("Built-in:  ${data3.join(", ")} ✓")
 
     // Race: sort 5000 elements concurrently
     print("\n--- Concurrent Sort Race (n=5000) ---")
@@ -91,7 +91,7 @@ fn main() {
     futures.push(spawn run_bubble(5000))
     futures.push(spawn run_quick(5000))
     var results = await_all(futures)
-    print("Bubble sorted correctly: " + results[0].to_string())
-    print("Quick sorted correctly:  " + results[1].to_string())
+    print("Bubble sorted correctly: ${results[0]}")
+    print("Quick sorted correctly:  ${results[1]}")
     print("  ✓ Concurrent sort race finished!")
 }
