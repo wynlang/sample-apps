@@ -298,6 +298,100 @@ fn save_captures(fid: int) {
     fcap_vals[fid] = sdup(new_vals)
 }
 
+// Write a closure's captured values back into the ENCLOSING scope.
+//
+// A capture here is a SNAPSHOT: restore_captures re-defines each captured name in
+// the callee's fresh scope, and save_captures copies the modified values back into
+// the function's own slot so the NEXT call sees them. That makes a counter work
+// from inside the closure and leaves the outer variable untouched, so
+//
+//     let c = 0
+//     const bump = () => { c = c + 1; return c }
+//     bump(); bump(); c        // returned 1 then 2, and c was still 0
+//
+// which is wrong for arrows AND for function expressions - a closure that cannot
+// mutate what it closes over is not a closure. Node says 2.
+//
+// So this runs AFTER epop, once the callee's scope is gone and the enclosing
+// binding is the one `eset` will find. Split from save_captures rather than folded
+// into it because the two must happen on OPPOSITE sides of the pop, and calling
+// one function twice around a pop would have been the same bug with more steps.
+//
+// `eset` and not `edef`: eset walks back to the existing binding and assigns it,
+// which is what "the outer variable changed" means. edef would push a NEW entry
+// that the next epop discards - the original bug, one layer out.
+//
+// A name that no longer exists in any live scope is simply not found by eset,
+// which then defines it at the current level; harmless, because the only way to
+// reach that is a closure outliving its scope, where there is nothing to update.
+// Reduce a stored params string to a comma-joined list of bare NAMES: drop any
+// "=default" suffix and the "..." rest marker. Same spelling callfn splits on.
+fn strip_param_meta(psrc: string) -> string {
+    var out = ""
+    var parts = psrc.split(",")
+    var i = 0
+    while i < parts.len() {
+        var nm = parts[i]
+        var eq = nm.index_of("=")
+        if eq > 0 { nm = nm.substring(0, eq) }
+        if nm.starts_with("...") { nm = nm.substring(3, nm.len()) }
+        nm = nm.trim()
+        if nm.len() > 0 {
+            if out.len() > 0 { out = out + "," }
+            out = out + nm
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fn writeback_captures(fid: int, before: string) {
+    var cap_k = sdup(fcap_keys[fid])
+    var cap_v = sdup(fcap_vals[fid])
+    if cap_k.len() == 0 { return }
+    var keys = cap_k.split("\x02")
+    var vals = cap_v.split("\x02")
+    var olds = before.split("\x02")
+    // A PARAMETER SHADOWS a captured name of the same spelling, and its value must
+    // NOT escape:
+    //
+    //     let n = 100
+    //     const f = (n) => { n = n + 1; return n }
+    //     f(1)          // 2, and the outer n must still be 100
+    //
+    // The parameter is bound in the callee's scope over the captured entry, so
+    // save_captures reads the PARAMETER's value under the captured name. Writing
+    // that back sets the outer variable to the argument - measured: this regressed
+    // `2 100` to `2 2` before the guard. Comma-joined with the "..." rest marker
+    // and any `=default` suffix stripped, matching how callfn splits it.
+    var pnames = "," + strip_param_meta(sdup(fparams[fid])) + ","
+    var i = 0
+    while i < keys.len() {
+        if i < vals.len() {
+            // ONLY WRITE BACK WHAT THE CALLEE ACTUALLY CHANGED.
+            //
+            // capture_env captures EVERY binding in scope, not just the ones a
+            // closure mentions - so writing all of them back restores a stale
+            // snapshot of variables the callee never touched. That is not a
+            // theoretical risk; it broke the test suite's own counter:
+            //
+            //     let pass = 0
+            //     function expect(...) { ... pass++ ... }
+            //     expect(c1); expect(c2)      // pass came back 1, not 2
+            //
+            // because a DIFFERENT closure had captured `pass` while it was 0 and
+            // put that 0 back on return. Comparing against the value captured at
+            // entry makes the write-back precise: an untouched name is skipped, so
+            // it cannot clobber a change made by anyone else.
+            var unchanged = 0
+            if i < olds.len() { if olds[i] == vals[i] { unchanged = 1 } }
+            if pnames.contains("," + keys[i] + ",") { unchanged = 1 }
+            if unchanged == 0 { eset(keys[i], vals[i]) }
+        }
+        i = i + 1
+    }
+}
+
 // === Array storage ===
 astore = [""]
 alens = [0]
@@ -1864,8 +1958,12 @@ fn callfn(callee: string, args: [string]) -> string {
     if retflag == 0 { result = vundef() }
     retflag = 0
     // Save modified captures back
+    // The values as they were at ENTRY, so the write-back can tell a real change
+    // from an untouched capture.
+    var cap_before = sdup(fcap_vals[fid])
     save_captures(fid)
     epop()
+    writeback_captures(fid, cap_before)
     src = sdup(s1); pos = p1; tt = t1; tv = sdup(v1)
     call_depth = call_depth - 1
     return result
@@ -1915,8 +2013,12 @@ fn callfn2(callee: string, a0: string, a1: string) -> string {
     var result = sdup(retval)
     if retflag == 0 { result = vundef() }
     retflag = 0
+    // The values as they were at ENTRY, so the write-back can tell a real change
+    // from an untouched capture.
+    var cap_before = sdup(fcap_vals[fid])
     save_captures(fid)
     epop()
+    writeback_captures(fid, cap_before)
     src = sdup(s1); pos = p1; tt = t1; tv = sdup(v1)
     call_depth = call_depth - 1
     return result

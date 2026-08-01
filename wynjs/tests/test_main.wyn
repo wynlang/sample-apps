@@ -76,6 +76,7 @@ fn main() {
         "bitwise",
         "loose_equality",
         "closures",
+        "closure_writeback",
         "recursion",
         "short_circuit",
         "early_return",
