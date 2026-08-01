@@ -596,6 +596,75 @@ fn on_alpha_down(id: int) {
 // reverses one user gesture. Writing layer.* without the record would make Undo
 // silently skip the operation, which is worse than not having the button.
 
+// Wrap the active layer in a new group.
+//
+// GROUPING AN EXISTING LAYER, rather than creating an empty group to drag things
+// into. A group must sit BELOW its children (set_parent enforces it, and the
+// render walk relies on it), so an empty group added above the active layer could
+// never contain it - the user would create a group and find nothing could go in.
+// Inserting the group directly beneath the active layer and parenting that layer
+// into it is the one gesture that is always valid.
+//
+// The undo entry is the layer INSERT, which is what history already models. That
+// leaves the parent assignment outside the log: undoing removes the group row, and
+// `remove` orphans its children, so the child returns to the top level and the
+// document is back where it started. Reached that way rather than by teaching
+// history about parents, which would be a new record type for a state that
+// `remove` already restores correctly.
+fn on_layer_group(id: int) {
+    if g_doc_w <= 0 {
+        g_msg = "no document"
+        return
+    }
+    if g_active < 0 {
+        g_msg = "no active layer"
+        return
+    }
+    if layer.count() >= 64 {
+        g_msg = "too many layers"
+        return
+    }
+    var target = g_active
+    // THE TARGET'S CURRENT GROUP, remembered before anything moves. Grouping a
+    // layer that is already inside a group has to put the NEW group where the
+    // layer was - inside the old one - or the two end up as siblings and the
+    // layer moves out of the group it was in. Found by the test asserting
+    // nesting; the first version simply dropped the old parent.
+    var outer = layer.parent(target)
+    var name = "group " + layer.count().to_string()
+    // Beneath the target, so the group is below its child.
+    layer.insert(target, name, 0, layer.KIND_GROUP())
+    history.record_add_layer(target, name, 0, layer.KIND_GROUP())
+    // The insert pushed everything from `target` up by one, so the layer is now
+    // at target+1 and the group occupies target. `outer` was below target (a
+    // parent always is), so its index is unchanged.
+    if layer.set_parent(target + 1, target) {
+        // Re-establish the enclosing group around the NEW group, so nesting
+        // deepens rather than flattening.
+        if outer != 0 - 1 { layer.set_parent(target, outer) }
+        g_active = target + 1
+        g_msg = "grouped into " + name
+    } else {
+        g_msg = "could not group"
+    }
+    g_dirty = 1
+}
+
+// Take the active layer out of its group, back to the top level.
+fn on_layer_ungroup(id: int) {
+    if g_active < 0 {
+        g_msg = "no active layer"
+        return
+    }
+    if layer.parent(g_active) == 0 - 1 {
+        g_msg = "not in a group"
+        return
+    }
+    layer.set_parent(g_active, 0 - 1)
+    g_msg = "ungrouped"
+    g_dirty = 1
+}
+
 fn on_layer_add(id: int) {
     if g_doc_w <= 0 {
         g_msg = "no document"
@@ -1028,6 +1097,13 @@ fn handle_shortcut(key: int, mod: int) {
         if key == gui.SCANCODE_I { on_sel_invert(0) return }
         // Cmd+= and Cmd+- for zoom, with Cmd+0 for fit: the bindings every
         // browser and editor shares, so they need no discovery.
+        // Cmd+G groups, Cmd+Shift+G ungroups - the binding every editor shares,
+        // so it needs no discovery. Checked before the zoom keys purely for
+        // grouping with the other layer-tree commands.
+        if key == gui.SCANCODE_G {
+            if shift == 1 { on_layer_ungroup(0) } else { on_layer_group(0) }
+            return
+        }
         if key == gui.SCANCODE_EQUALS { on_zoom_in(0) return }
         if key == gui.SCANCODE_MINUS { on_zoom_out(0) return }
         if key == gui.SCANCODE_0 { on_zoom_fit(0) return }
@@ -2263,6 +2339,13 @@ fn build_form(win: int, font: int) -> Ui {
                            on_blend_prev)
     ui = widgets.Ui_button(ui, "b>", PANEL_X() + 42, ly + 24, 32, 22,
                            on_blend_next)
+    // Group / ungroup, in the space left on the blend row. "[G]" and "]G["
+    // rather than words because the panel is 250px wide and the labels have to
+    // sit beside four other controls; the brackets read as "wrap" and "unwrap".
+    ui = widgets.Ui_button(ui, "[G]", PANEL_X() + 80, ly + 24, 36, 22,
+                           on_layer_group)
+    ui = widgets.Ui_button(ui, "]G[", PANEL_X() + 118, ly + 24, 36, 22,
+                           on_layer_ungroup)
 
     // Filters, in the toolbar's second row. Abbreviated labels because seven
     // filters at full width would not fit; their PARAMETERS come from the
@@ -2734,6 +2817,28 @@ fn run_action(ui: Ui, act: string) -> Ui {
             return ui
         }
         print("  sliderx -> thumb=${widgets.Ui_slider_thumb_x(ui, g_strength_id)} val=${widgets.Ui_val(ui, g_strength_id)}")
+        return ui
+    }
+
+    // group / ungroup - the two layer-tree commands, through the same handlers
+    // the buttons call.
+    if act == "group" {
+        on_layer_group(0)
+        print("  group -> ${g_msg} count=${layer.count()} parent(${g_active})=${layer.parent(g_active)}")
+        return ui
+    }
+    if act == "ungroup" {
+        on_layer_ungroup(0)
+        print("  ungroup -> ${g_msg} parent(${g_active})=${layer.parent(g_active)}")
+        return ui
+    }
+    // tree - the whole layer tree, one row per layer, for asserting structure.
+    if act == "tree" {
+        var ti = 0
+        while ti < layer.count() {
+            print("  tree ${ti} ${layer.name(ti)} kind=${layer.kind(ti)} parent=${layer.parent(ti)}")
+            ti = ti + 1
+        }
         return ui
     }
 

@@ -19,8 +19,9 @@ their own and blends that into its parent with the group's own opacity, blend mo
 and mask - so "group at 50%" dims the finished stack rather than fading each child
 separately, which is a visibly different picture. Groups nest, hiding one hides its
 contents, and membership survives a `.wync` round trip (format v2; a v1 file still
-loads, with every layer top-level). The UI does not yet have a button to create one
-- the store, the render walk and the document format do.
+loads, with every layer top-level). `[G]` / `]G[` in the layer panel, or Cmd+G /
+Cmd+Shift+G, wrap the active layer in a new group or take it back out; grouping a
+layer that is already grouped nests rather than flattening.
 
 Honest limitations of what *is* implemented:
 
