@@ -47,27 +47,61 @@ fn valid(id: int) -> bool {
 
 // Appends a layer and returns its id. `buf` is a wynimg handle for raster
 // layers, or 0 for adjustment layers (which have no pixels of their own).
+// ---- the only three functions that touch every column ---------------------
+//
+// A NEW COLUMN IS ADDED IN THESE THREE PLACES AND NOWHERE ELSE. Before this,
+// `add` wrote all the columns twice (a reuse branch and a push branch), `insert`
+// wrote them twice more (a shift loop and an initialise block), `remove` shifted
+// them and `swap` saved/assigned/restored them - eight hand-written column lists
+// in four functions. Adding one column meant editing all eight, and MISSING one
+// is silent: the arrays end up at different lengths and the symptom is a crash in
+// an unrelated operation much later. src/history.wyn records exactly this bug
+// ("a second writer left them at DIFFERENT LENGTHS, which crashed the first
+// structural undo") and fixed it the same way.
+//
+// This is a behaviour-neutral refactor: same writes, same order, one copy.
+
+// Write a complete row at `i`, which must already exist.
+fn row_set(i: int, name: string, buf: int, kind: int, op: float,
+           bl: int, vis: int, mask: int, amt: float) {
+    l_names[i] = name
+    l_bufs[i] = buf
+    l_kinds[i] = kind
+    l_opacity[i] = op
+    l_blend[i] = bl
+    l_visible[i] = vis
+    l_masks[i] = mask
+    l_amount[i] = amt
+}
+
+// Copy row `src` onto row `dst`. Used by every shift, in both directions.
+fn row_copy(dst: int, src: int) {
+    row_set(dst, l_names[src], l_bufs[src], l_kinds[src], l_opacity[src],
+            l_blend[src], l_visible[src], l_masks[src], l_amount[src])
+}
+
+// Append one row's worth of capacity, so `row_set` can then write it.
+//
+// The reuse branch exists because `remove` decrements the count without
+// shrinking the arrays, so a later add finds capacity already there - a slot
+// that must be OVERWRITTEN rather than pushed, or the arrays grow without bound
+// across an add/remove cycle.
+fn row_grow() {
+    if l_count < l_names.len() { return }
+    l_names.push("")
+    l_bufs.push(0)
+    l_kinds.push(0)
+    l_opacity.push(1.0)
+    l_blend.push(0)
+    l_visible.push(1)
+    l_masks.push(0)
+    l_amount.push(0.0)
+}
+
 pub fn add(name: string, buf: int, kind: int) -> int {
     var id = l_count
-    if id < l_names.len() {
-        l_names[id] = name
-        l_bufs[id] = buf
-        l_kinds[id] = kind
-        l_opacity[id] = 1.0
-        l_blend[id] = 0
-        l_visible[id] = 1
-        l_masks[id] = 0
-        l_amount[id] = 0.0
-    } else {
-        l_names.push(name)
-        l_bufs.push(buf)
-        l_kinds.push(kind)
-        l_opacity.push(1.0)
-        l_blend.push(0)
-        l_visible.push(1)
-        l_masks.push(0)
-        l_amount.push(0.0)
-    }
+    row_grow()
+    row_set(id, name, buf, kind, 1.0, 0, 1, 0, 0.0)
     l_count = l_count + 1
     return id
 }
@@ -167,14 +201,7 @@ pub fn remove(id: int) -> int {
     if valid(id) == false { return 0 }
     var i = id
     while i < l_count - 1 {
-        l_names[i] = l_names[i + 1]
-        l_bufs[i] = l_bufs[i + 1]
-        l_kinds[i] = l_kinds[i + 1]
-        l_opacity[i] = l_opacity[i + 1]
-        l_blend[i] = l_blend[i + 1]
-        l_visible[i] = l_visible[i + 1]
-        l_masks[i] = l_masks[i + 1]
-        l_amount[i] = l_amount[i + 1]
+        row_copy(i, i + 1)
         i = i + 1
     }
     l_count = l_count - 1
@@ -193,24 +220,10 @@ pub fn insert(pos: int, name: string, buf: int, kind: int) -> int {
     add(name, 0, 0)
     var i = l_count - 1
     while i > p {
-        l_names[i] = l_names[i - 1]
-        l_bufs[i] = l_bufs[i - 1]
-        l_kinds[i] = l_kinds[i - 1]
-        l_opacity[i] = l_opacity[i - 1]
-        l_blend[i] = l_blend[i - 1]
-        l_visible[i] = l_visible[i - 1]
-        l_masks[i] = l_masks[i - 1]
-        l_amount[i] = l_amount[i - 1]
+        row_copy(i, i - 1)
         i = i - 1
     }
-    l_names[p] = name
-    l_bufs[p] = buf
-    l_kinds[p] = kind
-    l_opacity[p] = 1.0
-    l_blend[p] = 0
-    l_visible[p] = 1
-    l_masks[p] = 0
-    l_amount[p] = 0.0
+    row_set(p, name, buf, kind, 1.0, 0, 1, 0, 0.0)
     return p
 }
 
@@ -221,30 +234,16 @@ pub fn swap(a: int, b: int) -> int {
     if valid(a) == false { return 0 }
     if valid(b) == false { return 0 }
     if a == b { return 1 }
-    var n = l_names[a]
-    var bu = l_bufs[a]
-    var k = l_kinds[a]
-    var o = l_opacity[a]
-    var bl = l_blend[a]
-    var v = l_visible[a]
-    var m = l_masks[a]
-    var am = l_amount[a]
-    l_names[a] = l_names[b]
-    l_bufs[a] = l_bufs[b]
-    l_kinds[a] = l_kinds[b]
-    l_opacity[a] = l_opacity[b]
-    l_blend[a] = l_blend[b]
-    l_visible[a] = l_visible[b]
-    l_masks[a] = l_masks[b]
-    l_amount[a] = l_amount[b]
-    l_names[b] = n
-    l_bufs[b] = bu
-    l_kinds[b] = k
-    l_opacity[b] = o
-    l_blend[b] = bl
-    l_visible[b] = v
-    l_masks[b] = m
-    l_amount[b] = am
+    // Through the scratch row at the top of the arrays, which row_grow has
+    // guaranteed exists. Saving the eight values into eight locals worked, but it
+    // was a third hand-written column list - and the one most likely to be
+    // half-updated, since a missed column there swaps seven fields and silently
+    // leaves the eighth behind.
+    var tmp = l_count
+    row_grow()
+    row_copy(tmp, a)
+    row_copy(a, b)
+    row_copy(b, tmp)
     return 1
 }
 
