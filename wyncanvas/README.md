@@ -12,7 +12,15 @@ delete / reorder / opacity / blend-mode / visibility, **coverage selections**
 sharpen, saturation, levels, curves, invert) applied to the active layer through
 the selection, and a **text tool** - every one of them a single undoable command.
 
-**Not implemented:** vectors, PSD, layer groups.
+**Not implemented:** vectors, PSD.
+
+**Layer groups** are implemented: a group composites its children into a buffer of
+their own and blends that into its parent with the group's own opacity, blend mode
+and mask - so "group at 50%" dims the finished stack rather than fading each child
+separately, which is a visibly different picture. Groups nest, hiding one hides its
+contents, and membership survives a `.wync` round trip (format v2; a v1 file still
+loads, with every layer top-level). The UI does not yet have a button to create one
+- the store, the render walk and the document format do.
 
 Honest limitations of what *is* implemented:
 

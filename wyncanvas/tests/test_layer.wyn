@@ -166,3 +166,143 @@ test "mutating an out-of-range id is a safe no-op" {
     assert_eq(layer.mask(99), 0)
     assert_true(pixel.approx(layer.adjust_amount(99), 0.0, 0.00001))
 }
+
+// ---- grouping ---------------------------------------------------------------
+//
+// The parent column holds an INDEX, and this store's identities ARE indices, so
+// the interesting cases are all "a row moved". Each check below is a way the tree
+// could be left pointing at the wrong row - which renders into the wrong
+// accumulator rather than crashing, so nothing else would catch it.
+
+test "a fresh layer belongs to no group" {
+    layer.store_new()
+    var a = layer.add("a", 0, layer.KIND_RASTER())
+    assert_eq(layer.parent(a), 0 - 1)
+    assert_eq(layer.child_count(0 - 1), 1)
+}
+
+test "a layer can be put into a group above it, and taken out again" {
+    layer.store_new()
+    var g = layer.add("g", 0, layer.KIND_GROUP())
+    var c = layer.add("c", 0, layer.KIND_RASTER())
+    assert_true(layer.set_parent(c, g))
+    assert_eq(layer.parent(c), g)
+    assert_eq(layer.child_count(g), 1)
+    assert_true(layer.set_parent(c, 0 - 1))
+    assert_eq(layer.parent(c), 0 - 1)
+    assert_eq(layer.child_count(g), 0)
+}
+
+test "only a GROUP can be a parent" {
+    // A raster layer holding children would give the render walk no accumulator
+    // to composite them into.
+    layer.store_new()
+    var r = layer.add("r", 0, layer.KIND_RASTER())
+    var c = layer.add("c", 0, layer.KIND_RASTER())
+    assert_true(layer.set_parent(c, r) == false)
+    assert_eq(layer.parent(c), 0 - 1)
+}
+
+test "a group cannot be its own parent, nor part of a cycle" {
+    layer.store_new()
+    var g1 = layer.add("g1", 0, layer.KIND_GROUP())
+    var g2 = layer.add("g2", 0, layer.KIND_GROUP())
+    assert_true(layer.set_parent(g1, g1) == false)
+    assert_true(layer.set_parent(g2, g1))
+    // g1 -> g2 would close the loop g1 -> g2 -> g1, which the walk would follow
+    // forever.
+    assert_true(layer.set_parent(g1, g2) == false)
+    assert_eq(layer.parent(g1), 0 - 1)
+}
+
+test "a parent must sit BELOW its child in the stack" {
+    // The walk composites a group by scanning upward for its children, and every
+    // editor draws a group under its contents.
+    layer.store_new()
+    var c = layer.add("c", 0, layer.KIND_RASTER())
+    var g = layer.add("g", 0, layer.KIND_GROUP())
+    assert_true(layer.set_parent(c, g) == false)
+}
+
+test "REMOVING a group orphans its children rather than stranding them" {
+    // A child left pointing at a deleted index would name whichever row shifted
+    // into that slot - so it would render inside an unrelated group.
+    layer.store_new()
+    var g = layer.add("g", 0, layer.KIND_GROUP())
+    var c1 = layer.add("c1", 0, layer.KIND_RASTER())
+    var c2 = layer.add("c2", 0, layer.KIND_RASTER())
+    layer.set_parent(c1, g)
+    layer.set_parent(c2, g)
+    layer.remove(g)
+    assert_eq(layer.count(), 2)
+    // Both are now top-level, and visible - not hidden inside a phantom group.
+    assert_eq(layer.parent(0), 0 - 1)
+    assert_eq(layer.parent(1), 0 - 1)
+}
+
+test "REMOVING a row below a group renumbers the parents above it" {
+    layer.store_new()
+    var junk = layer.add("junk", 0, layer.KIND_RASTER())
+    var g = layer.add("g", 0, layer.KIND_GROUP())
+    var c = layer.add("c", 0, layer.KIND_RASTER())
+    layer.set_parent(c, g)
+    assert_eq(layer.parent(c), 1)
+    // Deleting index 0 slides the group from 1 to 0 and the child from 2 to 1.
+    layer.remove(junk)
+    assert_eq(layer.count(), 2)
+    assert_eq(layer.kind(0), layer.KIND_GROUP())
+    assert_eq(layer.parent(1), 0)
+}
+
+test "INSERTING below a group renumbers the parents above it" {
+    layer.store_new()
+    var g = layer.add("g", 0, layer.KIND_GROUP())
+    var c = layer.add("c", 0, layer.KIND_RASTER())
+    layer.set_parent(c, g)
+    assert_eq(layer.parent(c), 0)
+    // A new row at 0 pushes the group to 1 and the child to 2.
+    layer.insert(0, "new", 0, layer.KIND_RASTER())
+    assert_eq(layer.count(), 3)
+    assert_eq(layer.kind(1), layer.KIND_GROUP())
+    assert_eq(layer.parent(2), 1)
+}
+
+test "SWAPPING two groups carries their children with them" {
+    // Two sequential rewrites would map a->b and then b->a, undoing the first -
+    // which is why the swap goes through a sentinel.
+    layer.store_new()
+    var g1 = layer.add("g1", 0, layer.KIND_GROUP())
+    var g2 = layer.add("g2", 0, layer.KIND_GROUP())
+    var c1 = layer.add("c1", 0, layer.KIND_RASTER())
+    var c2 = layer.add("c2", 0, layer.KIND_RASTER())
+    layer.set_parent(c1, g1)
+    layer.set_parent(c2, g2)
+    assert_eq(layer.parent(c1), 0)
+    assert_eq(layer.parent(c2), 1)
+    layer.swap(g1, g2)
+    // g1 is now at index 1 and g2 at 0, and each child follows its own group.
+    assert_eq(layer.name(0), "g2")
+    assert_eq(layer.name(1), "g1")
+    assert_eq(layer.parent(c1), 1)
+    assert_eq(layer.parent(c2), 0)
+}
+
+test "child_count counts only direct children" {
+    // A nested group's contents belong to the inner group, not to both.
+    layer.store_new()
+    var outer = layer.add("outer", 0, layer.KIND_GROUP())
+    var inner = layer.add("inner", 0, layer.KIND_GROUP())
+    var leaf = layer.add("leaf", 0, layer.KIND_RASTER())
+    layer.set_parent(inner, outer)
+    layer.set_parent(leaf, inner)
+    assert_eq(layer.child_count(outer), 1)
+    assert_eq(layer.child_count(inner), 1)
+}
+
+test "an out-of-range parent is refused" {
+    layer.store_new()
+    var a = layer.add("a", 0, layer.KIND_RASTER())
+    assert_true(layer.set_parent(a, 99) == false)
+    assert_true(layer.set_parent(99, 0) == false)
+    assert_eq(layer.parent(a), 0 - 1)
+}

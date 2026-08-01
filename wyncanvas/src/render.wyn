@@ -30,27 +30,64 @@
 import pixel
 import layer
 
-pub fn compose(w: int, h: int) -> int {
+// Composite every layer whose parent is `g` into a fresh buffer.
+//
+// A GROUP IS COMPOSITE-THEN-FADE, NOT FADE-EACH-CHILD, and that is the entire
+// reason groups are a render feature rather than a naming convention. The
+// children are blended into a buffer of their own, and only then is that buffer
+// blended into the parent using the GROUP's opacity, blend mode and mask. A group
+// at 50% therefore dims the finished stack; multiplying each child by 0.5 instead
+// would let the lower children show through the upper ones, which is a visibly
+// different picture and the thing every editor gets right.
+//
+// Recursion depth is bounded by the tree, and the tree cannot cycle: set_parent
+// refuses a cycle and refuses a parent above its child, so a group's children are
+// always at higher indices and the walk strictly descends. The `depth` guard is
+// still there, because this store is also written by undo replay and a hang is a
+// worse failure than a wrong picture.
+fn compose_group(g: int, w: int, h: int, depth: int) -> int {
     var out = wynimg::new(w, h)
     if out == 0 { return 0 }
+    if depth > 32 { return out }
 
     var i = 0
     while i < layer.count() {
-        if layer.visible(i) {
-            var k = layer.kind(i)
-            if k == layer.KIND_ADJUST_BRIGHTNESS() {
-                wynimg::brightness(out, layer.adjust_amount(i))
-            } else {
-                var buf = layer.buffer(i)
-                if buf != 0 {
-                    wynimg::composite(out, buf, layer.mask(i),
-                                      layer.blend_mode(i), layer.opacity(i))
+        if layer.parent(i) == g {
+            if layer.visible(i) {
+                var k = layer.kind(i)
+                if k == layer.KIND_ADJUST_BRIGHTNESS() {
+                    // An adjustment applies to what is BELOW it, which inside a
+                    // group means what is below it within that group - so it acts
+                    // on this accumulator, not on the document. That is what
+                    // makes a group a clipping scope for its adjustments.
+                    wynimg::brightness(out, layer.adjust_amount(i))
+                } else {
+                    if k == layer.KIND_GROUP() {
+                        // Recurse, then blend the finished sub-stack as one layer.
+                        var sub = compose_group(i, w, h, depth + 1)
+                        if sub != 0 {
+                            wynimg::composite(out, sub, layer.mask(i),
+                                              layer.blend_mode(i), layer.opacity(i))
+                            wynimg::free(sub)
+                        }
+                    } else {
+                        var buf = layer.buffer(i)
+                        if buf != 0 {
+                            wynimg::composite(out, buf, layer.mask(i),
+                                              layer.blend_mode(i), layer.opacity(i))
+                        }
+                    }
                 }
             }
         }
         i = i + 1
     }
     return out
+}
+
+pub fn compose(w: int, h: int) -> int {
+    // The document is the top-level "group": every layer with no parent.
+    return compose_group(0 - 1, w, h, 0)
 }
 
 // Composites and writes the result to `path`. Returns 1 on success.

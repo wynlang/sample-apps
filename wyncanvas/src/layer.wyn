@@ -29,10 +29,34 @@ var l_blend = [0]
 var l_visible = [1]
 var l_masks = [0]
 var l_amount = [0.0]
+
+// Which group each layer belongs to, as a PARENT INDEX, or -1 for the top level.
+//
+// AN INDEX, WHICH MEANS IT MOVES. A layer's identity in this store IS its stack
+// position (`remove` shifts everything above it down), so a parent recorded as an
+// index has to be rewritten whenever rows move - which `reparent_after_shift`
+// does, in one place, for exactly the three operations that move rows. A stable-id
+// scheme would avoid that and is the right answer for a 200-layer document; this
+// is honest about being a small one, and the fixups are three lines each.
+//
+// The alternative - storing children as a list per group - was rejected because it
+// duplicates the ordering that the stack already encodes, and two orderings that
+// can disagree is the bug this store's parallel-array design exists to avoid.
+var l_parent = [0 - 1]
 var l_count = 0
 
 pub fn KIND_RASTER() -> int { return 0 }
 pub fn KIND_ADJUST_BRIGHTNESS() -> int { return 1 }
+
+// A GROUP holds other layers instead of pixels.
+//
+// It has no buffer of its own: `render.compose` composites a group's CHILDREN
+// into a fresh accumulator and then blends that accumulator into its parent using
+// the group's own opacity, blend mode and mask. That is what makes "group at 50%"
+// mean composite-then-fade rather than fade-each-child - which is the whole
+// reason a group is not just a naming convention, and is why it needs a real
+// buffer at render time even though it stores none.
+pub fn KIND_GROUP() -> int { return 2 }
 
 pub fn store_new() -> int {
     l_count = 0
@@ -63,7 +87,7 @@ fn valid(id: int) -> bool {
 
 // Write a complete row at `i`, which must already exist.
 fn row_set(i: int, name: string, buf: int, kind: int, op: float,
-           bl: int, vis: int, mask: int, amt: float) {
+           bl: int, vis: int, mask: int, amt: float, parent: int) {
     l_names[i] = name
     l_bufs[i] = buf
     l_kinds[i] = kind
@@ -72,12 +96,14 @@ fn row_set(i: int, name: string, buf: int, kind: int, op: float,
     l_visible[i] = vis
     l_masks[i] = mask
     l_amount[i] = amt
+    l_parent[i] = parent
 }
 
 // Copy row `src` onto row `dst`. Used by every shift, in both directions.
 fn row_copy(dst: int, src: int) {
     row_set(dst, l_names[src], l_bufs[src], l_kinds[src], l_opacity[src],
-            l_blend[src], l_visible[src], l_masks[src], l_amount[src])
+            l_blend[src], l_visible[src], l_masks[src], l_amount[src],
+            l_parent[src])
 }
 
 // Append one row's worth of capacity, so `row_set` can then write it.
@@ -96,12 +122,13 @@ fn row_grow() {
     l_visible.push(1)
     l_masks.push(0)
     l_amount.push(0.0)
+    l_parent.push(0 - 1)
 }
 
 pub fn add(name: string, buf: int, kind: int) -> int {
     var id = l_count
     row_grow()
-    row_set(id, name, buf, kind, 1.0, 0, 1, 0, 0.0)
+    row_set(id, name, buf, kind, 1.0, 0, 1, 0, 0.0, 0 - 1)
     l_count = l_count + 1
     return id
 }
@@ -165,6 +192,103 @@ pub fn set_mask(id: int, m: int) {
     l_masks[id] = m
 }
 
+// ---- grouping ---------------------------------------------------------------
+
+// The group this layer belongs to, or -1 for the top level.
+pub fn parent(id: int) -> int {
+    if valid(id) == false { return 0 - 1 }
+    return l_parent[id]
+}
+
+// Put `id` inside group `p` (-1 for the top level). Returns false and changes
+// nothing if the result would not be a valid tree.
+//
+// THREE THINGS ARE REFUSED, and each is a real way to corrupt a render:
+//   - a parent that is not a GROUP, which would ask a raster layer to hold
+//     children and give the walk no accumulator to composite them into;
+//   - a layer as its own parent, and any longer cycle, which would make the
+//     recursive walk recurse forever;
+//   - a parent BELOW the child in the stack. A group must sit under its own
+//     children the way it does in every editor, and the walk relies on it: it
+//     composites a group by scanning upward for rows whose parent is that group.
+pub fn set_parent(id: int, p: int) -> bool {
+    if valid(id) == false { return false }
+    if p == 0 - 1 {
+        l_parent[id] = 0 - 1
+        return true
+    }
+    if valid(p) == false { return false }
+    if p == id { return false }
+    if l_kinds[p] != KIND_GROUP() { return false }
+    if p > id { return false }
+    // Walk up from the proposed parent: if we reach `id`, this closes a cycle.
+    //
+    // UNREACHABLE TODAY, and said plainly rather than left to look tested: the
+    // `p > id` rule above already forces every parent to sit below its child, so
+    // a chain of parents strictly descends and cannot return to `id`. Mutation
+    // testing confirms it - deleting this check fails nothing.
+    //
+    // It stays for the same reason a bounds check stays. The descending-index
+    // invariant is a property of two rules in this function, and the store is also
+    // written by undo replay; the day either changes, the failure without this
+    // check is an infinite loop in the render walk, not a wrong picture. The
+    // `guard` counter below is the second half of that argument.
+    var up = l_parent[p]
+    var guard = 0
+    while up != 0 - 1 {
+        if up == id { return false }
+        // A guard rather than trust: the store is edited by undo replay too, and
+        // an infinite loop here would hang the editor rather than report anything.
+        guard = guard + 1
+        if guard > l_count { return false }
+        up = l_parent[up]
+    }
+    l_parent[id] = p
+    return true
+}
+
+// How many layers name `g` as their parent.
+pub fn child_count(g: int) -> int {
+    var n = 0
+    var i = 0
+    while i < l_count {
+        if l_parent[i] == g { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+// After rows have MOVED, rewrite every parent index that pointed at a moved row.
+//
+// `l_parent` holds indices, and this store's whole design is that an index IS an
+// identity - so any operation that shifts rows invalidates parents that pointed
+// past the shift. Called by remove/insert/swap, which are the only three
+// operations that move rows.
+//
+// `was`/`now` describe the mapping: a parent equal to `was` becomes `now`, and
+// -1 for `now` means the parent was deleted, which ORPHANS the child to the top
+// level rather than leaving it pointing at a row that is now someone else. An
+// orphaned child is visible and editable; a child pointing at a stale index is a
+// render that composites into the wrong accumulator.
+// (`from`/`to` would be the natural names; both are reserved words in Wyn.)
+fn reparent(was: int, now: int) {
+    var i = 0
+    while i < l_count {
+        if l_parent[i] == was { l_parent[i] = now }
+        i = i + 1
+    }
+}
+
+// Shift every parent index in [lo, hi] by `delta`.
+fn reparent_shift(lo: int, hi: int, delta: int) {
+    var i = 0
+    while i < l_count {
+        var pp = l_parent[i]
+        if pp >= lo and pp <= hi { l_parent[i] = pp + delta }
+        i = i + 1
+    }
+}
+
 pub fn adjust_amount(id: int) -> float {
     if valid(id) == false { return 0.0 }
     return l_amount[id]
@@ -199,12 +323,19 @@ pub fn set_adjust_amount(id: int, v: float) {
 
 pub fn remove(id: int) -> int {
     if valid(id) == false { return 0 }
+    // ORDER MATTERS. Orphan this row's children FIRST, while `id` still names
+    // it; then shift the rows; then renumber the parents that moved. Doing the
+    // renumber first would make the orphan pass look for a row that no longer
+    // has that index and silently leave dangling parents.
+    reparent(id, 0 - 1)
     var i = id
     while i < l_count - 1 {
         row_copy(i, i + 1)
         i = i + 1
     }
     l_count = l_count - 1
+    // Everything that was above `id` has moved down one.
+    reparent_shift(id + 1, l_count, 0 - 1)
     return 1
 }
 
@@ -223,7 +354,10 @@ pub fn insert(pos: int, name: string, buf: int, kind: int) -> int {
         row_copy(i, i - 1)
         i = i - 1
     }
-    row_set(p, name, buf, kind, 1.0, 0, 1, 0, 0.0)
+    // Everything from `p` up has moved up one. Done BEFORE the new row is
+    // written, so the fresh row's own parent (-1) is not caught by the shift.
+    reparent_shift(p, l_count - 2, 1)
+    row_set(p, name, buf, kind, 1.0, 0, 1, 0, 0.0, 0 - 1)
     return p
 }
 
@@ -244,6 +378,13 @@ pub fn swap(a: int, b: int) -> int {
     row_copy(tmp, a)
     row_copy(a, b)
     row_copy(b, tmp)
+    // The two rows have exchanged indices, so anything parented to either must
+    // follow it. Via a sentinel, because two sequential reparent calls would
+    // rewrite a->b and then immediately b->a, ending where they started.
+    var SENT = 0 - 99
+    reparent(a, SENT)
+    reparent(b, a)
+    reparent(SENT, b)
     return 1
 }
 

@@ -1241,6 +1241,23 @@ fn open_wync(path: string) {
         layer.set_mask(idx, project.take_mask(i))
         i = i + 1
     }
+
+    // GROUP MEMBERSHIP, IN A SECOND PASS. `set_parent` validates that the parent
+    // exists and is a group, and rows arrive bottom-first - so a child read before
+    // its group has been added would be refused and silently flattened. By here
+    // every row exists, and because the file preserves stack order the recorded
+    // indices are still the right ones.
+    //
+    // A refused parent is dropped rather than retried: it can only mean a corrupt
+    // or hand-edited file (a parent that is not a group, or above its child), and
+    // a layer at the top level is visible and editable, whereas a layer inside a
+    // group that does not exist is neither.
+    var gi = 0
+    while gi < n {
+        var pp = project.layer_parent(gi)
+        if pp != 0 - 1 { layer.set_parent(gi, pp) }
+        gi = gi + 1
+    }
     project.release()
 
     g_doc_w = w

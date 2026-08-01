@@ -678,3 +678,179 @@ test "mask coverage above 1 is clamped, not trusted" {
     wynimg_free(top)
     wynimg_free(msk)
 }
+
+// ---- layer groups -----------------------------------------------------------
+//
+// A group composites its CHILDREN into a buffer of their own, and only then
+// blends that buffer into the parent using the group's opacity, blend mode and
+// mask. Every check below is chosen so that the wrong implementation - fading
+// each child individually - gives a different number.
+
+test "a group with one opaque child renders like the child" {
+    layer.store_new()
+    var g = wynimg_new(4, 4)
+    var c = wynimg_new(4, 4)
+    wynimg_fill(c, 0.5, 0.25, 0.75, 1.0)
+    var gid = layer.add("grp", g, layer.KIND_GROUP())
+    var cid = layer.add("child", c, layer.KIND_RASTER())
+    assert_true(layer.set_parent(cid, gid))
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.5, 0.001))
+    assert_true(pixel.approx(wynimg_get(out, 2), 0.75, 0.001))
+    wynimg_free(out)
+    wynimg_free(g)
+    wynimg_free(c)
+}
+
+test "a child inside a group does NOT also render at the top level" {
+    // The walk selects by parent, so a grouped layer must be composited exactly
+    // once. If the top-level pass ignored `parent`, the child would be blended
+    // twice and an opacity below 1 would come out too strong.
+    layer.store_new()
+    var g = wynimg_new(4, 4)
+    var bot = wynimg_new(4, 4)
+    var c = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.0, 0.0, 0.0, 1.0)
+    wynimg_fill(c, 1.0, 1.0, 1.0, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var gid = layer.add("grp", g, layer.KIND_GROUP())
+    var cid = layer.add("child", c, layer.KIND_RASTER())
+    assert_true(layer.set_parent(cid, gid))
+    // The GROUP is at 50%: one blend of white over black gives 0.5.
+    layer.set_opacity(gid, 0.5)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.5, 0.001))
+    wynimg_free(out)
+    wynimg_free(g)
+    wynimg_free(bot)
+    wynimg_free(c)
+}
+
+test "GROUP OPACITY IS COMPOSITE-THEN-FADE, not fade-each-child" {
+    // THE CASE THAT DEFINES A GROUP. Two opaque children, one fully covering the
+    // other, in a group at 50% over black.
+    //
+    // Composite-then-fade: the children resolve to the TOP child's colour (white
+    // hides grey), then that is faded 50% over black -> 0.5.
+    //
+    // Fade-each-child (the wrong implementation) would blend grey at 50% over
+    // black (0.25), then white at 50% over that (0.625) - a visibly different
+    // number, and the reason a group cannot be simulated by adjusting its
+    // members' opacities.
+    layer.store_new()
+    var g = wynimg_new(4, 4)
+    var bot = wynimg_new(4, 4)
+    var lo = wynimg_new(4, 4)
+    var hi = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.0, 0.0, 0.0, 1.0)
+    wynimg_fill(lo, 0.5, 0.5, 0.5, 1.0)
+    wynimg_fill(hi, 1.0, 1.0, 1.0, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var gid = layer.add("grp", g, layer.KIND_GROUP())
+    var loid = layer.add("lo", lo, layer.KIND_RASTER())
+    var hiid = layer.add("hi", hi, layer.KIND_RASTER())
+    assert_true(layer.set_parent(loid, gid))
+    assert_true(layer.set_parent(hiid, gid))
+    layer.set_opacity(gid, 0.5)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.5, 0.001))
+    wynimg_free(out)
+    wynimg_free(g)
+    wynimg_free(bot)
+    wynimg_free(lo)
+    wynimg_free(hi)
+}
+
+test "hiding a group hides its children" {
+    layer.store_new()
+    var g = wynimg_new(4, 4)
+    var bot = wynimg_new(4, 4)
+    var c = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.25, 0.0, 0.0, 1.0)
+    wynimg_fill(c, 1.0, 1.0, 1.0, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var gid = layer.add("grp", g, layer.KIND_GROUP())
+    var cid = layer.add("child", c, layer.KIND_RASTER())
+    assert_true(layer.set_parent(cid, gid))
+    layer.set_visible(gid, false)
+
+    var out = render.compose(4, 4)
+    // Only the bottom layer survives.
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.25, 0.001))
+    wynimg_free(out)
+    wynimg_free(g)
+    wynimg_free(bot)
+    wynimg_free(c)
+}
+
+test "an invisible child is skipped inside a group" {
+    layer.store_new()
+    var g = wynimg_new(4, 4)
+    var lo = wynimg_new(4, 4)
+    var hi = wynimg_new(4, 4)
+    wynimg_fill(lo, 0.5, 0.5, 0.5, 1.0)
+    wynimg_fill(hi, 1.0, 1.0, 1.0, 1.0)
+    var gid = layer.add("grp", g, layer.KIND_GROUP())
+    var loid = layer.add("lo", lo, layer.KIND_RASTER())
+    var hiid = layer.add("hi", hi, layer.KIND_RASTER())
+    assert_true(layer.set_parent(loid, gid))
+    assert_true(layer.set_parent(hiid, gid))
+    layer.set_visible(hiid, false)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.5, 0.001))
+    wynimg_free(out)
+    wynimg_free(g)
+    wynimg_free(lo)
+    wynimg_free(hi)
+}
+
+test "a group nested in a group composites through both" {
+    // Two 50% groups, one inside the other, over black. White faded twice is
+    // 0.25 - which is only true if each level gets its own accumulator.
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var outer = wynimg_new(4, 4)
+    var inner = wynimg_new(4, 4)
+    var c = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.0, 0.0, 0.0, 1.0)
+    wynimg_fill(c, 1.0, 1.0, 1.0, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    var oid = layer.add("outer", outer, layer.KIND_GROUP())
+    var iid = layer.add("inner", inner, layer.KIND_GROUP())
+    var cid = layer.add("child", c, layer.KIND_RASTER())
+    assert_true(layer.set_parent(iid, oid))
+    assert_true(layer.set_parent(cid, iid))
+    layer.set_opacity(oid, 0.5)
+    layer.set_opacity(iid, 0.5)
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.25, 0.001))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(outer)
+    wynimg_free(inner)
+    wynimg_free(c)
+}
+
+test "an empty group is a no-op, not a black rectangle" {
+    // A group with no children composites a fresh transparent buffer, which must
+    // leave the document alone. Blending an opaque black buffer instead would
+    // wipe everything below it.
+    layer.store_new()
+    var bot = wynimg_new(4, 4)
+    var g = wynimg_new(4, 4)
+    wynimg_fill(bot, 0.75, 0.5, 0.25, 1.0)
+    layer.add("bottom", bot, layer.KIND_RASTER())
+    layer.add("grp", g, layer.KIND_GROUP())
+
+    var out = render.compose(4, 4)
+    assert_true(pixel.approx(wynimg_get(out, 0), 0.75, 0.001))
+    assert_true(pixel.approx(wynimg_get(out, 1), 0.5, 0.001))
+    wynimg_free(out)
+    wynimg_free(bot)
+    wynimg_free(g)
+}

@@ -122,7 +122,11 @@
 // Format constants and limits
 // ---------------------------------------------------------------------------
 
-#define WYNPROJ_VERSION 1
+// v2 added a per-layer PARENT index (layer groups). A v1 file is still read:
+// see the version gate in wynproj_load, which accepts any version it knows how to
+// parse rather than only the current one. Refusing v1 would have made every
+// existing .wync unloadable for one new int32.
+#define WYNPROJ_VERSION 2
 
 // A layer name is a UI label, not a payload. 4096 bytes is absurdly generous
 // for one and small enough that a corrupt length is rejected instead of
@@ -235,6 +239,7 @@ typedef struct {
     float     opacity;
     long long visible;
     float     amount;
+    long long parent;          // group index, or -1 for the top level (v2+)
     ProjBlob  pix;
     ProjBlob  mask;
     int       has_pix;
@@ -314,7 +319,7 @@ long long wynproj_save_begin(long long w, long long h) {
 
 long long wynproj_save_layer(const char* name, long long kind, long long blend,
                              double opacity, long long visible, double amount,
-                             void* buf, void* mask) {
+                             void* buf, void* mask, long long parent) {
     if (!g_stage_open) return WYNPROJ_E_NO_DOC;
     if (g_stage_len >= WYNPROJ_MAX_LAYERS) return WYNPROJ_E_LAYER_COUNT;
 
@@ -346,6 +351,7 @@ long long wynproj_save_layer(const char* name, long long kind, long long blend,
     L->opacity = (float)(opacity < 0.0 ? 0.0 : (opacity > 1.0 ? 1.0 : opacity));
     L->visible = visible ? 1 : 0;
     L->amount = (float)amount;
+    L->parent = parent;
 
     long long rc = blob_from_handle(buf, &L->pix, &L->has_pix);
     if (rc != WYNPROJ_OK) { free(L->name); L->name = NULL; return rc; }
@@ -414,6 +420,10 @@ long long wynproj_save_finish(const char* path) {
         w_f32(&o, L->opacity);
         w_u32(&o, (unsigned int)L->visible);
         w_f32(&o, L->amount);
+        // v2: the group index. Written as an int32 two's-complement, so -1 (top
+        // level) round-trips through the unsigned reader as 0xFFFFFFFF and is cast
+        // back on the way in - see the matching read.
+        w_u32(&o, (unsigned int)(int)L->parent);
         w_u32(&o, (unsigned int)L->has_pix);
         w_u32(&o, (unsigned int)L->has_mask);
         if (L->has_pix)  w_blob(&o, &L->pix);
@@ -440,6 +450,7 @@ typedef struct {
     float     opacity;
     long long visible;
     float     amount;
+    long long parent;          // group index, or -1 (v1 files: always -1)
     void*     buf;     // wynimg handle, 0 if the layer has no pixels
     void*     mask;    // wynimg handle, 0 if the layer has no mask
 } LoadLayer;
@@ -593,7 +604,13 @@ long long wynproj_load(const char* path) {
     // REFUSE, do not guess. Reading a v2 layout with v1 field offsets would
     // misparse pixel lengths and produce a plausible-looking but corrupt
     // document, which the user cannot recover from or even diagnose.
-    if (ver != WYNPROJ_VERSION) { fclose(f); return WYNPROJ_E_VERSION; }
+    // REFUSE A FUTURE VERSION, READ A PAST ONE. Reading a newer layout with older
+    // field offsets would produce silent garbage, so anything above the current
+    // version is refused as before. But refusing v1 would have made every
+    // existing .wync unloadable in exchange for one new int32, and the v1 layout
+    // is a strict prefix of v2 - so it is parsed, with `parent` defaulting to the
+    // top level. `ver` is threaded into the record loop below for exactly this.
+    if (ver == 0 || ver > WYNPROJ_VERSION) { fclose(f); return WYNPROJ_E_VERSION; }
 
     unsigned int dw = 0, dh = 0, lc = 0;
     rc = rd_u32(&in, &dw);
@@ -646,6 +663,15 @@ long long wynproj_load(const char* path) {
         rc = rd_f32(&in, &L->opacity); if (rc != WYNPROJ_OK) goto fail;
         rc = rd_u32(&in, &vis);    if (rc != WYNPROJ_OK) goto fail;
         rc = rd_f32(&in, &L->amount);  if (rc != WYNPROJ_OK) goto fail;
+        // v2 only. A v1 file has no parent field at all, and every layer in one
+        // is top-level by definition - so defaulting to -1 is not a guess, it is
+        // what a flat document means.
+        L->parent = -1;
+        if (ver >= 2) {
+            unsigned int par = 0;
+            rc = rd_u32(&in, &par);  if (rc != WYNPROJ_OK) goto fail;
+            L->parent = (long long)(int)par;
+        }
         rc = rd_u32(&in, &hasp);   if (rc != WYNPROJ_OK) goto fail;
         rc = rd_u32(&in, &hasm);   if (rc != WYNPROJ_OK) goto fail;
 
@@ -692,6 +718,8 @@ long long wynproj_layer_blend(long long i)   { return load_valid(i) ? g_load[i].
 double    wynproj_layer_opacity(long long i) { return load_valid(i) ? (double)g_load[i].opacity : 1.0; }
 long long wynproj_layer_visible(long long i) { return load_valid(i) ? g_load[i].visible : 0; }
 double    wynproj_layer_amount(long long i)  { return load_valid(i) ? (double)g_load[i].amount : 0.0; }
+// -1 for a top-level layer, and for EVERY layer in a v1 file.
+long long wynproj_layer_parent(long long i)  { return load_valid(i) ? g_load[i].parent : -1; }
 
 // Borrowing accessors: the table keeps ownership, so these are safe to read
 // repeatedly (tests do) without risking a double free.

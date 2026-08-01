@@ -50,7 +50,8 @@ import layer
 // turn a staged layer into an empty one.
 extern fn wynproj_save_begin(w: int, h: int) -> int;
 extern fn wynproj_save_layer(name: string, kind: int, blend: int, opacity: float,
-                             visible: int, amount: float, buf: int, mask: int) -> int;
+                             visible: int, amount: float, buf: int, mask: int,
+                             parent: int) -> int;
 extern fn wynproj_save_finish(path: string) -> int;
 
 extern fn wynproj_load(path: string) -> int;
@@ -63,6 +64,7 @@ extern fn wynproj_layer_blend(i: int) -> int;
 extern fn wynproj_layer_opacity(i: int) -> float;
 extern fn wynproj_layer_visible(i: int) -> int;
 extern fn wynproj_layer_amount(i: int) -> float;
+extern fn wynproj_layer_parent(i: int) -> int;
 extern fn wynproj_layer_buffer(i: int) -> int;
 extern fn wynproj_layer_mask(i: int) -> int;
 extern fn wynproj_take_buffer(i: int) -> int;
@@ -149,7 +151,7 @@ pub fn save(path: string, w: int, h: int) -> int {
         if layer.visible(i) { vis = 1 }
         rc = wynproj::save_layer(layer.name(i), layer.kind(i), layer.blend_mode(i),
                                  layer.opacity(i), vis, layer.adjust_amount(i),
-                                 layer.buffer(i), layer.mask(i))
+                                 layer.buffer(i), layer.mask(i), layer.parent(i))
         if rc != 0 {
             wynproj::save_finish(path)
             return rc
@@ -188,6 +190,12 @@ pub fn layer_blend(i: int) -> int    { return wynproj::layer_blend(i) }
 pub fn layer_opacity(i: int) -> float { return wynproj::layer_opacity(i) }
 pub fn layer_visible(i: int) -> bool { return wynproj::layer_visible(i) == 1 }
 pub fn layer_amount(i: int) -> float { return wynproj::layer_amount(i) }
+
+// The group a loaded layer belonged to, or -1 for the top level.
+//
+// -1 for EVERY layer of a v1 file, which is not a fallback but the truth: a v1
+// document has no groups, so every layer in one is top-level.
+pub fn layer_parent(i: int) -> int { return wynproj::layer_parent(i) }
 
 // BORROWED handles: the table keeps ownership, so these are safe to read
 // repeatedly. Use them to inspect a file; use `take_*` to keep a buffer.
