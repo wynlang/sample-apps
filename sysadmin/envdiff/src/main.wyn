@@ -1,9 +1,9 @@
 // envdiff -- diff the live environment against a saved baseline.
 //
-// The previous version diffed NOTHING despite the name: it walked a HARDCODED list of
-// 27 variable names and printed a flat "● HOME /Users/aoaws / ○ GPG_TTY (not set)"
-// roll-call -- no baseline, no comparison, nothing that could be called a diff. It also
-// looped `for i in 0..26` over that 27-element list, silently dropping the last key
+// The previous version diffed NOTHING despite the name. It walked a HARDCODED list of
+// 27 variable names and printed a flat roll-call -- "● HOME /Users/aoaws",
+// "○ GPG_TTY (not set)" -- no baseline, no comparison, no diff. It also looped
+// `for i in 0..26` over that 27-element list, silently dropping the last key
 // (XDG_DATA_HOME), and printed every value in full, secrets included.
 //
 // Rewritten to be an actual diff, and to show the language off:
@@ -11,15 +11,21 @@
 //     ONE value, and every heading and row is an exhaustive `match` on it -- not
 //     parallel bookkeeping variables that can disagree.
 //   * the whole environment, read at runtime; no hardcoded key list to fall behind.
-//   * two HashMaps (baseline, live) so the diff is set arithmetic, not string poking.
+//   * two HashMaps (baseline, live), so the diff is set arithmetic, not string poking.
 //   * a KEY that looks secret (KEY/TOKEN/SECRET/PASSWORD/PASSWD) never has its value
 //     printed -- envdiff still proves it changed, by length and by fingerprint.
 //   * `--save` writes a snapshot, so the tool that reads baselines also makes them and
 //     can therefore check itself: --save, then diff that file, = 0 deltas.
 //
-//   wyn run sysadmin/envdiff/src/main.wyn                 # diff vs committed baseline.env
-//   wyn run sysadmin/envdiff/src/main.wyn other.env       # diff vs any snapshot
-//   wyn run sysadmin/envdiff/src/main.wyn --save mine.env # write a snapshot
+//   wyn run src/main.wyn                 # diff vs the committed baseline.env
+//   wyn run src/main.wyn other.env       # diff vs any snapshot
+//   wyn run src/main.wyn --save mine.env # write a snapshot
+//
+// The compare rules (bucket, redaction, KEY=VALUE parsing) live in src/envcmp.wyn so
+// they can be tested with no environment and no files -- see tests/test_envcmp.wyn.
+// This file keeps the I/O and the presentation.
+
+import envcmp
 
 enum Change { Added, Removed, Changed, Same }
 
@@ -30,6 +36,15 @@ struct Delta {
     change: Change
 }
 
+// Takes a CANONICAL bucket (envcmp.classify's output), so the `_` arm is unreachable
+// from real data -- the enum and the rule cannot drift apart.
+fn bucket(name: string) -> Change => match name {
+    "added" => Change.Added,
+    "removed" => Change.Removed,
+    "changed" => Change.Changed,
+    _ => Change.Same
+}
+
 fn heading(c: Change) -> string => match c {
     Change.Changed => "\x1b[1;33m~ changed\x1b[0m \x1b[90m(same key, new value)\x1b[0m",
     Change.Removed => "\x1b[1;31m- removed\x1b[0m \x1b[90m(in the baseline, gone now)\x1b[0m",
@@ -37,45 +52,28 @@ fn heading(c: Change) -> string => match c {
     Change.Same => "\x1b[1;90m= unchanged\x1b[0m"
 }
 
-// A name that looks like it guards something never gets its value printed.
-fn secret(key: string) -> bool {
-    var k = key.upper()
-    return k.contains("KEY") or k.contains("TOKEN") or k.contains("SECRET") or k.contains("PASSWORD") or k.contains("PASSWD")
-}
-
-// Enough of a fingerprint to tell two secrets apart, not enough to leak one:
-// each character scored by its position in a known alphabet, folded into a small int.
-fn digest(v: string) -> int {
-    var alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_.:/@+="
-    var h = 7
-    for i in 0..v.len() { h = (h * 31 + alphabet.index_of(v.substring(i, i + 1)) + 2) % 9973 }
-    return h
-}
-
 fn show(key: string, v: string) -> string {
-    if secret(key) { return "\x1b[35m<redacted ${v.len()}ch #${digest(v)}>\x1b[0m" }
+    if envcmp.is_secret(key) { return "\x1b[35m<redacted ${v.len()}ch #${envcmp.digest(v)}>\x1b[0m" }
     if v.len() == 0 { return "\x1b[90m(empty)\x1b[0m" }
     if v.len() > 44 { return v.substring(0, 41) + "\x1b[90m...\x1b[0m" }
     return v
 }
 
-// KEY=VALUE lines -> a HashMap, plus the sorted key list. A line with no "=" is a
-// continuation of a multi-line value; skipped rather than half-parsed.
+// KEY=VALUE lines -> a HashMap, plus the sorted key list.
 fn load(text: string, into: HashMap) -> [string] {
     var keys = []
     for raw in text.lines() {
         var line = "" + raw
-        var eq = line.index_of("=")
-        if eq < 1 { continue }
-        var key = line.substring(0, eq)
-        into.insert(key, line.substring(eq + 1, line.len()))
+        if not envcmp.is_pair(line) { continue }
+        var key = envcmp.key_of(line)
+        into.insert(key, envcmp.val_of(line))
         keys.push(key)
     }
     return keys.sorted()
 }
 
-// Prints one bucket and returns how many keys were in it, so the summary line below is
-// derived from the same walk that printed the rows -- it cannot drift out of step.
+// Prints one bucket and returns how many keys were in it, so every number on the
+// summary line comes from the same walk that printed the rows.
 fn print_group(deltas: [Delta], want: Change, limit: int) -> int {
     var total = 0
     for d in deltas {
@@ -83,6 +81,8 @@ fn print_group(deltas: [Delta], want: Change, limit: int) -> int {
         total += 1
         if total > limit { continue }
         if total == 1 { print(""); print("  ${heading(want)}") }
+        // `"" + field` copies the string out of the struct: read straight through, a
+        // borrowed field can come back empty on the second read.
         var key = "" + d.key
         var was = "" + d.before
         var now = "" + d.after
@@ -106,7 +106,7 @@ fn main() {
         var out = "snapshot.env"
         if args.len() > 2 { out = "" + args[2] }
         File.write(out, live)
-        print("  \x1b[32msaved\x1b[0m ${live.lines().len()} variables to ${out}")
+        print("  \x1b[32msaved\x1b[0m ${envcmp.pair_count(live)} variables to ${out}")
         return
     }
 
@@ -128,31 +128,31 @@ fn main() {
     print("")
     print("  \x1b[1;36m═══ envdiff ═══\x1b[0m  \x1b[90m${path} (${base_keys.len()} keys)  vs  live env (${now_keys.len()} keys)\x1b[0m")
 
-    // Set arithmetic, one pass each way: baseline keys decide Same/Changed/Removed,
-    // then whatever is left in the live env is Added.
+    // Set arithmetic, one pass each way: baseline keys decide same/changed/removed,
+    // then whatever is left in the live env is added. One classify() call per key --
+    // the same function the tests pin.
     var deltas = []
     for k in base_keys {
         var key = "" + k
         var was = "" + base.get(key)
+        var here = now.has(key)
         var is_now = ""
-        var how = Change.Removed
-        if now.has(key) {
-            is_now = "" + now.get(key)
-            how = Change.Same
-            if was != is_now { how = Change.Changed }
-        }
-        deltas.push(Delta { key: key, before: was, after: is_now, change: how })
+        if here { is_now = "" + now.get(key) }
+        deltas.push(Delta { key: key, before: was, after: is_now, change: bucket(envcmp.classify(true, here, was, is_now)) })
     }
     for k in now_keys {
         var fresh = "" + k
         if base.has(fresh) { continue }
-        deltas.push(Delta { key: fresh, before: "", after: "" + now.get(fresh), change: Change.Added })
+        deltas.push(Delta { key: fresh, before: "", after: "" + now.get(fresh), change: bucket(envcmp.classify(false, true, "", "")) })
     }
 
     var n_changed = print_group(deltas, Change.Changed, 12)
     var n_removed = print_group(deltas, Change.Removed, 12)
     var n_added = print_group(deltas, Change.Added, 8)
-    var n_same = base_keys.len() - n_changed - n_removed
+    // Counted, not inferred by subtraction: if the buckets ever stopped partitioning
+    // the keys, changed+removed+same would visibly stop adding up to base_keys.len().
+    var n_same = 0
+    for d in deltas { if d.change == Change.Same { n_same += 1 } }
 
     print("")
     print("  \x1b[33m~${n_changed} changed\x1b[0m  \x1b[31m-${n_removed} removed\x1b[0m  \x1b[32m+${n_added} added\x1b[0m  \x1b[90m=${n_same} identical\x1b[0m")

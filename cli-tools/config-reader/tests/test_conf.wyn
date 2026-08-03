@@ -1,0 +1,68 @@
+// Tests for config-reader's parse rules. These call src/conf.wyn -- the SAME functions
+// main.wyn calls -- so a rule cannot pass here and behave differently in the app. The
+// earlier suite re-implemented `infer` and comment-stripping by copy-paste, which made it
+// possible to stay green while main.wyn drifted; that is the bug this file fixes.
+//
+// Everything feeds conf a fixture string. No config file, no filesystem, so the suite
+// gives the same answer on any machine.
+
+import conf
+
+test "quoting decides the type: 8080 is an int, \"8080\" is a string" {
+    assert_eq(conf.infer_name("8080"), "int")
+    assert_eq(conf.infer_name("\"8080\""), "string")
+    assert_eq(conf.infer_name("2.5"), "float")
+    assert_eq(conf.infer_name("true"), "bool")
+    assert_eq(conf.infer_name("false"), "bool")
+    assert_eq(conf.infer_name("four"), "string")
+    assert_eq(conf.infer_name("1.2.3"), "string")   // two dots is not a float
+    assert_eq(conf.infer_name(""), "string")
+}
+
+test "comments are stripped, but a # inside quotes is kept" {
+    assert_eq(conf.strip_comment("port = 8080   # the port"), "port = 8080")
+    assert_eq(conf.strip_comment("# whole line"), "")
+    assert_eq(conf.strip_comment("   "), "")
+    // The rule an ad-hoc index_of("#") gets wrong: this hash is part of the value.
+    assert_eq(conf.strip_comment("tag = \"a#b\""), "tag = \"a#b\"")
+    assert_eq(conf.strip_comment("tag = \"a#b\"  # trailing"), "tag = \"a#b\"")
+}
+
+test "a section header yields a nested path, not a flat name" {
+    assert(conf.is_header("[database]"))
+    assert(not conf.is_header("port = 8080"))
+    assert_eq(conf.section_of("[database]"), "database")
+    assert_eq(conf.section_of("[ server ]"), "server")
+    // database.host is BUILT from section + key -- it is never spelled out anywhere.
+    var path = "${conf.section_of("[database]")}.${conf.key_of("host = \"db.internal\"")}"
+    assert_eq(path, "database.host")
+}
+
+test "an unterminated section header is rejected, not sliced" {
+    assert_eq(conf.section_of("[database"), "")
+}
+
+test "key and value split on the first =, and only a real pair is a pair" {
+    assert(conf.is_pair("port = 8080"))
+    assert(not conf.is_pair("keepalive true"))   // no = at all
+    assert(not conf.is_pair("= 5"))              // nothing to the left
+    assert_eq(conf.key_of("workers   = 4"), "workers")
+    assert_eq(conf.raw_value("workers   = 4"), "4")
+    // A value containing '=' keeps it: only the FIRST '=' separates.
+    assert_eq(conf.raw_value("motd = \"a=b\""), "\"a=b\"")
+}
+
+test "quoted values are unwrapped, and an unterminated one is caught" {
+    assert(conf.is_quoted("\"info\""))
+    assert(not conf.is_quoted("info"))
+    assert_eq(conf.unquote("\"Wyn Config Reader\""), "Wyn Config Reader")
+    assert_eq(conf.unquote("8080"), "8080")
+    assert(conf.unterminated("\"oops"))
+    assert(not conf.unterminated("\"fine\""))
+    assert(not conf.unterminated("8080"))
+}
+
+test "line numbers need split, because lines() drops blanks" {
+    var text = "a\n\nb"
+    assert_eq(text.split("\n").len(), 3)
+}

@@ -1,0 +1,77 @@
+// Tests for envdiff's compare core. These import src/envcmp.wyn -- the SAME functions
+// main.wyn calls -- so they pin the shipped rules, not a copy of them. (An earlier
+// version of this suite re-declared classify/secret/count_keys locally, which means it
+// would have stayed green while the app diverged.)
+//
+// The old app had no tests because it had no logic worth testing: it printed a
+// hardcoded roll-call. The three things that can now be wrong are (a) which bucket a
+// key lands in, (b) whether a secret leaks, (c) whether KEY=VALUE parsing loses a key.
+//
+// Everything here feeds envcmp a fixture string. No environment, no filesystem, so the
+// suite gives the same answer on any machine.
+
+import envcmp
+
+test "a key only in the live env is added" {
+    assert(envcmp.classify(false, true, "", "x") == "added")
+}
+
+test "a key only in the baseline is removed" {
+    assert(envcmp.classify(true, false, "x", "") == "removed")
+}
+
+test "same key different value is changed" {
+    assert(envcmp.classify(true, true, "us-east-1", "us-west-2") == "changed")
+}
+
+test "identical value is same" {
+    assert(envcmp.classify(true, true, "en_US.UTF-8", "en_US.UTF-8") == "same")
+}
+
+test "present-but-empty is changed, not removed" {
+    // Absent and set-to-empty are different states and must not be conflated.
+    assert(envcmp.classify(true, true, "1", "") == "changed")
+}
+
+test "secret-looking names are redacted" {
+    assert(envcmp.is_secret("API_TOKEN"))
+    assert(envcmp.is_secret("DB_PASSWORD"))
+    assert(envcmp.is_secret("SESSION_SECRET"))
+    assert(envcmp.is_secret("aws_access_key_id"))
+    assert(envcmp.is_secret("MYSQL_PASSWD"))
+}
+
+test "ordinary names are not redacted" {
+    assert(not envcmp.is_secret("HOME"))
+    assert(not envcmp.is_secret("PATH"))
+    assert(not envcmp.is_secret("AWS_REGION"))
+}
+
+test "two different secrets get different fingerprints" {
+    // The fingerprint is the only evidence a redacted value changed, so it has to
+    // actually distinguish values -- including same-length ones.
+    assert(envcmp.digest("tok_live_aaaa") != envcmp.digest("tok_live_bbbb"))
+    assert(envcmp.digest("hunter2") == envcmp.digest("hunter2"))
+}
+
+test "every KEY=VALUE line is counted -- no off-by-one" {
+    // The old app looped 0..26 over 27 keys and dropped the last one. Parsing is now
+    // driven by the data, so the last line must survive.
+    assert(envcmp.pair_count("A=1\nB=2\nC=3\nD=4\nE=5") == 5)
+}
+
+test "lines with no = are skipped, not half-parsed" {
+    assert(envcmp.pair_count("A=1\ncontinuation of a multi-line value\nB=2\n\n=novalue") == 2)
+}
+
+test "a value containing = keeps only the first as the separator" {
+    var line = "DATABASE_URL=postgres://u:p@h/db?a=1&b=2"
+    assert(envcmp.key_of(line) == "DATABASE_URL")
+    assert(envcmp.val_of(line) == "postgres://u:p@h/db?a=1&b=2")
+}
+
+test "an empty value round-trips as an empty string, not a missing key" {
+    assert(envcmp.is_pair("GPG_TTY="))
+    assert(envcmp.key_of("GPG_TTY=") == "GPG_TTY")
+    assert(envcmp.val_of("GPG_TTY=").len() == 0)
+}

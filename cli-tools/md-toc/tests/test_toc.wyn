@@ -1,7 +1,7 @@
-// Tests for md-toc's two rules that can actually be wrong: which lines count as
+// Tests for md-toc's three rules that can actually be wrong: which lines count as
 // headings (the old app counted "#" comments inside fenced code blocks, which is what
-// corrupted its nesting) and what anchor a title slugifies to.
-// These mirror src/main.wyn exactly.
+// corrupted its nesting; a 4-space-indented "# ..." was also read as an H1), and what
+// anchor a title slugifies to. These mirror src/main.wyn exactly.
 
 fn slugify(title: string) -> string {
     var out = ""
@@ -20,7 +20,14 @@ fn heading_depth(line: string) -> int {
     return d
 }
 
-// Depths of the real headings, code blocks excluded -- the parser's core.
+fn indent_of(raw: string) -> int {
+    if raw.substring(0, 1) == "\t" { return 4 }
+    var i = 0
+    while i < raw.len() and raw.substring(i, i + 1) == " " { i += 1 }
+    return i
+}
+
+// Depths of the real headings, code excluded -- the parser's core.
 fn depths_outside_code(md: string) -> [int] {
     var out = []
     var fenced = false
@@ -30,9 +37,22 @@ fn depths_outside_code(md: string) -> [int] {
             fenced = not fenced
             continue
         }
-        if fenced { continue }
+        if fenced or indent_of(raw) > 3 { continue }
         var d = heading_depth(line)
         if d > 0 { out.push(d) }
+    }
+    return out
+}
+
+// GitHub's anchor de-duplication, as src/main.wyn applies it.
+fn slugs_of(titles: [string]) -> [string] {
+    var used = HashMap.new()
+    var out = []
+    for t in titles {
+        var stem = slugify(t)
+        var prior = used.get_int(stem)
+        used.insert_int(stem, prior + 1)
+        if prior > 0 { out.push("${stem}-${prior}") } else { out.push(stem) }
     }
     return out
 }
@@ -59,12 +79,36 @@ test "tilde fences too" {
     assert_eq(ds.len(), 1)
 }
 
+test "indented code blocks are not headings" {
+    // 4 spaces or a tab is an indented code block; up to 3 spaces is still a heading.
+    assert_eq(indent_of("    # code"), 4)
+    assert_eq(indent_of("\t# code"), 4)
+    assert_eq(indent_of("   # still a heading"), 3)
+    var ds: [int] = depths_outside_code("## Two\n\n    # code comment\n\n### Three")
+    assert_eq(ds.len(), 2)
+    assert_eq(ds[0], 2)
+    assert_eq(ds[1], 3)
+}
+
 test "github anchor slugs" {
     assert_eq(slugify("Getting Started"), "getting-started")
     assert_eq(slugify("FAQ / Troubleshooting"), "faq--troubleshooting")  // GitHub keeps both dashes
     assert_eq(slugify("Install & Run 🚀"), "install--run-")
     assert_eq(slugify("snake_case_name"), "snake_case_name")             // underscores survive
     assert_eq(slugify("v1.2.0 Release"), "v120-release")
+}
+
+test "repeated titles get unique anchors" {
+    var got: [string] = slugs_of(["Basic Usage", "Other", "Basic Usage", "Basic Usage"])
+    assert_eq(got[0], "basic-usage")
+    assert_eq(got[1], "other")
+    assert_eq(got[2], "basic-usage-1")
+    assert_eq(got[3], "basic-usage-2")
+    // Every anchor resolves to a different heading. Tallied by hand: `.unique()` on a
+    // STRING array returns a 1-element `[0]` on this compiler (it dedupes them as ints).
+    var seen = HashMap.new()
+    for s in got { seen.insert_int(s, 1) }
+    assert_eq(seen.keys().len(), 4)
 }
 
 test "depth normalisation" {

@@ -4,19 +4,26 @@
 // "Loaded 8 config entries" and a flat list including `database_host = localhost` -- but
 // `database_host` was not a key it had parsed from anything. Line 38 was literally
 //   var keys = ["app_name", "version", "port", ..., "database_host", "database_port"]
-// so the "structure" in the output was invented in the source. Nothing was validated
-// either: the only check was `if port > 0 { "Port is valid" }`.
+// so the "structure" in the output was invented in the source: no file was ever read, and
+// the flattened names could not have come from one. Nothing was validated either -- the
+// only check was `if port > 0 { "Port is valid" }`.
 //
 // Rewritten as the thing every program actually needs:
 //   * a real TOML-ish parser -- `[sections]`, `key = value`, `#` comments, quoted strings.
 //     A section plus a key makes `database.host`: genuinely nested, not a fabricated name.
 //   * `enum Value { Int, Float, Bool, Str }` inferred per value, so `8080` is an int and
-//     `"8080"` is a string, and every place that names a type is one `match`.
+//     `"8080"` is a string, and every place that names a type is one exhaustive `match`.
 //   * a declared SCHEMA validated both ways -- every problem at once, with line numbers:
 //     type mismatch, out-of-range port, unknown key, malformed line, missing required key.
 //   * typed accessors, so the caller gets an `int` and not a string to re-parse.
 //
 //   wyn run cli-tools/config-reader/src/main.wyn [config-file]
+//
+// The slicing rules live in src/conf.wyn so they can be tested against fixture strings
+// with no config file on disk -- see tests/test_conf.wyn. This file keeps the I/O
+// (finding and reading the file), the schema, and the presentation.
+
+import conf
 
 enum Value { Int, Float, Bool, Str }
 
@@ -31,20 +38,13 @@ fn type_name(k: Value) -> string => match k {
     Value.Str   => "string"
 }
 
-// Infer from the literal, the way a config loader must: true/false is a bool, all-digits
-// an int, digits with one dot a float. (Quoted is forced to Str by the caller.)
-fn infer(v: string) -> Value {
-    if v == "true" or v == "false" { return Value.Bool }
-    var dots = 0
-    var digits = v.len() > 0
-    for i in 0..v.len() {
-        var c = v.substring(i, i + 1)
-        if c == "." { dots += 1 }
-        else if c < "0" or c > "9" { digits = false }
-    }
-    if digits and dots == 0 { return Value.Int }
-    if digits and dots == 1 { return Value.Float }
-    return Value.Str
+// Takes a CANONICAL name (conf.infer_name's output), so the `_` arm is unreachable and
+// the enum here cannot drift from the four names conf.wyn produces.
+fn as_value(name: string) -> Value => match name {
+    "int"   => Value.Int,
+    "float" => Value.Float,
+    "bool"  => Value.Bool,
+    _       => Value.Str
 }
 
 // Typed access: the caller gets an int, not a string to re-parse.
@@ -57,6 +57,22 @@ fn get_str(es: [Entry], path: string) -> string {
     for e in es { if e.path == path { return "" + e.raw } }
     return ""
 }
+
+// The schema: expected type per key; `lo`/`hi` bound an int (hi 0 means unbounded).
+fn schema() -> [Rule] => [
+    Rule { path: "app.name",       kind: Value.Str,   lo: 0, hi: 0 },
+    Rule { path: "app.version",    kind: Value.Str,   lo: 0, hi: 0 },
+    Rule { path: "app.debug",      kind: Value.Bool,  lo: 0, hi: 0 },
+    Rule { path: "server.host",    kind: Value.Str,   lo: 0, hi: 0 },
+    Rule { path: "server.port",    kind: Value.Int,   lo: 1, hi: 65535 },
+    Rule { path: "server.workers", kind: Value.Int,   lo: 1, hi: 256 },
+    Rule { path: "server.timeout", kind: Value.Float, lo: 0, hi: 0 },
+    Rule { path: "database.host",  kind: Value.Str,   lo: 0, hi: 0 },
+    Rule { path: "database.port",  kind: Value.Int,   lo: 1, hi: 65535 },
+    Rule { path: "database.name",  kind: Value.Str,   lo: 0, hi: 0 },
+    Rule { path: "database.pool",  kind: Value.Int,   lo: 1, hi: 64 },
+    Rule { path: "logging.level",  kind: Value.Str,   lo: 0, hi: 0 }
+]
 
 fn main() {
     print("\x1b[1;36m═══ config reader ═══\x1b[0m\n")
@@ -78,44 +94,33 @@ fn main() {
     var section = "-"
     var n = 0
     // `.split("\n")`, not `.lines()`: a blank line must still advance the counter, or every
-    // reported line number is wrong.
+    // reported line number after the first blank is wrong.
     for raw_line in File.read(path).split("\n") {
         n += 1
-        // Cut a trailing `# comment`, but only where the `#` sits outside quotes.
-        var t = raw_line.trim()
-        var cut = t.len()
-        var quotes = 0
-        for i in 0..t.len() {
-            var c = t.substring(i, i + 1)
-            if c == "\"" { quotes += 1 }
-            if c == "#" and quotes % 2 == 0 { cut = i; break }
-        }
-        t = t.substring(0, cut).trim()
+        var t = conf.strip_comment(raw_line)
         if t.len() == 0 { continue }
 
-        if t.substring(0, 1) == "[" {
-            var close = t.index_of("]")
-            if close < 1 { faults.push(Fault { line: n, msg: "unterminated section header: ${t}" }) }
-            else { section = t.substring(1, close).trim() }
+        if conf.is_header(t) {
+            var sec = conf.section_of(t)
+            if sec == "" { faults.push(Fault { line: n, msg: "unterminated section header: ${t}" }) }
+            else { section = sec }
             continue
         }
-        var eq = t.index_of("=")
-        if eq < 1 {
+        if not conf.is_pair(t) {
             faults.push(Fault { line: n, msg: "malformed line, expected `key = value`: ${t}" })
             continue
         }
-        var key = t.substring(0, eq).trim()
-        var val = t.substring(eq + 1, t.len()).trim()
-        var quoted = val.len() > 1 and val.substring(0, 1) == "\""
-        if quoted {
-            var body = val.substring(1, val.len())
-            var end = body.index_of("\"")
-            if end < 0 { faults.push(Fault { line: n, msg: "unterminated string for `${key}`" }) }
-            else { val = body.substring(0, end) }
+        var key = conf.key_of(t)
+        var val = conf.raw_value(t)
+        if conf.unterminated(val) {
+            faults.push(Fault { line: n, msg: "unterminated string for `${key}`" })
         }
-        var kind = Value.Str
-        if not quoted { kind = infer(val) }
-        entries.push(Entry { line: n, path: "${section}.${key}", raw: val, kind: kind })
+        entries.push(Entry {
+            line: n,
+            path: "${section}.${key}",
+            raw: conf.unquote(val),
+            kind: as_value(conf.infer_name(val))
+        })
     }
 
     // What was parsed: section, key, inferred type, value. Derived, not invented.
@@ -129,22 +134,8 @@ fn main() {
         print("    ${p.substring(dot + 1, p.len()).pad_right(9, " ")} \x1b[90m${type_name(e.kind).pad_right(6, " ")}\x1b[0m ${e.raw}")
     }
 
-    // The schema: expected type per key; `lo`/`hi` bound an int (0/0 means unbounded).
-    var rules = [
-        Rule { path: "app.name",       kind: Value.Str,   lo: 0, hi: 0 },
-        Rule { path: "app.version",    kind: Value.Str,   lo: 0, hi: 0 },
-        Rule { path: "app.debug",      kind: Value.Bool,  lo: 0, hi: 0 },
-        Rule { path: "server.host",    kind: Value.Str,   lo: 0, hi: 0 },
-        Rule { path: "server.port",    kind: Value.Int,   lo: 1, hi: 65535 },
-        Rule { path: "server.workers", kind: Value.Int,   lo: 1, hi: 256 },
-        Rule { path: "server.timeout", kind: Value.Float, lo: 0, hi: 0 },
-        Rule { path: "database.host",  kind: Value.Str,   lo: 0, hi: 0 },
-        Rule { path: "database.port",  kind: Value.Int,   lo: 1, hi: 65535 },
-        Rule { path: "database.name",  kind: Value.Str,   lo: 0, hi: 0 },
-        Rule { path: "database.pool",  kind: Value.Int,   lo: 1, hi: 64 },
-        Rule { path: "logging.level",  kind: Value.Str,   lo: 0, hi: 0 }
-    ]
     // Validate both ways: every entry against the schema, then every rule against reality.
+    var rules = schema()
     for e in entries {
         var p = "" + e.path
         var known = false

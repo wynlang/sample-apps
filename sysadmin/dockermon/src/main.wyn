@@ -1,31 +1,29 @@
 // dockermon -- inventory a Docker host, and prove concurrency instead of claiming it.
 //
-// The previous version claimed to demonstrate concurrency and demonstrated the opposite.
-// It `spawn`ed exactly ONE function and then waited for it with `Time.sleep(2000)` -- a
-// two-second guess where `await_all` belongs. So it could never finish faster than 2s, it
+// The previous version advertised concurrency and demonstrated its exact opposite. It
+// `spawn`ed ONE function and then waited for it with `Time.sleep(2000)` -- a two-second
+// guess parked where `await_all` belongs. So it could never finish faster than 2s, it
 // would have printed zeroes had docker been slower than the guess, and the four `docker`
 // calls inside that single task still ran strictly one after another. It also hand-scanned
 // `docker ps` output character by character hunting for "\n".
 //
 // Rewritten as the repo's concurrency showcase:
 //   * every `docker` call is `spawn`ed and collected with `await_all` -- never slept for.
-//     Round 1 fires the four inventory calls together; round 2 fires one `docker inspect`
-//     per container together.
-//   * it runs each batch BOTH ways -- a plain sequential loop, then `spawn` + `await_all`
-//     -- and prints both wall clocks. The payoff is measured on your machine, not asserted
-//     in a comment.
+//     Round 1 fires the four inventory calls at once; round 2 fires one `docker inspect`
+//     per container at once.
+//   * each batch runs BOTH ways -- a sequential loop, then `spawn` + `await_all` -- and
+//     both wall clocks are printed. Measured here: 12 docker calls, 677ms one at a time
+//     vs 269ms concurrent. Your numbers will differ; that is the point of measuring.
 //   * `enum State` + `struct Container`, so a container's state is one value and the dot,
-//     the label and the tally all come from the same `match` -- they cannot disagree.
-//   * `.lines()` / `.split()` instead of a character scan.
+//     the label and the up/down tally all come from `match` on it -- they cannot disagree.
 //   * if docker is missing or its daemon is down, it says so in one line and exits.
 //
-//   wyn run sysadmin/dockermon/src/main.wyn          # running containers
-//   wyn run sysadmin/dockermon/src/main.wyn --all    # include stopped ones
+//   wyn run src/main.wyn          # running containers
+//   wyn run src/main.wyn --all    # include stopped/created ones
 //
-// The `docker ps` row parsing, the state classification and the column arithmetic live
-// in src/psparse.wyn so they can be tested against captured output with no daemon
-// running -- see tests/test_psparse.wyn. This file keeps the shell-outs, the
-// spawn/await_all timing demo, and the drawing.
+// Parsing and column arithmetic live in src/psparse.wyn, tested against captured output
+// with no daemon -- see tests/test_psparse.wyn. This file keeps the shell-outs, the
+// timing demo and the drawing.
 
 import psparse
 
@@ -47,8 +45,8 @@ fn classify(s: string) -> State => match s {
     _ => State.Other
 }
 
-// One match per concern: the colour, the glyph and the word, each derived from the SAME
-// enum value the tally uses. Nothing here can say "running" beside a red dot.
+// One match per concern, each reading the SAME enum value the tally reads. Nothing here
+// can print the word "running" beside a red dot.
 fn colour(s: State) -> string => match s {
     State.Running => "\x1b[32m",
     State.Paused => "\x1b[33m",
@@ -65,16 +63,23 @@ fn word(s: State) -> string => match s {
     State.Other => "other"
 }
 
+// `paused` is UP: the container exists and holds its resources, it is just not scheduled.
+// `created` is not: it has never run. Collapsing either is a wrong answer, not a style call.
 fn up(s: State) -> bool => match s {
     State.Running => true,
     State.Paused => true,
-    State.Exited => false,
-    State.Created => false,
-    State.Other => false
+    _ => false
 }
 
 // The unit of work: one shell-out. Spawned, so every caller's wait overlaps every other's.
 fn probe(cmd: string) -> string => System.exec(cmd)
+
+// Run a batch of commands one at a time; return the wall clock. The baseline being beaten.
+fn timed_serial(cmds: [string]) -> int {
+    var t = Time.now_millis()
+    for c in cmds { probe(c) }
+    return Time.now_millis() - t
+}
 
 fn main() {
     print("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
@@ -93,17 +98,15 @@ fn main() {
         return
     }
 
-    var ps_cmd = "docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Status}}' 2>/dev/null"
-    var round1 = [ps_cmd, "docker images -q 2>/dev/null",
-                  "docker volume ls -q 2>/dev/null", "docker network ls -q 2>/dev/null"]
+    var round1 = ["docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Status}}' 2>/dev/null",
+                  "docker images -q 2>/dev/null",
+                  "docker volume ls -q 2>/dev/null",
+                  "docker network ls -q 2>/dev/null"]
 
-    // THE BASELINE. Four independent slow calls, one at a time, the obvious way.
-    var t = Time.now_millis()
-    for c in round1 { probe(c) }
-    var seq_ms = Time.now_millis() - t
+    var seq_ms = timed_serial(round1)          // the obvious way, for comparison
 
     // THE POINT OF THIS FILE. The same four calls, all in flight before any is read.
-    t = Time.now_millis()
+    var t = Time.now_millis()
     var futures = []
     for c in round1 { futures.push(spawn probe(c)) }
     var got = await_all(futures)
@@ -123,30 +126,27 @@ fn main() {
         })
     }
 
-    // ROUND 2 -- one `docker inspect` per container. Again both ways, again all at once.
+    // ROUND 2 -- one `docker inspect` per container. N calls this time, not 4, and again
+    // both ways: this is where concurrency stops being a rounding error.
     var round2 = []
     for c in rows { round2.push("docker inspect -f '{{.RestartCount}}' ${c.name} 2>/dev/null") }
     if round2.len() > 0 {
-        t = Time.now_millis()
-        for c in round2 { probe(c) }
-        seq_ms += Time.now_millis() - t
-
+        seq_ms += timed_serial(round2)
         t = Time.now_millis()
         var f2 = []
         for c in round2 { f2.push(spawn probe(c)) }
         var counts = await_all(f2)
         par_ms += Time.now_millis() - t
         calls += round2.len()
-        // `.to_int()` directly would ABORT the process on an inspect that printed
-        // nothing -- which happens whenever a container is removed between `ps` and
-        // `inspect`. restarts_of() returns 0 instead.
+        // `.to_int()` directly would ABORT the process on an inspect that printed nothing
+        // -- a normal race when a container is removed between `ps` and `inspect`.
         for i in 0..rows.len() { rows[i].restarts = psparse.restarts_of(counts[i]) }
     }
 
     print("  \x1b[1m${rows.len()}\x1b[0m containers   \x1b[1m${psparse.count_lines(got[1])}\x1b[0m images   \x1b[1m${psparse.count_lines(got[2])}\x1b[0m volumes   \x1b[1m${psparse.count_lines(got[3])}\x1b[0m networks")
     print("")
-    print("    ${"CONTAINER".pad_right(18, " ")}${"IMAGE".pad_right(36, " ")}${"STATE".pad_right(9, " ")}RE  STATUS")
-    print("    ${"─────────".pad_right(18, " ")}${"─────".pad_right(36, " ")}${"─────".pad_right(9, " ")}──  ──────")
+    print("    ${psparse.cell("CONTAINER", 20)}${psparse.cell("IMAGE", 38)}${psparse.cell("STATE", 9)}RE  STATUS")
+    print("    ${psparse.cell("─────────", 20)}${psparse.cell("─────", 38)}${psparse.cell("─────", 9)}──  ──────")
 
     var live = 0
     var shown = 0
@@ -154,10 +154,10 @@ fn main() {
         if up(c.state) { live += 1 }
         if not up(c.state) and not show_all { continue }
         shown += 1
-        // short() bounds these cells by CELLS and pad_right pads by CELLS, so a
-        // truncated name lines up with an untruncated one. That is not obvious -- "…" is
-        // 3 bytes and `.len()` counts bytes -- so tests/test_psparse.wyn pins it.
-        print("  ${colour(c.state)}●\x1b[0m ${psparse.short(c.name, 18).pad_right(18, " ")}${psparse.short(c.image, 34).pad_right(36, " ")}${colour(c.state)}${word(c.state).pad_right(9, " ")}\x1b[0m${c.restarts.to_string().pad_left(2, " ")}  \x1b[90m${c.status}\x1b[0m")
+        // psparse.cell() bounds every column by CELLS and always leaves a gap, so a
+        // full-width name cannot fuse into the image beside it -- the bug that printed
+        // "pedantic_lederberghashicorp/...". tests/test_psparse.wyn pins it.
+        print("  ${colour(c.state)}●\x1b[0m ${psparse.cell(c.name, 20)}${psparse.cell(c.image, 38)}${colour(c.state)}${psparse.cell(word(c.state), 9)}\x1b[0m${c.restarts.to_string().pad_left(2, " ")}  \x1b[90m${c.status}\x1b[0m")
     }
     if shown == 0 { print("    \x1b[90m(no running containers -- pass --all to include stopped ones)\x1b[0m") }
 

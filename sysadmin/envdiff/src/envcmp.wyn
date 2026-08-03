@@ -1,0 +1,68 @@
+// The compare core of envdiff, split out so it can be tested with no environment and
+// no files on disk.
+//
+// Everything here is a pure function of its arguments: no System, no File, no clock.
+// The I/O (reading `env`, finding the baseline) and the colours stay in main.wyn; the
+// three rules that can be silently WRONG live here, under tests/test_envcmp.wyn:
+//
+//   1. which bucket a key lands in            -> classify()
+//   2. whether a secret's value can leak      -> is_secret()
+//   3. whether KEY=VALUE parsing loses a key  -> is_pair() / key_of() / val_of()
+//
+// Signatures are primitives only (string/int/bool). On the compiler in this repo a
+// function that returns an enum, a struct or a list across a module boundary
+// miscompiles, so `enum Change` stays in main.wyn and classify() speaks in canonical
+// strings that main.wyn relabels 1:1.
+
+// A snapshot line is `KEY=VALUE`. The `=` must be at index >= 1: index 0 would mean an
+// empty key ("=novalue"), and -1 means this is a continuation of a multi-line value.
+// Either way the line is skipped whole rather than half-parsed.
+export fn is_pair(line: string) -> bool => line.index_of("=") >= 1
+
+export fn key_of(line: string) -> string {
+    var eq = line.index_of("=")
+    if eq < 1 { return "" }
+    return line.substring(0, eq)
+}
+
+// Only the FIRST `=` separates, so a value that itself contains `=` survives intact
+// (`DATABASE_URL=postgres://h/db?a=1&b=2`).
+export fn val_of(line: string) -> string {
+    var eq = line.index_of("=")
+    if eq < 1 { return "" }
+    return line.substring(eq + 1, line.len())
+}
+
+// How many keys a snapshot holds. The old app hardcoded 27 names and looped `0..26`;
+// counting is now driven by the data, so it cannot be off by one.
+export fn pair_count(text: string) -> int {
+    var n = 0
+    for raw in text.lines() { if is_pair("" + raw) { n += 1 } }
+    return n
+}
+
+// The one place a key's fate is decided. main.wyn's `enum Change` is a 1:1 relabelling
+// of these four strings and its match is exhaustive, so this function is the whole
+// classification rule -- including the case worth stating out loud: present-but-empty
+// is Changed, never Removed.
+export fn classify(in_base: bool, in_now: bool, was: string, is_now: string) -> string {
+    if not in_base { return "added" }
+    if not in_now { return "removed" }
+    if was != is_now { return "changed" }
+    return "same"
+}
+
+// A name that looks like it guards something never gets its value printed.
+export fn is_secret(key: string) -> bool {
+    var k = key.upper()
+    return k.contains("KEY") or k.contains("TOKEN") or k.contains("SECRET") or k.contains("PASSWORD") or k.contains("PASSWD")
+}
+
+// Enough of a fingerprint to tell two secrets apart, not enough to reconstruct one:
+// each character scored by its position in a known alphabet, folded into a small int.
+export fn digest(v: string) -> int {
+    var alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_.:/@+="
+    var h = 7
+    for i in 0..v.len() { h = (h * 31 + alphabet.index_of(v.substring(i, i + 1)) + 2) % 9973 }
+    return h
+}

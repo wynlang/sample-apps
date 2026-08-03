@@ -10,14 +10,14 @@
 // The nesting was nonsense, the entries were not links, and nothing checked the document.
 //
 // Rewritten to be a tool you would actually use:
-//   * fenced code blocks (``` and ~~~) are skipped -- the bug above, fixed at the source.
-//   * depth is NORMALISED to the shallowest heading, so a doc that starts at ## is not
+//   * code blocks are skipped -- fenced (``` / ~~~) and INDENTED (CommonMark allows an
+//     ATX heading at most 3 spaces of indent, so "    # install" is code, not an H1).
+//   * depth is NORMALISED to the shallowest heading, so a doc starting at ## is not
 //     indented pointlessly.
-//   * GitHub-style anchor slugs, so every entry is a clickable [text](#slug) you can
-//     paste straight back into the file.
-//   * a structure summary (count per level) and three checks a writer wants: a SKIPPED
-//     level (## followed by ####), DUPLICATE headings whose anchors would collide, and
-//     more than one H1.
+//   * GitHub anchor slugs, INCLUDING GitHub's de-duplication (a second "Basic Usage"
+//     anchors at #basic-usage-1), so the whole block pastes back in and every link works.
+//   * a per-level structure summary, plus the three checks a writer wants: a SKIPPED
+//     level (## straight to ####), repeated headings, and more than one H1.
 //
 //   wyn run src/main.wyn [file.md]      (no argument: README.md in the current directory)
 
@@ -28,9 +28,9 @@ struct Heading {
     line: int
 }
 
-// GitHub's exact anchor rule: lowercase, keep [a-z0-9_-], drop everything else
-// (punctuation, emoji), turn each remaining space into a dash. Note it does NOT
-// collapse runs of dashes -- "FAQ / Troubleshooting" really is "#faq--troubleshooting".
+// GitHub's anchor rule: lowercase, keep [a-z0-9_-], drop everything else (punctuation,
+// emoji), turn each remaining space into a dash. It does NOT collapse runs of dashes --
+// "FAQ / Troubleshooting" really is "#faq--troubleshooting".
 fn slugify(title: string) -> string {
     var out = ""
     for ch in title.lower().chars() {
@@ -49,8 +49,18 @@ fn heading_depth(line: string) -> int {
     return d
 }
 
+// Indent of the RAW line. 4+ means an indented code block, which is what made
+// "    # indented comment" show up as an H1 before this check existed.
+fn indent_of(raw: string) -> int {
+    if raw.substring(0, 1) == "\t" { return 4 }
+    var i = 0
+    while i < raw.len() and raw.substring(i, i + 1) == " " { i += 1 }
+    return i
+}
+
 fn parse(md: string) -> [Heading] {
     var heads = []
+    var used = HashMap.new()
     var n = 0
     var fenced = false
     // split("\n"), not lines(): lines() drops blank lines, which would skew line numbers.
@@ -62,7 +72,7 @@ fn parse(md: string) -> [Heading] {
             fenced = not fenced
             continue
         }
-        if fenced { continue }
+        if fenced or indent_of(raw) > 3 { continue }
         var d = heading_depth(line)
         if d == 0 { continue }
         var text = line.substring(d + 1, line.len()).trim()
@@ -70,7 +80,14 @@ fn parse(md: string) -> [Heading] {
             text = text.substring(0, text.len() - 1).trim()
         }
         if text.len() == 0 { continue }
-        heads.push(Heading { depth: d, text: text, slug: slugify(text), line: n })
+        // De-duplicate exactly as GitHub does, so the SECOND "Basic Usage" gets
+        // #basic-usage-1 and its link resolves instead of jumping to the first one.
+        var stem = slugify(text)
+        var prior = used.get_int(stem)
+        used.insert_int(stem, prior + 1)
+        var slug = stem
+        if prior > 0 { slug = "${stem}-${prior}" }
+        heads.push(Heading { depth: d, text: text, slug: slug, line: n })
     }
     return heads
 }
@@ -116,12 +133,18 @@ fn main() {
         print("  \x1b[36mH${d}\x1b[0m ${"█".repeat(at.len())} ${at.len()}")
     }
 
-    // Checks. Collide-able anchors are counted; the other two are read off the sequence.
-    var seen = HashMap.new()
-    for h in heads { seen.insert_int(h.slug, seen.get_int(h.slug) + 1) }
+    // Checks. Duplicates are tallied by TITLE (the anchors above are already unique);
+    // the other two are read off the sequence of depths.
+    var titles = HashMap.new()
+    for h in heads {
+        var t = "" + h.text
+        titles.insert_int(t, titles.get_int(t) + 1)
+    }
     var problems = []
-    for k in seen.keys() {
-        if seen.get_int(k) > 1 { problems.push("duplicate anchor #${k} x${seen.get_int(k)} - links will land on the first one") }
+    for k in titles.keys() {
+        var title = "" + k
+        var n = titles.get_int(title)
+        if n > 1 { problems.push("\"${title}\" appears ${n}x - anchored #${slugify(title)}, #${slugify(title)}-1, ...") }
     }
     var prev = base
     for h in heads {

@@ -90,21 +90,12 @@ export fn restarts_of(out: string) -> int {
     return t.to_int()
 }
 
-// Truncate to at most n VISIBLE cells, marking that it happened. The ellipsis is one
-// cell wide but THREE BYTES long, which is the trap `cells()` below exists to avoid.
-export fn short(s: string, n: int) -> string {
-    if n <= 0 { return "" }
-    if s.len() <= n { return s }
-    return s.substring(0, n - 1) + "…"
-}
-
+// ── column layout ──────────────────────────────────────────────────────────────────
 // The visible width of a string in terminal cells, given that `.len()` counts BYTES.
 // A UTF-8 continuation byte is 0x80..0xBF, so counting non-continuation bytes counts
-// characters. Used only by the tests, to state the distinction the column layout rests
-// on: `short()` bounds a cell by CELLS while `.len()` reports BYTES, and the two differ
-// by 2 for every truncated cell. `pad_right` turns out to pad by cells, so the two
-// cancel -- tests/test_psparse.wyn pins that, because if `pad_right` ever became
-// byte-based the table would silently shear on exactly the truncated rows.
+// characters. Everything below measures with this and never with `.len()`: the two
+// disagree for every box-drawing character and every ellipsis in the table, and every
+// layout bug this app has had came from using the wrong one.
 export fn cells(s: string) -> int {
     var n = 0
     for i in 0..s.len() {
@@ -114,3 +105,35 @@ export fn cells(s: string) -> int {
     }
     return n
 }
+
+// The BYTE index at which cell number `k` begins (k counted from 0), or s.len() if the
+// string has fewer than k+1 cells. `substring` slices by bytes, so this is what stands
+// between a truncation and half a character.
+export fn cell_start(s: string, k: int) -> int {
+    var seen = 0
+    var at = s.len()
+    for i in 0..s.len() {
+        var c = s.substring(i, i + 1)
+        if c >= "\x80" and c < "\xc0" { continue }
+        if seen == k { at = i }
+        seen += 1
+    }
+    return at
+}
+
+// Truncate to at most n VISIBLE cells, marking that it happened with an ellipsis that is
+// one cell wide but THREE BYTES long. Both the test for "too long" and the cut point are
+// in CELLS: measuring with `.len()` here called a 9-cell rule row "27 wide" and then cut
+// it 1 byte into a 3-byte "─", printing the literal garbage `──────…` / `──?…`.
+export fn short(s: string, n: int) -> string {
+    if n <= 0 { return "" }
+    if cells(s) <= n { return s }
+    return s.substring(0, cell_start(s, n - 1)) + "…"
+}
+
+// One table column: exactly n cells wide, ALWAYS ending in at least one space. That last
+// clause is the whole reason this exists. `short(s, n).pad_right(n)` looks equivalent and
+// is wrong for a value whose width is exactly n -- it emits n cells and no gap, so the
+// cell fuses into the next column ("pedantic_lederberghashicorp/..." was the real output).
+// Reserving one cell for the separator makes a full-width value truncate instead of touch.
+export fn cell(s: string, n: int) -> string => short(s, n - 1).pad_right(n, " ")

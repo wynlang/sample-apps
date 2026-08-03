@@ -1,0 +1,95 @@
+// The parse core of config-reader, split out so it can be tested without a config file.
+//
+// Everything here is a pure function of one string: no File, no System. The I/O (finding
+// and reading the config) stays in main.wyn; the decisions that can be silently WRONG --
+// where a comment starts, whether a `#` is inside quotes, which side of the `=` is the
+// key, whether `8080` and `"8080"` are the same type -- live here, under
+// tests/test_conf.wyn. main.wyn calls these; the tests call these. There is no second
+// copy of a rule to drift out of sync.
+//
+// Signatures are deliberately primitives only (string/int/bool). On the compiler in this
+// repo, a function that RETURNS an enum or a struct across a module boundary miscompiles,
+// so `enum Value` stays in main.wyn and this module speaks in canonical type names --
+// exactly the split log-parser uses for its `Level`.
+
+// Cut a trailing `# comment`, but only where the `#` sits OUTSIDE quotes: a value like
+// `tag = "a#b"` contains a legitimate hash. Counting quotes to the left of the `#` is the
+// whole rule, and it is the one an ad-hoc `index_of("#")` gets wrong.
+export fn strip_comment(line: string) -> string {
+    var t = line.trim()
+    var cut = t.len()
+    var quotes = 0
+    for i in 0..t.len() {
+        var c = t.substring(i, i + 1)
+        if c == "\"" { quotes += 1 }
+        if c == "#" and quotes % 2 == 0 { cut = i; break }
+    }
+    return t.substring(0, cut).trim()
+}
+
+export fn is_header(t: string) -> bool => t.len() > 0 and t.substring(0, 1) == "["
+
+// The section name, or "" when the header never closes -- which main.wyn reports as a
+// fault rather than slicing a name out of nothing.
+// NOTE: the index variable is `end`, not `close`. A local named `close` collides with
+// libc's close() in the generated C -- the declaration gets renamed but the USES do not,
+// so every read silently binds to the function instead of the value and this returned ""
+// for every well-formed header. Reduced repro in the findings; renaming is the workaround.
+export fn section_of(t: string) -> string {
+    var end = t.index_of("]")
+    if end < 1 { return "" }
+    return t.substring(1, end).trim()
+}
+
+// A `key = value` line needs a `=` with something to its left, so `= 5` and `keepalive
+// true` are both malformed rather than yielding an empty key.
+export fn is_pair(t: string) -> bool => t.index_of("=") > 0
+
+export fn key_of(t: string) -> string {
+    var eq = t.index_of("=")
+    if eq < 1 { return "" }
+    return t.substring(0, eq).trim()
+}
+
+// The right-hand side, trimmed but STILL QUOTED -- quoting is what forces a string type,
+// so the quotes have to survive until infer_name has seen them.
+export fn raw_value(t: string) -> string {
+    var eq = t.index_of("=")
+    if eq < 1 { return "" }
+    return t.substring(eq + 1, t.len()).trim()
+}
+
+export fn is_quoted(v: string) -> bool => v.len() > 1 and v.substring(0, 1) == "\""
+
+export fn unterminated(v: string) -> bool {
+    if not is_quoted(v) { return false }
+    return v.substring(1, v.len()).index_of("\"") < 0
+}
+
+export fn unquote(v: string) -> string {
+    if not is_quoted(v) { return v }
+    var body = v.substring(1, v.len())
+    var end = body.index_of("\"")
+    if end < 0 { return body }
+    return body.substring(0, end)
+}
+
+// The one place a literal becomes a type. Quoted is always a string -- that is the point
+// of quoting, and it is why `port = 8080` and `port = "8080"` must not be confused.
+// Otherwise: true/false is a bool, all-digits an int, digits with exactly one dot a float.
+// main.wyn's `enum Value` is a 1:1 relabelling of these four names.
+export fn infer_name(v: string) -> string {
+    if is_quoted(v) { return "string" }
+    if v == "true" or v == "false" { return "bool" }
+    if v.len() == 0 { return "string" }
+    var dots = 0
+    var digits = true
+    for i in 0..v.len() {
+        var c = v.substring(i, i + 1)
+        if c == "." { dots += 1 }
+        else if c < "0" or c > "9" { digits = false }
+    }
+    if digits and dots == 0 { return "int" }
+    if digits and dots == 1 { return "float" }
+    return "string"
+}

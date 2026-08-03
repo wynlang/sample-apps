@@ -135,20 +135,46 @@ test "the ellipsis is one CELL wide but three BYTES long" {
     assert_eq(psparse.cells(""), 0)
 }
 
-test "columns line up whether or not the cell was truncated" {
-    // The table's layout rests on a non-obvious pairing: `short()` bounds a cell by
-    // CELLS, `.len()` reports BYTES, and `pad_right` pads by CELLS. If pad_right were
-    // byte-based, a truncated 34-cell image would report .len() == 36, receive no
-    // padding, and that row's STATE column would sit 2 characters left of every other
-    // row's -- invisible until one image name is long and another is short, i.e. exactly
-    // the fixture above. This test is the guard on that pairing.
-    var shortish = psparse.short("nginx:1.27", 34).pad_right(36, " ")
-    var truncated = psparse.short("hashicorp/terraform-mcp-server:0.14.1", 34).pad_right(36, " ")
-    assert_eq(psparse.cells(shortish), 36)
-    assert_eq(psparse.cells(truncated), 36)
-    // And the byte counts DISAGREE, which is what makes the above worth asserting.
-    assert_eq(shortish.len(), 36)
-    assert_eq(truncated.len(), 38)
+test "every column is exactly n cells wide, truncated or not" {
+    // `cell()` is the whole layout rule, so it is asserted in CELLS across the widths
+    // main() actually uses and the three interesting lengths: short, exactly-full, over.
+    assert_eq(psparse.cells(psparse.cell("web-1", 20)), 20)
+    assert_eq(psparse.cells(psparse.cell("pedantic_lederberg", 20)), 20)
+    assert_eq(psparse.cells(psparse.cell("hashicorp/terraform-mcp-server:0.14.1", 38)), 38)
+    assert_eq(psparse.cells(psparse.cell("running", 9)), 9)
+    assert_eq(psparse.cells(psparse.cell("", 20)), 20)
+}
+
+test "a full-width cell still leaves a gap instead of fusing into the next column" {
+    // THE BUG THIS FUNCTION EXISTS FOR, from real output. `pedantic_lederberg` is exactly
+    // 18 chars, so the old `short(name,18).pad_right(18)` emitted 18 cells and NO space --
+    // and the table printed "pedantic_lederberghashicorp/terraform-mcp-server:0.…" with
+    // the name run into the image. Every cell must end in whitespace.
+    var c = psparse.cell("pedantic_lederberg", 20)
+    assert_eq(c, "pedantic_lederberg  ")
+    // A value that fills the column exactly gets truncated rather than touching: 20 cells
+    // in, 18 kept + the marker + the reserved gap.
+    var full = psparse.cell("12345678901234567890", 20)
+    assert_eq(psparse.cells(full), 20)
+    assert_eq(full, "123456789012345678… ")
+}
+
+test "truncation cuts on a CHARACTER boundary, never mid-UTF-8" {
+    // THE SECOND REAL BUG. `short()` used to compare and cut using `.len()`, i.e. BYTES.
+    // A 9-cell rule row "─────────" is 27 bytes, so it looked "too long" for a 19-cell
+    // column and was cut 19 bytes in -- one byte into a 3-byte "─". The header rule
+    // printed the literal mojibake `──────…` and `──?…`. Untouched is the correct answer.
+    var rule = "─────────"
+    assert_eq(rule.len(), 27)          // bytes
+    assert_eq(psparse.cells(rule), 9)  // cells -- fits in 20, so must NOT be touched
+    assert_eq(psparse.cell(rule, 20), rule.pad_right(20, " "))
+    assert_eq(psparse.short(rule, 9), rule)
+    // And when a multibyte string genuinely IS too long, the cut lands on a boundary:
+    // 4 cells of a 9-cell rule = "───" + the marker, and 3 x 3 + 3 = 12 bytes.
+    var cut = psparse.short(rule, 4)
+    assert_eq(psparse.cells(cut), 4)
+    assert_eq(cut.len(), 12)
+    assert_eq(cut, "───…")
 }
 
 test "truncation marks itself and does not exceed the requested width" {
@@ -160,6 +186,19 @@ test "truncation marks itself and does not exceed the requested width" {
     assert_eq(psparse.cells(t), 18)
     assert_eq(t, "12345678901234567…")
     assert_eq(psparse.short("anything", 0), "")
+}
+
+test "cell_start indexes by byte but counts by cell" {
+    // The primitive the boundary-safe cut rests on: `substring` slices BYTES, so the cut
+    // point for cell k has to be looked up, not computed as k.
+    assert_eq(psparse.cell_start("abc", 0), 0)
+    assert_eq(psparse.cell_start("abc", 2), 2)
+    // Each "─" is 3 bytes, so cell 3 begins at byte 9 -- not byte 3.
+    assert_eq(psparse.cell_start("─────────", 3), 9)
+    assert_eq(psparse.cell_start("─────────", 1), 3)
+    // Past the end clamps to the byte length, so a substring stays in bounds.
+    assert_eq(psparse.cell_start("abc", 99), 3)
+    assert_eq(psparse.cell_start("", 0), 0)
 }
 
 test "the whole fixture parses field-for-field" {
