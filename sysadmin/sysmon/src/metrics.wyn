@@ -1,0 +1,428 @@
+// metrics.wyn -- sysmon's parsing and view state, kept out of the drawing code.
+//
+// A TUI is the classic thing nobody tests, because "it draws" and drawing needs a
+// terminal. But almost none of sysmon is drawing: it is parsing `ps`/`df`/`vm_stat`
+// output and deciding which view a keypress selects. Both of those are pure functions
+// of their input, and both are where the old sysmon was actually wrong -- it assumed
+// 4096-byte pages on a 16384-byte-page Mac, and its key handling let `1`, `2` and `3`
+// each fire independently so a single key could change the view twice.
+//
+// So: everything here is text-in-value-out or state-in-state-out, tests/test_metrics.wyn
+// covers it against captured macOS and Linux output, and main.wyn is left holding only
+// Terminal calls.
+//
+// Sentinels: -1 for an int that could not be measured, "" for a string. Nothing here
+// panics and nothing invents a zero -- see `num`, which is the only gate to `to_int()`.
+
+// ---------------------------------------------------------------- safe scalars
+
+// `to_int()` PANICS on non-numeric text, so every parser funnels through here.
+export fn num(s: string) -> int {
+    var t = s.trim()
+    if t.len() == 0 { return -1 }
+    for i in 0..t.len() {
+        var c = t.substring(i, i + 1)
+        if c < "0" or c > "9" { return -1 }
+    }
+    return t.to_int()
+}
+
+// A percentage like "80.4" as hundredths, so `ps`'s %CPU column can be ranked with
+// integer comparisons and no `to_float()` (which panics just as `to_int()` does --
+// and that column really is "-" for some kernel threads).
+export fn centi(s: string) -> int {
+    var t = s.trim()
+    if t.len() == 0 { return -1 }
+    var dot = t.index_of(".")
+    if dot < 0 {
+        var n = num(t)
+        if n < 0 { return -1 }
+        return n * 100
+    }
+    var whole = num(t.substring(0, dot))
+    var frac = t.substring(dot + 1, t.len())
+    if whole < 0 or frac.len() == 0 { return -1 }
+    var two = frac
+    if two.len() > 2 { two = two.substring(0, 2) }
+    while two.len() < 2 { two += "0" }
+    var f = num(two)
+    if f < 0 { return -1 }
+    return whole * 100 + f
+}
+
+// Nth whitespace-separated field. `words()` collapses runs of spaces; `split_at(" ", n)`
+// does not, which is why column-aligned `df` output used to parse as empty strings.
+export fn field(line: string, n: int) -> string {
+    var w = line.words()
+    if n < 0 or n >= w.len() { return "" }
+    return "" + w[n]
+}
+
+export fn pct(part: int, whole: int) -> int {
+    if whole < 1 or part < 0 { return -1 }
+    return part * 100 / whole
+}
+
+// ---------------------------------------------------------------- memory
+
+// vm_stat's own header carries the page size, so it never has to be guessed. The old
+// sysmon fell back to 4096 on a machine with 16384-byte pages: a fourfold error in
+// every memory figure it printed.
+export fn page_size(vm: string) -> int {
+    var marker = "page size of "
+    var lines = vm.lines()
+    if lines.len() == 0 { return -1 }
+    var head = "" + lines[0]
+    var at = head.index_of(marker)
+    if at < 0 { return -1 }
+    return num(field(head.substring(at + marker.len(), head.len()), 0))
+}
+
+// "Pages active:   537685." -> 537685. Prefix-anchored on "<key>:", so "Pages free"
+// cannot be answered by a line that merely mentions it.
+export fn pages(vm: string, key: string) -> int {
+    var want = key + ":"
+    for raw in vm.lines() {
+        var line = ("" + raw).trim()
+        if not line.starts_with(want) { continue }
+        return num(line.substring(want.len(), line.len()).trim().replace(".", ""))
+    }
+    return -1
+}
+
+// Total physical memory in MB. macOS exposes no single total, so it is the sum of the
+// page buckets -- and if any bucket is missing the answer is -1, not a short total.
+export fn total_mb(vm: string) -> int {
+    var page = page_size(vm)
+    if page < 1 { return -1 }
+    // NB: not named `free` -- that collides with C's free() in the generated code.
+    var idle = pages(vm, "Pages free")
+    var active = pages(vm, "Pages active")
+    var inactive = pages(vm, "Pages inactive")
+    var spec = pages(vm, "Pages speculative")
+    var wired = pages(vm, "Pages wired down")
+    if idle < 0 or active < 0 or inactive < 0 or spec < 0 or wired < 0 { return -1 }
+    return (idle + active + inactive + spec + wired) * page / 1048576
+}
+
+// Committed memory (active + wired). Inactive and speculative pages are reclaimable,
+// so counting them as "used" is what makes naive monitors report 95% on an idle Mac.
+export fn used_mb(vm: string) -> int {
+    var page = page_size(vm)
+    if page < 1 { return -1 }
+    var active = pages(vm, "Pages active")
+    var wired = pages(vm, "Pages wired down")
+    if active < 0 or wired < 0 { return -1 }
+    return (active + wired) * page / 1048576
+}
+
+// Linux: /proc/meminfo, in kB. MemTotal - MemAvailable is the kernel's own answer to
+// "how much is really in use" and already excludes reclaimable cache.
+export fn meminfo_kb(mi: string, key: string) -> int {
+    var want = key + ":"
+    for raw in mi.lines() {
+        var line = ("" + raw).trim()
+        if not line.starts_with(want) { continue }
+        return num(field(line.substring(want.len(), line.len()), 0))
+    }
+    return -1
+}
+
+export fn meminfo_used_mb(mi: string) -> int {
+    var total = meminfo_kb(mi, "MemTotal")
+    var avail = meminfo_kb(mi, "MemAvailable")
+    if total < 0 or avail < 0 { return -1 }
+    return (total - avail) / 1024
+}
+
+// ---------------------------------------------------------------- cpu / load
+
+// macOS: "load averages: 4.98 6.72 7.16" (spaces, plural)
+// Linux: "load average: 0.14, 0.11, 0.09" (commas, singular)
+// Both normalise to three space-separated numbers.
+export fn load_from_uptime(text: string) -> string {
+    var line = text.trim()
+    var at = line.index_of("load average")
+    if at < 0 { return "" }
+    // index_of takes no start offset, so slice first and search the tail.
+    var tail = line.substring(at, line.len())
+    var colon = tail.index_of(":")
+    if colon < 0 { return "" }
+    var w = tail.substring(colon + 1, tail.len()).replace(",", " ").words()
+    if w.len() < 3 { return "" }
+    return "${w[0]} ${w[1]} ${w[2]}"
+}
+
+// /proc/loadavg: "0.14 0.11 0.09 1/406 15". Present even on a container with no
+// `uptime` binary -- debian:trixie genuinely ships none.
+export fn load_from_proc(text: string) -> string {
+    var w = text.trim().words()
+    if w.len() < 3 { return "" }
+    return "${w[0]} ${w[1]} ${w[2]}"
+}
+
+// The 1-minute load as hundredths, for the CPU bar: 4.98 -> 498. Scaled against core
+// count, so "busy" means busy per core rather than busy in absolute terms.
+export fn load_pct(load: string, cores: int) -> int {
+    var w = load.words()
+    if w.len() < 1 or cores < 1 { return -1 }
+    var one = centi("" + w[0])
+    if one < 0 { return -1 }
+    return one / cores
+}
+
+// ---------------------------------------------------------------- processes
+
+// Rows with a numeric PID. Identified that way rather than by skipping line 1, so a
+// `ps` invoked without a header does not cost us its busiest process.
+export fn ps_rows(text: string) -> int {
+    var n = 0
+    for raw in text.lines() {
+        var line = ("" + raw).trim()
+        if line.len() == 0 { continue }
+        if num(field(line, 0)) < 0 { continue }
+        n += 1
+    }
+    return n
+}
+
+// The whole of process row `rank`, trimmed; "" if there is no such row. Callers that
+// want several fields of one row should take the row once and use `field` on it, rather
+// than calling ps_field per column -- each call is a fresh scan of the text.
+export fn ps_row(text: string, rank: int) -> string {
+    var n = 0
+    for raw in text.lines() {
+        var line = ("" + raw).trim()
+        if line.len() == 0 { continue }
+        if num(field(line, 0)) < 0 { continue }
+        n += 1
+        if n == rank { return line }
+    }
+    return ""
+}
+
+// COMMAND is the last column and may contain spaces
+// ("…/Keychain Circle Notification"), so it is everything from field 4 on --
+// `words()[4]` would truncate it at the first space.
+export fn ps_command(row: string) -> string {
+    var w = row.words()
+    if w.len() < 5 { return "" }
+    return w.slice(4, w.len()).join(" ")
+}
+
+export fn ps_field(text: string, rank: int, col: int) -> string {
+    var line = ps_row(text, rank)
+    if line.len() == 0 { return "" }
+    if col < 4 { return field(line, col) }
+    return ps_command(line)
+}
+
+// The row indices of the `n` busiest processes, busiest first, as a space-separated
+// string: "17 4 233". Empty if there are no rows.
+//
+// Sorted here rather than by `ps` because there is no portable flag for it: macOS
+// `ps -r` sorts by CPU, but Linux procps `ps -r` shows only RUNNING processes, which on
+// an idle box is nothing at all.
+//
+// Why a string of indices, and why all `n` at once:
+//
+//   * ONE PASS OVER THE TEXT. The %CPU column is read into an array a single time, so
+//     ranking costs O(rows) parsing plus O(rows*n) integer compares. Asking for each
+//     rank separately (`ps_rank(text, i)` in a loop) re-parsed the whole `ps` output
+//     for every candidate of every rank -- with ~650 processes that took 22 seconds,
+//     which is not a monitor, it is a stall.
+//   * A string because an exported function cannot return an array across a module
+//     boundary in the current compiler. The caller splits it with `words()`.
+export fn ps_top(text: string, n: int) -> string {
+    var cpus: [int] = []
+    for raw in text.lines() {
+        var line = ("" + raw).trim()
+        if line.len() == 0 { continue }
+        if num(field(line, 0)) < 0 { continue }
+        cpus.push(centi(field(line, 1)))
+    }
+    var rows = cpus.len()
+    var want = n
+    if want > rows { want = rows }
+    if want < 1 { return "" }
+
+    var taken: [bool] = []
+    for i in 0..rows { taken.push(false) }
+    var out = ""
+    // A `while` rather than `for _ in 0..want`: the counter is unused in the body, and
+    // an unused `for` variable in an imported module currently comes out
+    // module-prefixed in the generated C and fails to compile.
+    var remaining = want
+    while remaining > 0 {
+        remaining -= 1
+        var best = -1
+        // Starts below centi()'s -1 sentinel, so a row whose %CPU is "-" (kernel
+        // threads print that) still gets picked once everything measurable is taken,
+        // instead of vanishing from the ranking altogether.
+        var best_cpu = 0 - 2
+        for r in 0..rows {
+            if taken[r] { continue }
+            if cpus[r] <= best_cpu { continue }
+            best_cpu = cpus[r]
+            best = r
+        }
+        if best < 0 { return out }
+        taken[best] = true
+        if out.len() > 0 { out += " " }
+        out += "${best + 1}"
+    }
+    return out
+}
+
+export fn basename(path: string) -> string {
+    var slash = path.last_index_of("/")
+    if slash < 0 { return path }
+    return path.substring(slash + 1, path.len())
+}
+
+// ---------------------------------------------------------------- disks
+
+// `df -Pk` is POSIX-specified: 6 columns, 1024-byte blocks, identical on macOS and
+// Linux. `df -h` is neither, and it is what forced the old code into `grep -v devfs`.
+// Rows are counted only if the block column is numeric, which excludes the header
+// without depending on it being line 1.
+export fn df_rows(df: string) -> int {
+    var n = 0
+    for raw in df.lines() {
+        var line = ("" + raw).trim()
+        var w = line.words()
+        if w.len() < 6 { continue }
+        if num("" + w[1]) < 0 { continue }
+        if not is_real_fs("" + w[0], "" + w[w.len() - 1]) { continue }
+        n += 1
+    }
+    return n
+}
+
+// A whole disk-backed row, trimmed; "" if there is no such row.
+export fn df_row(df: string, rank: int) -> string {
+    var n = 0
+    for raw in df.lines() {
+        var line = ("" + raw).trim()
+        var w = line.words()
+        if w.len() < 6 { continue }
+        if num("" + w[1]) < 0 { continue }
+        if not is_real_fs("" + w[0], "" + w[w.len() - 1]) { continue }
+        n += 1
+        if n == rank { return line }
+    }
+    return ""
+}
+
+// The mount point is the LAST column, not column 5: a device name containing a space
+// ("map auto_home") pushes it further right.
+export fn df_mount(row: string) -> string {
+    var w = row.words()
+    if w.len() < 6 { return "" }
+    return "" + w[w.len() - 1]
+}
+
+// The capacity column is "5%", so the sign comes off before it is a number.
+export fn df_used_pct(row: string) -> int {
+    var c = field(row, 4)
+    if c.len() == 0 { return -1 }
+    return num(c.replace("%", ""))
+}
+
+export fn df_field(df: string, rank: int, col: int) -> string {
+    var row = df_row(df, rank)
+    if row.len() == 0 { return "" }
+    if col == 5 { return df_mount(row) }
+    return field(row, col)
+}
+
+export fn df_pct(df: string, rank: int) -> int => df_used_pct(df_row(df, rank))
+
+// Is this row backed by actual storage worth showing?
+//
+// The rule is deliberately about RAM-backed vs disk-backed, not about a denylist of
+// names. `overlay` is on no denylist here because it is the real root filesystem of
+// every Docker container -- excluding it (the obvious first guess, and what this
+// function did until a test caught it) means sysmon shows no `/` at all on Linux.
+// `tmpfs`/`devfs`/`shm` are RAM and stay out wherever they are mounted.
+export fn is_real_fs(device: string, mount: string) -> bool {
+    if device == "devfs" or device == "tmpfs" or device == "shm" { return false }
+    if device == "none" or device == "map" or device.starts_with("map ") { return false }
+    // Kernel and runtime mounts: real bytes, but not disks anyone monitors.
+    if mount == "/dev" or mount.starts_with("/dev/") { return false }
+    if mount == "/proc" or mount.starts_with("/proc/") { return false }
+    if mount == "/sys" or mount.starts_with("/sys/") { return false }
+    if mount == "/run" or mount.starts_with("/run/") { return false }
+    // macOS hides its firmlinks here; they all report the same figures as `/`.
+    if mount.starts_with("/System/Volumes/") { return false }
+    return true
+}
+
+// KB -> "460.4 GB", integer tenths so the same input always renders identically.
+// "?" for an unknown size, never "0 KB" -- a zero reads as a measurement.
+export fn human_kb(kb: int) -> string {
+    if kb < 0 { return "?" }
+    if kb < 1024 { return "${kb} KB" }
+    if kb < 1048576 {
+        var t = kb * 10 / 1024
+        return "${t / 10}.${t % 10} MB"
+    }
+    var g = kb * 10 / 1048576
+    if g < 10240 { return "${g / 10}.${g % 10} GB" }
+    var t2 = kb * 10 / 1073741824
+    return "${t2 / 10}.${t2 % 10} TB"
+}
+
+// ---------------------------------------------------------------- view state
+
+// The three views, as ints so this module stays free of exported enums (which do not
+// currently survive codegen across a module boundary).
+export fn view_processes() -> int => 1
+export fn view_disks() -> int => 2
+export fn view_network() -> int => 3
+
+export fn view_name(view: int) -> string {
+    if view == 1 { return "processes" }
+    if view == 2 { return "disks" }
+    if view == 3 { return "network" }
+    return "?"
+}
+
+// Which view a keypress selects, given the current one.
+//
+// ONE function returning ONE view, rather than the old sysmon's three independent
+// `if key == 49 { view = 1; redraw(...) }` statements -- with those, a key that
+// matched two conditions redrew twice, and adding a view meant remembering to add a
+// branch in two places. An unrecognised key leaves the view alone by construction.
+//
+// Tab cycles, which is the shortcut the old version had no way to express.
+export fn next_view(view: int, key: int) -> int {
+    if key == 49 { return 1 }           // '1'
+    if key == 50 { return 2 }           // '2'
+    if key == 51 { return 3 }           // '3'
+    if key == 9 {                       // Tab: cycle 1 -> 2 -> 3 -> 1
+        if view >= 3 { return 1 }
+        return view + 1
+    }
+    return view
+}
+
+export fn is_quit(key: int) -> bool => key == 113 or key == 81 or key == 3   // q, Q, ^C
+export fn is_refresh(key: int) -> bool => key == 114 or key == 82           // r, R
+
+// How many data rows fit between the fixed header block and the status bar. Negative
+// or absurd terminal sizes clamp to a floor rather than driving a negative loop bound.
+export fn body_rows(term_rows: int, header_rows: int) -> int {
+    var n = term_rows - header_rows - 1
+    if n < 1 { return 1 }
+    return n
+}
+
+// Bar width for a given terminal width, clamped so it neither goes negative on a
+// narrow terminal nor stretches absurdly wide on a large one.
+export fn bar_width(cols: int) -> int {
+    var w = cols - 34
+    if w < 6 { return 6 }
+    if w > 40 { return 40 }
+    return w
+}

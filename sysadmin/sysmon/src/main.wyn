@@ -1,218 +1,276 @@
-// sysmon -- System monitor (htop-lite) written in Wyn
-// Demonstrates: Terminal TUI, System.exec, string parsing, real-time updates
+// sysmon -- an htop-lite terminal monitor: CPU, memory, and a switchable body view of
+// processes, disks or network.
 //
-// Shows: CPU, memory, disk, top processes, load average
-// Keys: q=quit, r=refresh, 1=processes, 2=disk, 3=network
+//   1 / 2 / 3   processes / disks / network
+//   Tab         cycle views
+//   r           refresh
+//   q           quit
+//
+// This file is only drawing. Every number it prints and every state transition it makes
+// comes from metrics.wyn, which is pure and covered by tests/test_metrics.wyn against
+// captured macOS and Linux output -- so the parts of a TUI that are usually untestable
+// are, here, tested without a terminal.
+//
+// What that split fixed, relative to the old sysmon:
+//
+//   * It assumed 4096-byte memory pages, on a Mac whose pages are 16384 -- every
+//     memory figure was a quarter of the truth. The page size is now read from
+//     vm_stat's own header.
+//   * Its CPU "percentage" summed the %CPU column of every process, which double-counts
+//     threads and drifts far past 100%. It is now the 1-minute load average per core.
+//   * `1`, `2` and `3` were three independent `if`s that each assigned and redrew, so
+//     one keypress could redraw twice. There is now one `next_view(view, key)`.
+//   * Everything was macOS-only (`sysctl`, `vm_stat`, `lsof`) and printed blanks
+//     elsewhere. Sources are now probed for existence, with a Linux path for each, and
+//     a metric that cannot be read says so instead of showing an empty bar.
 
-fn progress_bar(pct: int, width: int) -> string {
-    var filled = pct * width / 100
-    if filled > width { filled = width }
-    if filled < 0 { filled = 0 }
-    var bar = "\x1b[32m"
-    for i in 0..filled { bar = bar + "█" }
-    bar += "\x1b[90m"
-    for i in filled..width { bar = bar + "░" }
-    bar += "\x1b[0m"
-    return bar
-}
+import metrics
 
-fn repeat_str(ch: string, n: int) -> string {
-    var out = ""
-    for i in 0..n { out = out + ch }
-    return out
-}
+// ---------------------------------------------------------------- capability
 
-fn draw_header(cols: int, row: int) {
-    Terminal.move(row, 1)
-    Terminal.write("\x1b[1;36m sysmon\x1b[0m -- System Monitor")
-    var right = "q:quit r:refresh 1:proc 2:disk 3:net "
-    Terminal.move(row, cols - right.len())
-    Terminal.write("\x1b[90m" + right + "\x1b[0m")
-}
+fn have(cmd: string) -> bool => System.exec_code("command -v ${cmd} >/dev/null 2>&1") == 0
 
-fn draw_cpu_section(cols: int, row: int) -> int {
-    var r = row
-    Terminal.move(r, 1)
-    Terminal.write("\x1b[1;33m CPU \x1b[0m")
-    r += 1
-
-    var ncpu = System.exec("sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 1").trim()
-    var load = System.exec("uptime").trim()
-    var load_idx = load.index_of("load average")
-    if load_idx < 0 { load_idx = load.index_of("load averages") }
-    var load_str = ""
-    if load_idx >= 0 { load_str = load.substring(load_idx, load.len()) }
-
-    Terminal.move(r, 3)
-    Terminal.write("Cores: " + ncpu + "  " + load_str)
-    r += 1
-
-    var cpu_info = System.exec("ps -A -o %cpu | awk '{s+=$1} END {printf \"%.0f\", s}'").trim()
-    var cpu_total = cpu_info.to_int()
-    var ncpu_int = ncpu.to_int()
-    if ncpu_int < 1 { ncpu_int = 1 }
-    var cpu_pct = cpu_total / ncpu_int
-    if cpu_pct > 100 { cpu_pct = 100 }
-
-    var bar_width = cols - 25
-    if bar_width > 50 { bar_width = 50 }
-    Terminal.move(r, 3)
-    Terminal.write("Total: [" + progress_bar(cpu_pct, bar_width) + "] ${cpu_pct}%")
-    r += 1
-    return r
-}
-
-fn parse_vm_stat_value(line: string, key: string) -> int {
-    if line.contains(key) {
-        var colon = line.index_of(":")
-        if colon > 0 {
-            return line.substring(colon + 1, line.len()).trim().replace(".", "").to_int()
-        }
+// First source whose command actually exists; "" if none do.
+fn source(cmds: [string]) -> string {
+    for c in cmds {
+        var cmd = "" + c
+        if not have(metrics.field(cmd, 0)) { continue }
+        var out = System.exec("${cmd} 2>/dev/null")
+        if out.trim().len() > 0 { return out }
     }
-    return -1
+    return ""
 }
 
-fn draw_memory_section(cols: int, row: int) -> int {
+// /proc files report size 0 to fseek, so File.read (which sizes then reads) comes back
+// empty even though `cat` prints kilobytes. Stream them when that happens.
+fn read_file(path: string) -> string {
+    if not File.exists(path) { return "" }
+    var text = File.read(path)
+    if text.len() > 0 { return text }
+    return System.exec("cat ${path} 2>/dev/null")
+}
+
+// ---------------------------------------------------------------- drawing
+
+fn bar(percent: int, width: int) -> string {
+    // An unmeasurable value gets a distinct grey "?" track, never an empty or full bar
+    // -- a 0% bar and a failed probe must not look the same.
+    if percent < 0 {
+        var q = "\x1b[90m"
+        for i in 0..width { q += "?" }
+        return q + "\x1b[0m"
+    }
+    var p = percent
+    if p > 100 { p = 100 }
+    var filled = p * width / 100
+    var colour = "\x1b[32m"
+    if p > 85 { colour = "\x1b[31m" } else if p > 65 { colour = "\x1b[33m" }
+    var out = colour
+    for i in 0..filled { out += "█" }
+    out += "\x1b[90m"
+    for j in filled..width { out += "░" }
+    return out + "\x1b[0m"
+}
+
+fn at(row: int, col: int, text: string) {
+    Terminal.move(row, col)
+    Terminal.write(text)
+}
+
+// A metric that could not be read states so, in place, where its bar would be.
+fn unavailable(row: int, label: string, why: string) {
+    at(row, 3, "${label.pad_right(7, " ")} \x1b[33munavailable\x1b[0m \x1b[90m-- ${why}\x1b[0m")
+}
+
+fn draw_header(cols: int, view: int) {
+    at(1, 1, "\x1b[1;36m sysmon\x1b[0m \x1b[90m-- ${metrics.view_name(view)}\x1b[0m")
+    var keys = "1:proc 2:disk 3:net Tab:cycle r:refresh q:quit "
+    if cols > keys.len() + 20 { at(1, cols - keys.len(), "\x1b[90m${keys}\x1b[0m") }
+}
+
+// CPU: the 1-minute load average per core. Not the sum of ps's %CPU column, which
+// counts each thread of a process separately and so runs to several hundred percent.
+fn draw_cpu(cols: int, row: int) -> int {
+    var r = row
+    var cores = metrics.num(source(["sysctl -n hw.ncpu", "nproc", "getconf _NPROCESSORS_ONLN"]).trim())
+    var load = metrics.load_from_uptime(source(["uptime"]))
+    if load.len() == 0 { load = metrics.load_from_proc(read_file("/proc/loadavg")) }
+
+    at(r, 1, "\x1b[1;33m CPU \x1b[0m")
+    r += 1
+    if load.len() == 0 {
+        unavailable(r, "Load", "no uptime and no /proc/loadavg")
+        return r + 1
+    }
+    if cores < 1 {
+        // The load is known but cannot be scaled, so it is shown unscaled and said so
+        // rather than divided by a guessed core count.
+        at(r, 3, "Load    ${load} \x1b[90m(cores unknown -- not scaled)\x1b[0m")
+        return r + 1
+    }
+    var percent = metrics.load_pct(load, cores)
+    at(r, 3, "Load    [${bar(percent, metrics.bar_width(cols))}] ${percent}%  \x1b[90m${load} over ${cores} cores\x1b[0m")
+    return r + 1
+}
+
+fn draw_memory(cols: int, row: int) -> int {
     var r = row + 1
-    Terminal.move(r, 1)
-    Terminal.write("\x1b[1;33m MEM \x1b[0m")
+    at(r, 1, "\x1b[1;33m MEM \x1b[0m")
     r += 1
 
-    var pagesize = System.exec("sysctl -n hw.pagesize 2>/dev/null || echo 4096").trim().to_int()
-    var vm = System.exec("vm_stat 2>/dev/null")
-
-    var free_pages = 0
-    var active_pages = 0
-    var wired_pages = 0
-    var inactive_pages = 0
-    var speculative_pages = 0
-
-    var lines = vm.split("\n")
-    for line in lines {
-        var trimmed = line.trim()
-        var v = parse_vm_stat_value(trimmed, "Pages free")
-        if v >= 0 { free_pages = v }
-        v = parse_vm_stat_value(trimmed, "Pages active")
-        if v >= 0 { active_pages = v }
-        v = parse_vm_stat_value(trimmed, "Pages inactive")
-        if v >= 0 { inactive_pages = v }
-        v = parse_vm_stat_value(trimmed, "Pages wired")
-        if v >= 0 { wired_pages = v }
-        v = parse_vm_stat_value(trimmed, "Pages speculative")
-        if v >= 0 { speculative_pages = v }
+    var used = 0 - 1
+    var total = 0 - 1
+    var vm = source(["vm_stat"])
+    if vm.len() > 0 {
+        used = metrics.used_mb(vm)
+        total = metrics.total_mb(vm)
+    } else {
+        var mi = read_file("/proc/meminfo")
+        if mi.len() > 0 {
+            used = metrics.meminfo_used_mb(mi)
+            total = metrics.meminfo_kb(mi, "MemTotal") / 1024
+        }
     }
-
-    var total_pages = free_pages + active_pages + inactive_pages + wired_pages + speculative_pages
-    var used_pages = active_pages + wired_pages
-    var total_mb = total_pages * pagesize / 1048576
-    var used_mb = used_pages * pagesize / 1048576
-    var free_mb = total_mb - used_mb
-    var pct = 0
-    if total_mb > 0 { pct = used_mb * 100 / total_mb }
-
-    var bar_width = cols - 25
-    if bar_width > 50 { bar_width = 50 }
-    Terminal.move(r, 3)
-    Terminal.write("Used:  [" + progress_bar(pct, bar_width) + "] ${used_mb}/${total_mb} MB")
-    r += 1
-
-    var active_mb = active_pages * pagesize / 1048576
-    var wired_mb = wired_pages * pagesize / 1048576
-    Terminal.move(r, 3)
-    Terminal.write("\x1b[90mActive: ${active_mb}MB  Wired: ${wired_mb}MB  Free: ${free_mb}MB\x1b[0m")
-    r += 1
-    return r
+    if used < 0 or total < 1 {
+        unavailable(r, "Used", "no vm_stat and no /proc/meminfo")
+        return r + 1
+    }
+    var percent = metrics.pct(used, total)
+    at(r, 3, "Used    [${bar(percent, metrics.bar_width(cols))}] ${percent}%  ${used}/${total} MB")
+    return r + 1
 }
 
-fn draw_lines(output: string, row: int, max_rows: int) -> int {
-    var r = row
-    var lines = output.split("\n")
-    var line_num = 0
-    for line in lines {
-        line_num += 1
-        if line_num > max_rows { return r }
-        if line.trim().len() == 0 { continue }
-        Terminal.move(r, 3)
-        if line_num == 1 {
-            Terminal.write("\x1b[1;37m" + line.trim() + "\x1b[0m")
-        } else if line_num % 2 == 0 {
-            Terminal.write("\x1b[90m" + line.trim() + "\x1b[0m")
-        } else {
-            Terminal.write(line.trim())
-        }
+fn draw_processes(cols: int, row: int, max_rows: int) -> int {
+    var r = row + 1
+    at(r, 1, "\x1b[1;33m PROCESSES \x1b[0m")
+    r += 1
+
+    // No `-r`: on macOS it sorts by CPU, but on Linux procps it filters to running-only
+    // and matches nothing on an idle box. metrics.ps_rank does the sorting portably.
+    var ps = source(["ps -eo pid,pcpu,pmem,rss,comm"])
+    if ps.len() == 0 {
+        unavailable(r, "ps", "no ps command (minimal containers omit it)")
+        return r + 1
+    }
+    var rows = metrics.ps_rows(ps)
+    if rows == 0 {
+        // ps exists and answered with only a header: a failed measurement, since a
+        // machine running this program always has processes.
+        unavailable(r, "ps", "no process rows (restricted PID namespace?)")
+        return r + 1
+    }
+
+    at(r, 3, "\x1b[1m${"PID".pad_left(7, " ")}  ${"CPU%".pad_left(5, " ")}  ${"RSS".pad_left(9, " ")}  COMMAND\x1b[0m")
+    r += 1
+    var limit = max_rows - 1
+    if limit > rows { limit = rows }
+    // Rank once for the whole table, then take each row once. Ranking per row and then
+    // reading each column separately rescanned the `ps` text ~5 times per process; with
+    // 650 processes that made a single frame take 22 seconds.
+    for slot in metrics.ps_top(ps, limit).words() {
+        var line = metrics.ps_row(ps, metrics.num("" + slot))
+        if line.len() == 0 { continue }
+        var pid = metrics.field(line, 0)
+        var cpu = metrics.field(line, 1)
+        var rss = metrics.num(metrics.field(line, 3))
+        var cmd = metrics.basename(metrics.ps_command(line))
+        var room = cols - 30
+        if room > 4 and cmd.len() > room { cmd = cmd.substring(0, room) }
+        var tint = "\x1b[0m"
+        var busy = metrics.centi(cpu)
+        if busy > 5000 { tint = "\x1b[31m" } else if busy > 1000 { tint = "\x1b[33m" }
+        at(r, 3, "${pid.pad_left(7, " ")}  ${tint}${cpu.pad_left(5, " ")}\x1b[0m  ${metrics.human_kb(rss).pad_left(9, " ")}  ${cmd}")
         r += 1
     }
     return r
 }
 
-fn draw_processes(cols: int, row: int, max_rows: int) -> int {
+fn draw_disks(cols: int, row: int, max_rows: int) -> int {
     var r = row + 1
-    Terminal.move(r, 1)
-    Terminal.write("\x1b[1;33m TOP PROCESSES \x1b[0m")
+    at(r, 1, "\x1b[1;33m DISKS \x1b[0m")
     r += 1
 
-    Terminal.move(r, 3)
-    Terminal.write("\x1b[1;37m" + "PID".pad_right(8, " ") + "CPU%".pad_right(8, " ") + "MEM%".pad_right(8, " ") + "RSS".pad_right(10, " ") + "COMMAND" + "\x1b[0m")
-    r += 1
-
-    var ps = System.exec("ps -eo pid,pcpu,pmem,rss,comm -r | head -" + (max_rows + 1).to_string())
-    return draw_lines(ps, r, max_rows)
+    // `df -Pk`: POSIX columns and 1024-byte blocks on both platforms. The RAM-backed
+    // and kernel mounts are excluded by metrics.is_real_fs, not by a grep chain.
+    var df = source(["df -Pk"])
+    if df.len() == 0 {
+        unavailable(r, "df", "no df command")
+        return r + 1
+    }
+    var rows = metrics.df_rows(df)
+    if rows == 0 {
+        unavailable(r, "df", "no disk-backed filesystems reported")
+        return r + 1
+    }
+    var limit = max_rows
+    if limit > rows { limit = rows }
+    for i in 1..limit + 1 {
+        // One scan per row, then read its columns -- not one scan per column.
+        var line = metrics.df_row(df, i)
+        if line.len() == 0 { continue }
+        var mount = metrics.df_mount(line)
+        var total = metrics.num(metrics.field(line, 1))
+        var used = metrics.num(metrics.field(line, 2))
+        var percent = metrics.df_used_pct(line)
+        if mount.len() > 20 { mount = mount.substring(0, 20) }
+        at(r, 3, "${mount.pad_right(21, " ")}[${bar(percent, 18)}] ${"${percent}%".pad_left(5, " ")}  ${metrics.human_kb(used)} / ${metrics.human_kb(total)}")
+        r += 1
+    }
+    return r
 }
 
-fn draw_disk_view(cols: int, row: int, max_rows: int) -> int {
+fn draw_network(cols: int, row: int, max_rows: int) -> int {
     var r = row + 1
-    Terminal.move(r, 1)
-    Terminal.write("\x1b[1;33m DISK USAGE \x1b[0m")
+    at(r, 1, "\x1b[1;33m NETWORK \x1b[0m")
     r += 1
 
-    var df = System.exec("df -h | grep -v devfs | grep -v map")
-    return draw_lines(df, r, max_rows)
-}
-
-fn draw_network_view(cols: int, row: int, max_rows: int) -> int {
-    var r = row + 1
-    Terminal.move(r, 1)
-    Terminal.write("\x1b[1;33m NETWORK INTERFACES \x1b[0m")
+    // ss on modern Linux, lsof on macOS. Both need no privileges for one's own sockets;
+    // neither is universally present, so a missing one is reported rather than blanked.
+    var listen = source(["ss -tlnH", "lsof -iTCP -sTCP:LISTEN -P -n"])
+    if listen.len() == 0 {
+        unavailable(r, "ports", "no ss or lsof command")
+        return r + 1
+    }
+    at(r, 3, "\x1b[1mLISTENING\x1b[0m")
     r += 1
-
-    var net = System.exec("netstat -i 2>/dev/null | head -${max_rows}")
-    r = draw_lines(net, r, max_rows)
-
-    r += 1
-    Terminal.move(r, 1)
-    Terminal.write("\x1b[1;33m LISTENING PORTS \x1b[0m")
-    r += 1
-    var ports = System.exec("lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null | head -15 || netstat -tlnp 2>/dev/null | head -15")
-    return draw_lines(ports, r, 15)
+    var shown = 0
+    for raw in listen.lines() {
+        if shown >= max_rows - 2 { continue }
+        var line = ("" + raw).trim()
+        if line.len() == 0 { continue }
+        if line.starts_with("COMMAND") { continue }
+        if line.len() > cols - 6 { line = line.substring(0, cols - 6) }
+        at(r, 3, "\x1b[90m${line}\x1b[0m")
+        r += 1
+        shown += 1
+    }
+    if shown == 0 { unavailable(r, "ports", "nothing listening, or not visible to this user") }
+    return r
 }
 
 fn draw_status(cols: int, rows: int, view: int, msg: string) {
+    var tabs = ""
+    if view == 1 { tabs = "\x1b[1;7m PROC \x1b[0;32;40m DISK  NET " }
+    if view == 2 { tabs = " PROC \x1b[1;7m DISK \x1b[0;32;40m NET " }
+    if view == 3 { tabs = " PROC  DISK \x1b[1;7m NET \x1b[0;32;40m" }
     Terminal.move(rows, 1)
-    var views = ""
-    if view == 1 { views = "\x1b[1;7m PROC \x1b[0;32;40m DISK  NET " }
-    if view == 2 { views = " PROC \x1b[1;7m DISK \x1b[0;32;40m NET " }
-    if view == 3 { views = " PROC  DISK \x1b[1;7m NET \x1b[0;32;40m" }
-    Terminal.write("\x1b[32;40m" + views)
-    if msg.len() > 0 {
-        var gap = cols - 20 - msg.len()
-        if gap > 0 { Terminal.write(repeat_str(" ", gap)) }
-        Terminal.write(msg)
-    } else {
-        Terminal.write(repeat_str(" ", cols - 20))
-    }
-    Terminal.write("\x1b[0m")
+    Terminal.write("\x1b[32;40m${tabs}")
+    var pad = cols - 20 - msg.len()
+    if pad < 1 { pad = 1 }
+    var spaces = ""
+    for i in 0..pad { spaces += " " }
+    Terminal.write("${spaces}${msg}\x1b[0m")
 }
 
 fn redraw(cols: int, rows: int, view: int, msg: string) {
     Terminal.clear()
-    draw_header(cols, 1)
-    var next_row = draw_cpu_section(cols, 2)
-    next_row = draw_memory_section(cols, next_row)
-    var remaining = rows - next_row - 2
-    if remaining < 5 { remaining = 5 }
-    if view == 1 { draw_processes(cols, next_row, remaining) }
-    if view == 2 { draw_disk_view(cols, next_row, remaining) }
-    if view == 3 { draw_network_view(cols, next_row, remaining) }
+    draw_header(cols, view)
+    var r = draw_cpu(cols, 2)
+    r = draw_memory(cols, r)
+    var body = metrics.body_rows(rows, r)
+    if view == 1 { draw_processes(cols, r, body) }
+    if view == 2 { draw_disks(cols, r, body) }
+    if view == 3 { draw_network(cols, r, body) }
     draw_status(cols, rows, view, msg)
 }
 
@@ -221,18 +279,23 @@ fn main() {
     var rows = Terminal.rows()
 
     Terminal.raw_mode()
-    var view = 1
-    redraw(cols, rows, view, "Ready")
+    var view = metrics.view_processes()
+    redraw(cols, rows, view, "ready")
 
-    var running = 1
-    while running == 1 {
+    while true {
         var key = Terminal.read_key()
         if key == 0 { continue }
-        if key == 113 { running = 0 }
-        if key == 114 { redraw(cols, rows, view, "Refreshed") }
-        if key == 49 { view = 1; redraw(cols, rows, view, "Processes") }
-        if key == 50 { view = 2; redraw(cols, rows, view, "Disk") }
-        if key == 51 { view = 3; redraw(cols, rows, view, "Network") }
+        if metrics.is_quit(key) { break }
+        if metrics.is_refresh(key) {
+            redraw(cols, rows, view, "refreshed")
+            continue
+        }
+        // One transition function, so an unhandled key cannot fall through into a
+        // second branch and redraw twice -- which is what the old three-`if` version did.
+        var next = metrics.next_view(view, key)
+        if next == view { continue }
+        view = next
+        redraw(cols, rows, view, metrics.view_name(view))
     }
 
     Terminal.restore()

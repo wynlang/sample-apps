@@ -1,0 +1,329 @@
+// Tests for sysmon's parsing and view state.
+//
+// A TUI looks untestable, but only the Terminal calls in main.wyn need a terminal.
+// Everything sysmon actually reasons about -- what `vm_stat` says, which view a key
+// selects, how wide a bar fits -- is a pure function, and all of it is here.
+//
+// The command-output fixtures are REAL captured output: macOS from an arm64 Mac with
+// 16384-byte pages, Linux from a debian:trixie container. Nothing here shells out, so
+// the suite passes on any platform and fails only when a parser regresses.
+
+import metrics
+
+// ---- fixtures ------------------------------------------------------------
+
+fn mac_vm_stat() -> string {
+    return "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n" +
+        "Pages free:                                     3753.\n" +
+        "Pages active:                                 537685.\n" +
+        "Pages inactive:                               533964.\n" +
+        "Pages speculative:                              2310.\n" +
+        "Pages throttled:                                   0.\n" +
+        "Pages wired down:                             311336.\n"
+}
+
+fn linux_meminfo() -> string {
+    return "MemTotal:        8126204 kB\n" +
+        "MemFree:         6992216 kB\n" +
+        "MemAvailable:    7440840 kB\n" +
+        "Cached:           518600 kB\n"
+}
+
+fn mac_ps() -> string {
+    return "  PID  %CPU %MEM    RSS COMM\n" +
+        "    1   0.2  0.1  18992 /sbin/launchd\n" +
+        "  233  44.3  2.0  13552 /System/Library/CoreServices/Keychain Circle Notification.app/Contents/MacOS/Keychain Circle Notification\n" +
+        "  444   9.5  0.3  10016 /usr/libexec/mlhostd\n"
+}
+
+fn mac_df() -> string {
+    return "Filesystem     1024-blocks      Used Available Capacity  Mounted on\n" +
+        "/dev/disk3s3s1   482797652  12270012 245521064     5%    /\n" +
+        "devfs                  220       220         0   100%    /dev\n" +
+        "/dev/disk3s6     482797652   4194324 245521064     2%    /System/Volumes/VM\n"
+}
+
+fn linux_df() -> string {
+    return "Filesystem     1024-blocks     Used Available Capacity Mounted on\n" +
+        "overlay          474095688 10601084 439338396       3% /\n" +
+        "tmpfs                65536        0     65536       0% /dev\n" +
+        "/dev/vda1        474095688 10601084 439338396       3% /var/lib/data\n"
+}
+
+// ---- safe scalars -------------------------------------------------------
+
+test "num is the only gate to to_int, which panics on bad input" {
+    assert_eq(metrics.num(" 42 "), 42)
+    assert_eq(metrics.num("0"), 0)
+    assert_eq(metrics.num("4x"), -1)
+    assert_eq(metrics.num(""), -1)
+    assert_eq(metrics.num("-"), -1)
+    assert_eq(metrics.num("3.5"), -1)
+}
+
+test "centi reads a percentage without float parsing" {
+    // ps prints "-" in %CPU for some kernel threads; to_float() panics on it.
+    assert_eq(metrics.centi("44.3"), 4430)
+    assert_eq(metrics.centi("100"), 10000)
+    assert_eq(metrics.centi("0.0"), 0)
+    assert_eq(metrics.centi("-"), -1)
+    assert_eq(metrics.centi(""), -1)
+}
+
+test "a one-digit fraction is tenths, not hundredths" {
+    // "5.4" is 5.40 and must outrank "5.04"; reading the fraction as-is inverts them.
+    assert_eq(metrics.centi("5.4"), 540)
+    assert(metrics.centi("5.4") > metrics.centi("5.04"))
+}
+
+test "field collapses runs of spaces, unlike split_at" {
+    var line = "/dev/disk3s3s1   482797652  12270012 245521064     5%    /"
+    assert_eq(metrics.field(line, 1), "482797652")
+    assert_eq(metrics.field(line, 4), "5%")
+    assert_eq(metrics.field(line, 9), "")
+}
+
+test "pct never divides by zero and never fakes a percentage" {
+    assert_eq(metrics.pct(50, 200), 25)
+    assert_eq(metrics.pct(5, 0), -1)
+    assert_eq(metrics.pct(0 - 1, 200), -1)
+}
+
+// ---- memory -------------------------------------------------------------
+
+test "page size is read from vm_stat, never assumed to be 4096" {
+    // The old sysmon fell back to 4096 on this 16384-byte-page Mac: every memory
+    // figure it printed was a quarter of the truth.
+    assert_eq(metrics.page_size(mac_vm_stat()), 16384)
+    assert_eq(metrics.page_size("no header\n"), -1)
+}
+
+test "page counts are found by an anchored key" {
+    assert_eq(metrics.pages(mac_vm_stat(), "Pages active"), 537685)
+    assert_eq(metrics.pages(mac_vm_stat(), "Pages wired down"), 311336)
+    assert_eq(metrics.pages(mac_vm_stat(), "Pages nonesuch"), -1)
+}
+
+test "macOS memory totals and committed use" {
+    // 1389048 pages * 16384 / 1048576 = 21703 MB total
+    assert_eq(metrics.total_mb(mac_vm_stat()), 21703)
+    // (537685 + 311336) * 16384 / 1048576 = 13265 MB committed. Inactive and
+    // speculative pages are reclaimable, so counting them would cry wolf at 95%.
+    assert_eq(metrics.used_mb(mac_vm_stat()), 13265)
+    assert(metrics.used_mb(mac_vm_stat()) < metrics.total_mb(mac_vm_stat()))
+}
+
+test "a truncated vm_stat reports unknown, not a plausible smaller total" {
+    var partial = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 3753.\n"
+    assert_eq(metrics.total_mb(partial), -1)
+    assert_eq(metrics.used_mb(partial), -1)
+}
+
+test "Linux memory comes from /proc/meminfo" {
+    assert_eq(metrics.meminfo_kb(linux_meminfo(), "MemTotal"), 8126204)
+    // (8126204 - 7440840) / 1024 = 669 MB really in use
+    assert_eq(metrics.meminfo_used_mb(linux_meminfo()), 669)
+    // An older kernel with no MemAvailable must say so rather than guess.
+    assert_eq(metrics.meminfo_used_mb("MemTotal: 8126204 kB\n"), -1)
+}
+
+// ---- load ---------------------------------------------------------------
+
+test "load average is normalised from both uptime dialects" {
+    var mac = "13:39  up 8 days,  8:54, 2 users, load averages: 4.98 6.72 7.16"
+    var linux = "13:39:02 up 3 days,  1:12,  1 user,  load average: 0.14, 0.11, 0.09"
+    assert_eq(metrics.load_from_uptime(mac), "4.98 6.72 7.16")
+    assert_eq(metrics.load_from_uptime(linux), "0.14 0.11 0.09")
+    assert_eq(metrics.load_from_uptime("13:39 up 8 days"), "")
+}
+
+test "/proc/loadavg is the fallback where uptime does not exist" {
+    // A debian:trixie container genuinely has no `uptime` binary.
+    assert_eq(metrics.load_from_proc("0.14 0.11 0.09 1/406 15"), "0.14 0.11 0.09")
+    assert_eq(metrics.load_from_proc("0.00"), "")
+}
+
+test "the CPU bar scales load by core count, not by absolute load" {
+    // 4.98 on 12 cores is 41% busy, not 498%. Without dividing, every busy multicore
+    // box pins the bar at 100% and the bar stops meaning anything.
+    assert_eq(metrics.load_pct("4.98 6.72 7.16", 12), 41)
+    assert_eq(metrics.load_pct("12.00 1 1", 12), 100)
+    assert_eq(metrics.load_pct("0.00 0 0", 12), 0)
+}
+
+test "load_pct reports unknown for a missing load or an absurd core count" {
+    assert_eq(metrics.load_pct("", 12), -1)
+    assert_eq(metrics.load_pct("4.98", 0), -1)
+}
+
+// ---- processes ---------------------------------------------------------
+
+test "ps rows are counted by numeric PID, not by skipping line one" {
+    // A `ps` invoked without a header would otherwise cost us its busiest process.
+    assert_eq(metrics.ps_rows(mac_ps()), 3)
+    assert_eq(metrics.ps_rows("  PID  %CPU %MEM    RSS COMM\n"), 0)
+    assert_eq(metrics.ps_rows(""), 0)
+}
+
+test "a command containing spaces is not truncated at the space" {
+    // A real macOS process name. words()[4] would stop at "Circle".
+    assert_eq(metrics.ps_field(mac_ps(), 2, 4),
+        "/System/Library/CoreServices/Keychain Circle Notification.app/Contents/MacOS/Keychain Circle Notification")
+    assert_eq(metrics.ps_field(mac_ps(), 1, 3), "18992")
+    assert_eq(metrics.ps_field(mac_ps(), 99, 0), "")
+}
+
+test "ps_row hands back a whole row so one scan serves every column" {
+    // Calling ps_field per column rescans the text per column; the drawing code takes
+    // the row once instead.
+    var row = metrics.ps_row(mac_ps(), 1)
+    assert_eq(metrics.field(row, 0), "1")
+    assert_eq(metrics.field(row, 1), "0.2")
+    assert_eq(metrics.ps_command(row), "/sbin/launchd")
+    assert_eq(metrics.ps_row(mac_ps(), 99), "")
+}
+
+test "processes are ranked in Wyn, because no ps flag is portable" {
+    // macOS `ps -r` sorts by CPU; Linux procps `ps -r` filters to RUNNING only, which
+    // on an idle box matches nothing at all -- a header and no rows.
+    // ps_top returns row indices, busiest first.
+    var top = metrics.ps_top(mac_ps(), 3).words()
+    assert_eq(top.len(), 3)
+    assert_eq(metrics.ps_field(mac_ps(), metrics.num("" + top[0]), 0), "233")
+    assert_eq(metrics.ps_field(mac_ps(), metrics.num("" + top[1]), 0), "444")
+    assert_eq(metrics.ps_field(mac_ps(), metrics.num("" + top[2]), 0), "1")
+}
+
+test "asking for more ranks than there are processes yields only what exists" {
+    // It must not pad the list with -1s or repeat the last row.
+    assert_eq(metrics.ps_top(mac_ps(), 99).words().len(), 3)
+    assert_eq(metrics.ps_top("  PID  %CPU %MEM    RSS COMM\n", 5), "")
+    assert_eq(metrics.ps_top("", 5), "")
+    assert_eq(metrics.ps_top(mac_ps(), 0), "")
+}
+
+test "each process is ranked once -- no row appears twice" {
+    // The selection loop marks rows taken; if it did not, the busiest process would
+    // fill every slot in the table.
+    var top = metrics.ps_top(mac_ps(), 3).words()
+    assert(("" + top[0]) != ("" + top[1]))
+    assert(("" + top[1]) != ("" + top[2]))
+    assert(("" + top[0]) != ("" + top[2]))
+}
+
+test "a process with an unparseable CPU ranks last, not first" {
+    // centi() gives -1 for "-", which must sort BELOW a real 0.0 rather than above
+    // everything -- otherwise a kernel thread heads the top-CPU table.
+    var ps = "  PID  %CPU %MEM    RSS COMM\n" +
+        "    2     -  0.0      0 kthreadd\n" +
+        "    9   0.0  0.1   1024 /usr/bin/idle\n"
+    var top = metrics.ps_top(ps, 2).words()
+    assert_eq(metrics.ps_field(ps, metrics.num("" + top[0]), 0), "9")
+    assert_eq(metrics.ps_field(ps, metrics.num("" + top[1]), 0), "2")
+}
+
+test "basename strips the path but survives having none" {
+    assert_eq(metrics.basename("/usr/libexec/mlhostd"), "mlhostd")
+    assert_eq(metrics.basename("kernel_task"), "kernel_task")
+}
+
+// ---- disks -------------------------------------------------------------
+
+test "df -Pk parses identically on macOS and Linux" {
+    // Same columns, same units, two very different outputs -- that is the point of -Pk.
+    // Only the real filesystem survives in each: devfs, tmpfs and /System/Volumes go.
+    assert_eq(metrics.df_rows(mac_df()), 1)
+    assert_eq(metrics.df_field(mac_df(), 1, 5), "/")
+    assert_eq(metrics.df_pct(mac_df(), 1), 5)
+
+    assert_eq(metrics.df_rows(linux_df()), 2)
+    assert_eq(metrics.df_field(linux_df(), 2, 5), "/var/lib/data")
+    assert_eq(metrics.df_pct(linux_df(), 2), 3)
+}
+
+test "the df header row is never counted as a filesystem" {
+    // Requiring a numeric block column rejects it without hardcoding "skip line 1".
+    assert_eq(metrics.df_rows("Filesystem 1024-blocks Used Available Capacity Mounted on\n"), 0)
+    assert_eq(metrics.df_field(mac_df(), 9, 5), "")
+    assert_eq(metrics.df_pct(mac_df(), 9), -1)
+}
+
+test "RAM-backed and kernel mounts are classified out without a grep chain" {
+    assert(not metrics.is_real_fs("devfs", "/dev"))
+    assert(not metrics.is_real_fs("tmpfs", "/run/lock"))
+    assert(not metrics.is_real_fs("shm", "/dev/shm"))
+    assert(not metrics.is_real_fs("proc", "/proc"))
+    // macOS firmlinks all report the same numbers as / and would triple-count it.
+    assert(not metrics.is_real_fs("/dev/disk3s6", "/System/Volumes/VM"))
+}
+
+test "overlay is a REAL filesystem -- it is the root of every container" {
+    // Denylisting "overlay" by name (the obvious first guess) means sysmon shows no
+    // root filesystem at all on Linux. A test caught exactly that.
+    assert(metrics.is_real_fs("overlay", "/"))
+    assert(metrics.is_real_fs("/dev/disk3s3s1", "/"))
+    assert(metrics.is_real_fs("/dev/vda1", "/var/lib/data"))
+}
+
+test "human_kb picks a unit, and says ? rather than 0 for unknown" {
+    assert_eq(metrics.human_kb(512), "512 KB")
+    assert_eq(metrics.human_kb(2048), "2.0 MB")
+    assert_eq(metrics.human_kb(482797652), "460.4 GB")
+    // A missing size must never render as "0 KB", which reads as a fact.
+    assert_eq(metrics.human_kb(0 - 1), "?")
+}
+
+// ---- view state --------------------------------------------------------
+
+test "number keys select their view" {
+    assert_eq(metrics.next_view(1, 49), 1)
+    assert_eq(metrics.next_view(1, 50), 2)
+    assert_eq(metrics.next_view(2, 51), 3)
+}
+
+test "an unrecognised key leaves the view alone" {
+    // The old sysmon ran three independent `if key == N { view = N; redraw() }`
+    // statements, so this property was not expressible -- let alone checkable.
+    assert_eq(metrics.next_view(2, 122), 2)
+    assert_eq(metrics.next_view(3, 0), 3)
+    assert_eq(metrics.next_view(1, 1000), 1)
+}
+
+test "tab cycles through the views and wraps" {
+    assert_eq(metrics.next_view(1, 9), 2)
+    assert_eq(metrics.next_view(2, 9), 3)
+    assert_eq(metrics.next_view(3, 9), 1)
+}
+
+test "quit and refresh accept both cases, and quit accepts ^C" {
+    assert(metrics.is_quit(113))
+    assert(metrics.is_quit(81))
+    assert(metrics.is_quit(3))
+    assert(not metrics.is_quit(114))
+    assert(metrics.is_refresh(114))
+    assert(metrics.is_refresh(82))
+    assert(not metrics.is_refresh(113))
+}
+
+test "every view has a name, and an impossible view does not print as one" {
+    assert_eq(metrics.view_name(metrics.view_processes()), "processes")
+    assert_eq(metrics.view_name(metrics.view_disks()), "disks")
+    assert_eq(metrics.view_name(metrics.view_network()), "network")
+    assert_eq(metrics.view_name(99), "?")
+}
+
+test "the body never gets a negative or zero row count" {
+    // A 24-row terminal with an 8-row header leaves 15 rows above the status bar.
+    assert_eq(metrics.body_rows(24, 8), 15)
+    // A terminal smaller than the chrome would otherwise drive a negative loop bound.
+    assert_eq(metrics.body_rows(4, 8), 1)
+    assert_eq(metrics.body_rows(0, 8), 1)
+}
+
+test "bar width is clamped at both ends" {
+    assert_eq(metrics.bar_width(80), 40)
+    assert_eq(metrics.bar_width(60), 26)
+    // A 20-column terminal must not ask for a bar of -14 characters.
+    assert_eq(metrics.bar_width(20), 6)
+    assert_eq(metrics.bar_width(400), 40)
+}
