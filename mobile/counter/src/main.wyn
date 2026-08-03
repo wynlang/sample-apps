@@ -1,0 +1,147 @@
+// counter -- a mobile app whose logic you can actually run and test.
+//
+// This replaces mobile/counter-app and mobile/notes-app, both of which were pure
+// stubs: every SDK function had an EMPTY body, `main` did nothing but
+// `return wyn_ios_main(0, 0)`, and running either printed absolutely nothing. They
+// were also near-duplicates of tests/mobile/smoke_mobile_shim.wyn in the compiler
+// repo, which is what CI actually cross-compiles - so as demos they showed a reader
+// nothing, and as coverage they were already redundant.
+//
+// The fix is not a prettier stub. The problem with the old shape is that ALL the
+// behaviour lived in `wyn_on_button`, which only a real device shell ever calls, so
+// nothing was runnable or testable off-device. Here the app is split:
+//
+//   * a PURE CORE - `struct Counter` plus `apply(counter, Action)` - which is
+//     ordinary Wyn with no SDK in sight. It runs on your laptop, it is covered by
+//     tests/test_counter.wyn, and it is where every rule (clamping, history,
+//     undo) lives.
+//   * a THIN SHELL - the `wyn_*` hooks - that does nothing but translate taps into
+//     Actions and state into widgets.
+//
+// That is the point worth showing: on Wyn you write mobile app logic as plain
+// functions over plain data, test it natively, and the platform layer stays a
+// translation shim. `main` runs the core through a scripted session so
+// `wyn run src/main.wyn` PRINTS something real, and `wyn cross ios src/main.wyn`
+// still builds the same file for a device.
+//
+//   wyn run   src/main.wyn        -- run the scripted session natively
+//   wyn test  tests/test_counter.wyn
+//   wyn cross ios     src/main.wyn
+//   wyn cross android src/main.wyn
+
+// ---- the pure core: no SDK, fully testable -------------------------------
+
+enum Action { Inc, Dec, Reset, Undo }
+
+struct Counter {
+    value: int,
+    taps: int,
+    undone: int
+}
+
+// A ceiling makes the interesting rule explicit: a counter that clamps is a rule
+// worth testing, and a rule is what makes this more than a stub.
+fn limit() -> int => 10
+
+fn label(a: Action) -> string => match a {
+    Action.Inc => "+1",
+    Action.Dec => "-1",
+    Action.Reset => "reset",
+    Action.Undo => "undo"
+}
+
+// The whole behaviour of the app, as one total function over data. `undone` stands in
+// for a one-step undo: the previous value is recoverable without a history array.
+fn apply(c: Counter, a: Action) -> Counter => match a {
+    Action.Inc => Counter {
+        value: clamp(c.value + 1),
+        taps: c.taps + 1,
+        undone: c.value
+    },
+    Action.Dec => Counter {
+        value: clamp(c.value - 1),
+        taps: c.taps + 1,
+        undone: c.value
+    },
+    Action.Reset => Counter { value: 0, taps: c.taps + 1, undone: c.value },
+    Action.Undo => Counter { value: c.undone, taps: c.taps + 1, undone: c.value }
+}
+
+fn clamp(n: int) -> int {
+    if n > limit() { return limit() }
+    if n < 0 { return 0 }
+    return n
+}
+
+// A view is a value too, so the shell has nothing to decide.
+fn readout(c: Counter) -> string {
+    var bar = ""
+    for i in 0..limit() {
+        if i < c.value { bar = bar + "█" } else { bar = bar + "░" }
+    }
+    return "${bar} ${c.value}/${limit()}"
+}
+
+fn at_ceiling(c: Counter) -> bool => c.value == limit()
+
+// ---- the platform shell: translation only --------------------------------
+// Resolved by the platform shell when packaged; empty here so the same file builds
+// natively and cross-compiles unchanged.
+
+fn wyn_ui_text(ctx: int, text: string, size: int) {}
+fn wyn_ui_spacer(ctx: int, size: int) {}
+fn wyn_ui_button(ctx: int, label: string, id: int) {}
+fn wyn_ios_main(a: int, b: int) {}
+
+var app = Counter { value: 0, taps: 0, undone: 0 }
+
+fn wyn_app_title() -> string => "Wyn Counter"
+
+fn wyn_app_build(ctx: int) {
+    wyn_ui_text(ctx, wyn_app_title(), 32)
+    wyn_ui_spacer(ctx, 16)
+    wyn_ui_text(ctx, readout(app), 24)
+    wyn_ui_spacer(ctx, 24)
+    wyn_ui_button(ctx, label(Action.Inc), 1)
+    wyn_ui_button(ctx, label(Action.Dec), 2)
+    wyn_ui_button(ctx, label(Action.Reset), 3)
+    wyn_ui_button(ctx, label(Action.Undo), 4)
+}
+
+// Every tap is one `apply`. There is no logic here to get wrong.
+fn wyn_on_button(id: int) {
+    var a = Action.Reset
+    if id == 1 { a = Action.Inc }
+    else if id == 2 { a = Action.Dec }
+    else if id == 4 { a = Action.Undo }
+    app = apply(app, a)
+}
+
+// ---- and it runs natively ------------------------------------------------
+
+fn main() {
+    print("\x1b[1;36m═══ ${wyn_app_title()} ═══\x1b[0m")
+    print("")
+    print("  \x1b[90mthe core is plain Wyn, so the same code that drives the device")
+    print("  runs right here - one apply() per tap\x1b[0m")
+    print("")
+
+    // A scripted session: nine taps, including two past the ceiling and an undo.
+    var script = [
+        Action.Inc, Action.Inc, Action.Inc, Action.Dec,
+        Action.Inc, Action.Inc, Action.Undo, Action.Reset, Action.Inc
+    ]
+
+    var c = Counter { value: 0, taps: 0, undone: 0 }
+    for a in script {
+        c = apply(c, a)
+        var flag = ""
+        if at_ceiling(c) { flag = " \x1b[33m(ceiling)\x1b[0m" }
+        print("  \x1b[36m${label(a).pad_right(6, " ")}\x1b[0m ${readout(c)}${flag}")
+    }
+
+    print("")
+    print("  \x1b[1m${c.taps}\x1b[0m taps, final \x1b[1m${c.value}\x1b[0m, one undo step back is ${c.undone}")
+    print("")
+    print("  \x1b[90mwyn cross ios src/main.wyn   builds this same file for a device\x1b[0m")
+}

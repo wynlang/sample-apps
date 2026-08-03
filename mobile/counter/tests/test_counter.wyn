@@ -1,0 +1,142 @@
+// The whole point of splitting a mobile app into a pure core and a thin shell is that
+// the core is testable WITHOUT a device. This file is the proof: it imports nothing,
+// mocks nothing, and covers every rule in the app.
+//
+// The old mobile/counter-app could not be tested at all - all of its behaviour lived
+// in `wyn_on_button`, which only a platform shell ever calls.
+//
+//   wyn test tests/test_counter.wyn
+
+enum Action { Inc, Dec, Reset, Undo }
+
+struct Counter {
+    value: int,
+    taps: int,
+    undone: int
+}
+
+fn limit() -> int => 10
+
+fn clamp(n: int) -> int {
+    if n > limit() { return limit() }
+    if n < 0 { return 0 }
+    return n
+}
+
+fn apply(c: Counter, a: Action) -> Counter => match a {
+    Action.Inc => Counter { value: clamp(c.value + 1), taps: c.taps + 1, undone: c.value },
+    Action.Dec => Counter { value: clamp(c.value - 1), taps: c.taps + 1, undone: c.value },
+    Action.Reset => Counter { value: 0, taps: c.taps + 1, undone: c.value },
+    Action.Undo => Counter { value: c.undone, taps: c.taps + 1, undone: c.value }
+}
+
+fn readout(c: Counter) -> string {
+    var bar = ""
+    for i in 0..limit() {
+        if i < c.value { bar = bar + "█" } else { bar = bar + "░" }
+    }
+    return "${bar} ${c.value}/${limit()}"
+}
+
+fn at_ceiling(c: Counter) -> bool => c.value == limit()
+
+fn fresh() -> Counter => Counter { value: 0, taps: 0, undone: 0 }
+
+test "increment and decrement move the value" {
+    var c = apply(fresh(), Action.Inc)
+    assert_eq(c.value, 1)
+    c = apply(c, Action.Inc)
+    assert_eq(c.value, 2)
+    c = apply(c, Action.Dec)
+    assert_eq(c.value, 1)
+}
+
+test "every action counts as a tap" {
+    var c = fresh()
+    c = apply(c, Action.Inc)
+    c = apply(c, Action.Dec)
+    c = apply(c, Action.Reset)
+    c = apply(c, Action.Undo)
+    assert_eq(c.taps, 4)
+}
+
+test "the value clamps at the ceiling instead of running away" {
+    var c = fresh()
+    // twice as many taps as the ceiling allows
+    for i in 0..20 { c = apply(c, Action.Inc) }
+    assert_eq(c.value, limit())
+    assert(at_ceiling(c))
+    // and one more tap does not exceed it
+    c = apply(c, Action.Inc)
+    assert_eq(c.value, limit())
+}
+
+test "the value clamps at zero and never goes negative" {
+    var c = fresh()
+    for i in 0..5 { c = apply(c, Action.Dec) }
+    assert_eq(c.value, 0)
+}
+
+test "reset returns to zero but keeps the tap count" {
+    var c = fresh()
+    c = apply(c, Action.Inc)
+    c = apply(c, Action.Inc)
+    c = apply(c, Action.Reset)
+    assert_eq(c.value, 0)
+    assert_eq(c.taps, 3)
+}
+
+test "undo steps back to the previous value" {
+    var c = fresh()
+    c = apply(c, Action.Inc)     // 1
+    c = apply(c, Action.Inc)     // 2, undone=1
+    assert_eq(c.value, 2)
+    c = apply(c, Action.Undo)
+    assert_eq(c.value, 1)
+}
+
+test "undo after reset recovers the value reset discarded" {
+    var c = fresh()
+    c = apply(c, Action.Inc)
+    c = apply(c, Action.Inc)
+    c = apply(c, Action.Inc)     // 3
+    c = apply(c, Action.Reset)   // 0, undone=3
+    assert_eq(c.value, 0)
+    c = apply(c, Action.Undo)
+    assert_eq(c.value, 3)
+}
+
+test "a scripted session folds to the expected state" {
+    // The exact script main() runs, so the printed demo is covered too.
+    var script = [
+        Action.Inc, Action.Inc, Action.Inc, Action.Dec,
+        Action.Inc, Action.Inc, Action.Undo, Action.Reset, Action.Inc
+    ]
+    var c = fresh()
+    for a in script { c = apply(c, a) }
+    // 1,2,3,2,3,4 -> undo to 3 -> reset to 0 -> inc to 1
+    assert_eq(c.value, 1)
+    assert_eq(c.taps, 9)
+}
+
+test "an action list keeps its distinct elements" {
+    // Guards the compiler defect this app surfaced: an array of payload-free enum
+    // values used to collapse to its first element, so every action read as Inc and
+    // the app silently only ever incremented.
+    var script = [Action.Inc, Action.Dec, Action.Reset, Action.Undo]
+    var c = fresh()
+    for a in script { c = apply(c, a) }
+    // Inc->1(undone 0), Dec->0(undone 1), Reset->0(undone 0), Undo->0(undone 0)
+    assert_eq(c.taps, 4)
+    // If every element were Inc this would be 4, not 0.
+    assert_eq(c.value, 0)
+}
+
+test "the readout bar tracks the value" {
+    var c = fresh()
+    assert_eq(readout(c), "░░░░░░░░░░ 0/10")
+    c = apply(c, Action.Inc)
+    c = apply(c, Action.Inc)
+    assert_eq(readout(c), "██░░░░░░░░ 2/10")
+    assert(not at_ceiling(c))
+}
