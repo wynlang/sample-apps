@@ -1,14 +1,18 @@
 // diskmon -- Disk usage monitor with visual bars
 // Demonstrates: System.exec, string interpolation, ANSI formatting
 // Non-interactive: prints and exits
+//
+// The `df` column parsing and the bar arithmetic live in src/dfparse.wyn so they can be
+// tested against captured output rather than against whatever this machine has mounted
+// -- see tests/test_dfparse.wyn. This file keeps the shell-out and the drawing.
+
+import dfparse
 
 fn progress_bar(pct: int, width: int) -> string {
-    var filled = pct * width / 100
-    if filled > width { filled = width }
-    if filled < 0 { filled = 0 }
+    var filled = dfparse.filled_cells(pct, width)
     var color = "\x1b[32m"
-    if pct > 80 { color = "\x1b[31m" }
-    else if pct > 60 { color = "\x1b[33m" }
+    if dfparse.band(pct) == "crit" { color = "\x1b[31m" }
+    else if dfparse.band(pct) == "warn" { color = "\x1b[33m" }
     var bar = color
     for i in 0..filled { bar = bar + "█" }
     bar += "\x1b[90m"
@@ -22,48 +26,31 @@ fn main() {
     print("\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m")
     print("")
 
+    // NOTE: `df -Ph` is POSIX and the same on macOS, Linux and BSD; `devfs`/`map ` are
+    // macOS pseudo-filesystems, and filtering names that are not present elsewhere is
+    // harmless. On Windows this whole path has no `df` to call.
     var df = System.exec("df -Ph 2>/dev/null | grep -v devfs | grep -v 'map '")
-    var line_start = 0
-    var dlen = df.len()
-    var line_num = 0
     var total_disks = 0
 
     print("  ${"Mount".pad_right(30, " ")} ${"Bar".pad_right(27, " ")} Use%  Used/Size")
     print("  ${"─────────────────────────────"} ${"───────────────────────────"} ──── ─────────")
 
-    for idx in 0..dlen {
-        if df[idx] == "\n" {
-            var line = df.substring(line_start, idx).trim()
-            line_start = idx + 1
-            line_num += 1
+    // `.lines()` rather than a character scan for "\n". The old scan only emitted a row
+    // when it SAW a newline, so a final line without one was silently dropped; and it
+    // skipped the header by counting (line_num == 1) rather than by recognising it.
+    // dfparse.is_row() rejects the header because it has no "%" field.
+    for line in df.lines() {
+        if not dfparse.is_row(line) { continue }
+        var cols = line.trim().words()
+        var size = cols[1]
+        var used = cols[2]
+        var pct = dfparse.pct_of(line)
 
-            if line_num == 1 { continue }
-            if line.len() == 0 { continue }
+        var label = dfparse.mount_of(line)
+        if label.len() > 28 { label = label.substring(0, 28) }
 
-            var cols = line.words()
-            if cols.len() < 5 { continue }
-            var fs = cols[0]
-            var size = cols[1]
-            var used = cols[2]
-            var cap = cols[4]
-
-            var mount = ""
-            var cap_idx = line.index_of(cap)
-            if cap_idx >= 0 {
-                var after = cap_idx + cap.len()
-                if after < line.len() {
-                    mount = line.substring(after, line.len()).trim()
-                }
-            }
-            if mount.len() == 0 { mount = fs }
-
-            var pct = cap.replace("%", "").to_int()
-            var label = mount
-            if label.len() > 28 { label = label.substring(0, 28) }
-
-            print("  ${label.pad_right(30, " ")} ${progress_bar(pct, 25)} ${pct.to_string().pad_left(3, " ")}%  ${used}/${size}")
-            total_disks += 1
-        }
+        print("  ${label.pad_right(30, " ")} ${progress_bar(pct, 25)} ${pct.to_string().pad_left(3, " ")}%  ${used}/${size}")
+        total_disks += 1
     }
 
     print("")

@@ -1,0 +1,113 @@
+// The parse + bar core of diskmon, split out so it can be tested against captured
+// `df -Ph` output instead of whichever filesystems happen to be mounted.
+//
+// Nothing here runs a command or reads a file: every function takes a string or an int.
+// The I/O (`System.exec("df -Ph ...")`) stays in main.wyn.
+//
+// What is genuinely hard about `df -Ph` output, and therefore what is tested:
+//
+//   Filesystem  Size  Used Avail Capacity  Mounted on
+//   /dev/disk3s5 460Gi 201Gi 236Gi 47%     /System/Volumes/Data
+//   map auto_home 0Bi 0Bi 0Bi 100%         /System/Volumes/Data/home
+//
+// The mount point is the LAST field but may CONTAIN SPACES, so it cannot be taken as
+// words()[5] -- and the device name may contain spaces too ("map auto_home"), so it
+// cannot be counted from the left either. The rule used here is: find the capacity
+// field (the one ending in "%") and take everything after it. That is anchored on the
+// only unambiguous token in the row.
+//
+// Signatures are primitives only. On the compiler in this repo, returning a struct, an
+// enum or a list across a module boundary miscompiles (see
+// wyncanvas/tests/test_crossmodule.wyn), so a row is queried field by field.
+
+// The capacity token -- the first word that is DIGITS followed by "%".
+//
+// "ends in %" is not enough: the Linux `df -Ph` header is
+//     Filesystem  Size  Used Avail Use% Mounted on
+// and "Use%" ends in "%", so a suffix-only test accepts the header as a filesystem row
+// and prints a phantom "Mounted on / 0%" line. (macOS spells that column "Capacity" and
+// hides the bug.) Requiring the prefix to be digits rejects "Use%" and "-%" alike.
+export fn cap_field(line: string) -> string {
+    for w in line.words() {
+        var word = "" + w
+        if word.len() < 2 { continue }
+        if word.substring(word.len() - 1, word.len()) != "%" { continue }
+        var digits = word.substring(0, word.len() - 1)
+        var numeric = true
+        for i in 0..digits.len() {
+            var c = digits.substring(i, i + 1)
+            if c < "0" or c > "9" { numeric = false }
+        }
+        if not numeric { continue }
+        return word
+    }
+    return ""
+}
+
+// True when the row can be read as a filesystem: 5+ fields and a capacity token.
+// The `df` header ("Filesystem Size Used Avail Capacity Mounted on") has 6 words but
+// no "%", so it is rejected here rather than by counting lines.
+export fn is_row(line: string) -> bool {
+    var t = line.trim()
+    if t.len() == 0 { return false }
+    if t.words().len() < 5 { return false }
+    return cap_field(t) != ""
+}
+
+// The mount point: everything AFTER the capacity token. Anchoring on "%" rather than on
+// a field index is what makes "/Volumes/My Backup Disk" survive intact.
+export fn mount_of(line: string) -> string {
+    var t = line.trim()
+    var cap = cap_field(t)
+    if cap == "" { return "" }
+    var at = t.index_of(cap)
+    var after = at + cap.len()
+    if after >= t.len() { return t.words()[0] }   // no mount column: fall back to the device
+    var m = t.substring(after, t.len()).trim()
+    if m.len() == 0 { return t.words()[0] }
+    return m
+}
+
+export fn device_of(line: string) -> string {
+    if not is_row(line) { return "" }
+    return "" + line.trim().words()[0]
+}
+
+// The used percentage, 0..100. Anything unparseable is 0 rather than a panic: `to_int()`
+// on a non-numeric string aborts the process, so the digits are checked first.
+export fn pct_of(line: string) -> int {
+    var cap = cap_field(line)
+    if cap == "" { return 0 }
+    var digits = cap.substring(0, cap.len() - 1)
+    if digits.len() == 0 { return 0 }
+    for i in 0..digits.len() {
+        var c = digits.substring(i, i + 1)
+        if c < "0" or c > "9" { return 0 }
+    }
+    return digits.to_int()
+}
+
+export fn row_count(text: string) -> int {
+    var n = 0
+    for line in text.lines() { if is_row(line) { n += 1 } }
+    return n
+}
+
+// How many bar cells to fill for a percentage. Integer division truncates, so 99% of a
+// 25-cell bar is 24 cells, not 25 -- "not quite full" stays visibly not full. Clamped at
+// both ends so a bogus percentage cannot make a bar longer than its own width.
+export fn filled_cells(pct: int, width: int) -> int {
+    var filled = pct * width / 100
+    if filled > width { return width }
+    if filled < 0 { return 0 }
+    return filled
+}
+
+// The severity band, keyed on the same percentage the bar length uses. The boundaries
+// are EXCLUSIVE: 60 is still "ok" and 80 is still "warn", so a disk is not called
+// critical the moment it touches 80%.
+export fn band(pct: int) -> string {
+    if pct > 80 { return "crit" }
+    if pct > 60 { return "warn" }
+    return "ok"
+}

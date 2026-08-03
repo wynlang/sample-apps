@@ -1,0 +1,143 @@
+// Tests for diskmon's `df -Ph` parsing and bar arithmetic, driven by CAPTURED output.
+// The point of the fixture is that the tricky rows -- a mount point with a space, a
+// device name with a space, a 0-byte filesystem, 100% -- are present whether or not this
+// machine happens to have any. Run on a laptop with one disk, the app itself proves
+// nothing; these do.
+//
+// The layout being parsed (captured from `df -Ph`, macOS; the Linux form differs only in
+// the header word "Use%" vs "Capacity", which is not parsed):
+//
+//   Filesystem      Size  Used Avail Capacity  Mounted on
+//   /dev/disk3s5    460Gi 201Gi 236Gi 47%      /System/Volumes/Data
+
+import dfparse
+
+fn header() -> string => "Filesystem      Size  Used Avail Capacity  Mounted on"
+
+fn fixture() -> string {
+    // Six data rows plus the header. Counted by hand: 47%, 5%, 100%, 0%, 80%, 81%.
+    return header()
+        + "\n/dev/disk3s5     460Gi  201Gi  236Gi    47%  /System/Volumes/Data"
+        + "\n/dev/disk3s1     460Gi   12Gi  236Gi     5%  /"
+        + "\nmap auto_home      0Bi    0Bi    0Bi   100%  /System/Volumes/Data/home"
+        + "\n/dev/disk1s2     500Mi  6.0Mi  478Mi     0%  /System/Volumes/xarts"
+        + "\n/dev/disk5s1     100Gi   80Gi   20Gi    80%  /Volumes/My Backup Disk"
+        + "\n/dev/disk6s1     100Gi   81Gi   19Gi    81%  /Volumes/Archive"
+}
+
+test "the header is rejected by recognising it, not by counting lines" {
+    // The header has SEVEN words -- more than the 5-field minimum -- so a field-count
+    // check lets it through. Not having a numeric percentage is the real distinction.
+    assert_eq(header().words().len(), 7)
+    assert_false(dfparse.is_row(header()))
+    assert_eq(dfparse.cap_field(header()), "")
+}
+
+test "the LINUX header is rejected too -- 'Use%' is not a percentage" {
+    // FOUND BY THIS TEST. macOS spells the column "Capacity"; GNU coreutils spells it
+    // "Use%", which ENDS IN "%". A parser that only checks the suffix accepts the Linux
+    // header as a filesystem and prints a phantom row at 0% -- visible on CI, invisible
+    // on the Mac this app was written on. Captured from `docker run debian:trixie df -Ph`.
+    var gnu = "Filesystem      Size  Used Avail Use% Mounted on"
+    assert_false(dfparse.is_row(gnu))
+    assert_eq(dfparse.cap_field(gnu), "")
+
+    // ...while real GNU rows still parse.
+    var row = "overlay         453G   11G  419G   3% /"
+    assert_true(dfparse.is_row(row))
+    assert_eq(dfparse.pct_of(row), 3)
+    assert_eq(dfparse.mount_of(row), "/")
+
+    // A whole GNU df, header included: 2 rows, not 3.
+    var linux = gnu + "\noverlay         453G   11G  419G   3% /\ntmpfs            64M     0   64M   0% /dev"
+    assert_eq(dfparse.row_count(linux), 2)
+}
+
+test "every data row is counted, header excluded, last row included" {
+    // Six data rows. An off-by-one at either end shows up here: 5 means the last row
+    // was dropped, 7 means the header slipped in.
+    assert_eq(dfparse.row_count(fixture()), 6)
+    // Same fixture with no trailing newline vs with one: identical.
+    assert_eq(dfparse.row_count(fixture() + "\n"), 6)
+}
+
+test "a mount point containing a space survives intact" {
+    // THE ROW THAT BREAKS A FIELD-INDEX PARSER. "/Volumes/My Backup Disk" is words 5,
+    // 6 and 7; taking words()[5] yields "/Volumes/My" and looks almost right.
+    var line = "/dev/disk5s1     100Gi   80Gi   20Gi    80%  /Volumes/My Backup Disk"
+    assert_eq(dfparse.mount_of(line), "/Volumes/My Backup Disk")
+    assert_eq(dfparse.pct_of(line), 80)
+}
+
+test "a device name containing a space does not shift the columns" {
+    // "map auto_home" is TWO words, so capacity is words()[5] on this row and
+    // words()[4] on every other. Anchoring on the "%" token is what keeps both right.
+    var line = "map auto_home      0Bi    0Bi    0Bi   100%  /System/Volumes/Data/home"
+    assert_eq(dfparse.pct_of(line), 100)
+    assert_eq(dfparse.mount_of(line), "/System/Volumes/Data/home")
+    assert_eq(dfparse.device_of(line), "map")
+}
+
+test "0% and 100% both parse, and are not confused with each other" {
+    assert_eq(dfparse.pct_of("/dev/disk1s2     500Mi  6.0Mi  478Mi     0%  /x"), 0)
+    assert_eq(dfparse.pct_of("map auto_home      0Bi    0Bi    0Bi   100%  /y"), 100)
+}
+
+test "an unparseable capacity is 0, not a crash" {
+    // `to_int()` on a non-numeric string ABORTS the process in this compiler, so a
+    // malformed row must be filtered before conversion. `df` on a stale NFS mount can
+    // print "-" for capacity.
+    assert_eq(dfparse.pct_of("nfs:/vol   -   -   -   -%  /mnt/stale"), 0)
+    assert_eq(dfparse.pct_of("garbage line with no percent"), 0)
+    assert_eq(dfparse.pct_of(""), 0)
+}
+
+test "a row with no mount column falls back to the device" {
+    // Rather than printing an empty label.
+    var line = "/dev/disk9s9  10Gi  1Gi  9Gi  10%"
+    assert_eq(dfparse.mount_of(line), "/dev/disk9s9")
+}
+
+test "the bar length truncates rather than rounds up" {
+    // 99% of 25 cells is 24.75. A full bar for a not-full disk is the one wrong answer
+    // that matters here, so the truncation is the specified behaviour, not an accident.
+    assert_eq(dfparse.filled_cells(99, 25), 24)
+    assert_eq(dfparse.filled_cells(100, 25), 25)
+    assert_eq(dfparse.filled_cells(0, 25), 0)
+    // 4% of 25 is 1.0 exactly; 3% is 0.75 and must round DOWN to an empty bar.
+    assert_eq(dfparse.filled_cells(4, 25), 1)
+    assert_eq(dfparse.filled_cells(3, 25), 0)
+}
+
+test "the bar is clamped to its own width" {
+    // A bogus percentage must not draw a bar wider than the column, or the table skews.
+    assert_eq(dfparse.filled_cells(250, 25), 25)
+    assert_eq(dfparse.filled_cells(0 - 10, 25), 0)
+    // Zero width: the loop bounds in progress_bar() must not go negative.
+    assert_eq(dfparse.filled_cells(50, 0), 0)
+}
+
+test "the severity boundaries are exclusive" {
+    // Exactly 60 and exactly 80 are the values a >= boundary would mis-colour. A disk
+    // at 80% is not yet critical.
+    assert_eq(dfparse.band(59), "ok")
+    assert_eq(dfparse.band(60), "ok")
+    assert_eq(dfparse.band(61), "warn")
+    assert_eq(dfparse.band(80), "warn")
+    assert_eq(dfparse.band(81), "crit")
+    assert_eq(dfparse.band(100), "crit")
+}
+
+test "the fixture's bands and percentages line up row by row" {
+    // Reading the whole fixture the way main() does, so the walk that produces the
+    // table is the walk under test. The 80%/81% pair straddles the boundary.
+    var pcts = ""
+    var bands = ""
+    for line in fixture().lines() {
+        if not dfparse.is_row(line) { continue }
+        pcts = pcts + "${dfparse.pct_of(line)},"
+        bands = bands + dfparse.band(dfparse.pct_of(line)) + ","
+    }
+    assert_eq(pcts, "47,5,100,0,80,81,")
+    assert_eq(bands, "ok,ok,crit,ok,warn,crit,")
+}
