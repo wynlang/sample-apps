@@ -16,6 +16,12 @@
 //
 //   wyn run sysadmin/portscanner/src/main.wyn            # a common set of ports
 //   wyn run sysadmin/portscanner/src/main.wyn 22 80 443  # or name your own
+//
+// The argument validation and the open/closed/filtered decision live in
+// src/scanlogic.wyn so they can be tested without opening a socket -- see
+// tests/test_scanlogic.wyn. This file keeps the `nc` shell-out, the clock, and the table.
+
+import scanlogic
 
 // Open / Closed / Filtered rather than a bool, because they are three different
 // answers: nothing listening, something refusing, and nothing replying at all. A
@@ -43,23 +49,12 @@ fn label(s: State) -> string => match s {
     State.Filtered => "\x1b[33mfiltered\x1b[0m"
 }
 
-// A match, not an if-chain: adding a port means adding a line, and the compiler
-// checks the `_` is still reachable.
-fn service(port: int) -> string => match port {
-    22 => "SSH",
-    25 => "SMTP",
-    53 => "DNS",
-    80 => "HTTP",
-    443 => "HTTPS",
-    3000 => "Dev Server",
-    3306 => "MySQL",
-    5432 => "PostgreSQL",
-    6379 => "Redis",
-    8080 => "HTTP Alt",
-    8443 => "HTTPS Alt",
-    9090 => "Prometheus",
-    27017 => "MongoDB",
-    _ => "-"
+// scanlogic answers in strings (a module cannot return an enum on this compiler without
+// miscompiling); this is the 1:1 relabelling back into the enum the rest of the file uses.
+fn to_state(canon: string) -> State => match canon {
+    "open" => State.Open,
+    "filtered" => State.Filtered,
+    _ => State.Closed
 }
 
 // Probe one port. Runs on its own coroutine when spawned.
@@ -72,16 +67,13 @@ fn probe(port: int) -> Probe {
     var t0 = Time.now_millis()
     var out = System.exec("nc -z -w1 localhost ${port} 2>/dev/null; echo $?")
     var elapsed = Time.now_millis() - t0
-
-    // The exit status is the last line: `nc` may print to stdout first.
-    var code = out.trim()
-    var nl = code.last_index_of("\n")
-    if nl >= 0 { code = code.substring(nl + 1, code.len()).trim() }
-
-    if code == "0" { return Probe { port: port, state: State.Open, ms: elapsed } }
-    // Slow AND refused means the packet was dropped rather than rejected.
-    if elapsed >= 900 { return Probe { port: port, state: State.Filtered, ms: elapsed } }
-    return Probe { port: port, state: State.Closed, ms: elapsed }
+    // The verdict is scanlogic's: exit code plus elapsed time, tested at the boundary in
+    // tests/test_scanlogic.wyn. This function's only job is the I/O and the clock.
+    return Probe {
+        port: port,
+        state: to_state(scanlogic.classify(scanlogic.exit_code(out), elapsed)),
+        ms: elapsed
+    }
 }
 
 fn main() {
@@ -93,8 +85,12 @@ fn main() {
     var ports = []
     args = System.args()
     for i in 1..args.len() {
-        p = args[i].to_int()
-        if p > 0 and p < 65536 { ports.push(p) }
+        // parse_port() validates BEFORE converting. The old code called `.to_int()`
+        // first and range-checked after, so `portscanner http` printed the banner and
+        // then died with `panic: to_int parse error: "http" is not a valid integer`
+        // instead of reaching the "not a port number" message right below.
+        p = scanlogic.parse_port(args[i])
+        if p > 0 { ports.push(p) }
         else { print("  skipping '${args[i]}': not a port number") }
     }
     if ports.len() == 0 {
@@ -128,7 +124,7 @@ fn main() {
         }
         if r.ms > slowest { slowest = r.ms }
         var port_col = r.port.to_string().pad_right(9, " ")
-        print("  ${port_col}${service(r.port).pad_right(14, " ")}${icon(r.state)} ${label(r.state)}".pad_right(60, " ") + "\x1b[90m${r.ms}ms\x1b[0m")
+        print("  ${port_col}${scanlogic.service(r.port).pad_right(14, " ")}${icon(r.state)} ${label(r.state)}".pad_right(60, " ") + "\x1b[90m${r.ms}ms\x1b[0m")
     }
 
     print("")

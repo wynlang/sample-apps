@@ -1,0 +1,130 @@
+// Tests for portscanner's two decisions: which arguments are ports, and what a probe
+// result meant. Neither opens a socket, so this suite gives the same answer on a machine
+// with nothing listening as on one running a database -- the app itself can only tell you
+// about the machine it ran on.
+//
+// The boundary cases here are the ones that were actually wrong: an argument that is not
+// a number used to CRASH the program, and the closed/filtered threshold is an inequality
+// whose direction is invisible from the output.
+
+import scanlogic
+
+test "a non-numeric argument is rejected instead of crashing the program" {
+    // THE BUG THIS PINS. `portscanner http` printed its banner and then died with
+    //     panic: to_int parse error: "http" is not a valid integer
+    // because `.to_int()` ABORTS THE PROCESS and the range check ran after it. parse_port
+    // validates first and returns 0, which main() reports as "not a port number".
+    assert_eq(scanlogic.parse_port("http"), 0)
+    assert_eq(scanlogic.parse_port("80abc"), 0)
+    assert_eq(scanlogic.parse_port("8o"), 0)
+    assert_eq(scanlogic.parse_port("--all"), 0)
+    assert_eq(scanlogic.parse_port(""), 0)
+    assert_eq(scanlogic.parse_port("   "), 0)
+    assert_eq(scanlogic.parse_port("-"), 0)
+    assert_eq(scanlogic.parse_port("8.0"), 0)
+    assert_eq(scanlogic.parse_port("0x50"), 0)
+}
+
+test "the port range boundaries are exact" {
+    // 1 and 65535 are legal; 0 and 65536 are not. An off-by-one at either end either
+    // rejects a usable port or accepts one that cannot be probed.
+    assert_eq(scanlogic.parse_port("1"), 1)
+    assert_eq(scanlogic.parse_port("65535"), 65535)
+    assert_eq(scanlogic.parse_port("0"), 0)
+    assert_eq(scanlogic.parse_port("65536"), 0)
+    assert_eq(scanlogic.parse_port("99999"), 0)
+    // A negative is not a port, and must not sneak through as a digit string.
+    assert_eq(scanlogic.parse_port("-1"), 0)
+    assert_eq(scanlogic.parse_port("-80"), 0)
+}
+
+test "an absurdly long numeric argument does not overflow into a valid port" {
+    // A 20-digit number would wrap when converted. Rejecting on length keeps the
+    // conversion out of range entirely.
+    assert_eq(scanlogic.parse_port("99999999999999999999"), 0)
+    assert_eq(scanlogic.parse_port("000080"), 0)   // 6 chars: longer than any port
+}
+
+test "surrounding whitespace is tolerated" {
+    // A shell can pass " 80 " through an unquoted variable.
+    assert_eq(scanlogic.parse_port(" 80 "), 80)
+    assert_eq(scanlogic.parse_port("\t443"), 443)
+}
+
+test "leading zeros are accepted up to the length limit" {
+    // "0080" is four characters and means 80. Documented so the length check's side
+    // effect is a decision rather than a surprise.
+    assert_eq(scanlogic.parse_port("0080"), 80)
+    assert_eq(scanlogic.parse_port("00080"), 80)
+}
+
+test "exit 0 is open, whatever the timing" {
+    // Something accepted. Even a slow accept -- a loaded host, a busy scheduler -- is
+    // open, and must not be reclassified as filtered by the elapsed-time rule.
+    assert_eq(scanlogic.classify(0, 1), "open")
+    assert_eq(scanlogic.classify(0, 5000), "open")
+}
+
+test "the closed/filtered threshold is inclusive at exactly 900ms" {
+    // The one boundary in this app that cannot be seen from its output. `nc -w1` is a
+    // one-second timeout, so a probe at or past 900ms was dropped, not refused.
+    assert_eq(scanlogic.filtered_after_ms(), 900)
+    assert_eq(scanlogic.classify(1, 899), "closed")
+    assert_eq(scanlogic.classify(1, 900), "filtered")
+    assert_eq(scanlogic.classify(1, 901), "filtered")
+    // A refusal on the loopback comes back in single-digit ms.
+    assert_eq(scanlogic.classify(1, 3), "closed")
+    assert_eq(scanlogic.classify(1, 0), "closed")
+}
+
+test "a filtered port is never reported as closed" {
+    // The distinction that justifies three states instead of a bool: telling someone a
+    // firewalled port is closed is the one wrong answer that matters.
+    assert_eq(scanlogic.classify(1, 1000), "filtered")
+    assert_false(scanlogic.classify(1, 1000) == "closed")
+}
+
+test "the exit status is the LAST line, because nc may print first" {
+    // `nc -z` can write to stdout before `echo $?` runs. Reading the whole output, or the
+    // first line, yields a status that is not a status.
+    assert_eq(scanlogic.exit_code("0"), 0)
+    assert_eq(scanlogic.exit_code("0\n"), 0)
+    assert_eq(scanlogic.exit_code("Connection to localhost port 80 succeeded!\n0"), 0)
+    assert_eq(scanlogic.exit_code("some chatter\nmore chatter\n1"), 1)
+    assert_eq(scanlogic.exit_code("  1  \n"), 1)
+}
+
+test "an unreadable exit status is not mistaken for success" {
+    // -1, not 0. If a missing status parsed as 0 the scanner would report every port
+    // OPEN on a machine with no `nc` installed -- confidently, and completely wrong.
+    assert_eq(scanlogic.exit_code(""), -1)
+    assert_eq(scanlogic.exit_code("\n"), -1)
+    assert_eq(scanlogic.exit_code("command not found"), -1)
+    assert_eq(scanlogic.exit_code("nc: getaddrinfo: nodename nor servname provided"), -1)
+    // ...and it classifies as not-open.
+    assert_false(scanlogic.classify(scanlogic.exit_code(""), 5) == "open")
+    assert_eq(scanlogic.classify(scanlogic.exit_code("command not found"), 5), "closed")
+}
+
+test "known services are named and unknown ports are not" {
+    assert_eq(scanlogic.service(22), "SSH")
+    assert_eq(scanlogic.service(5432), "PostgreSQL")
+    assert_eq(scanlogic.service(27017), "MongoDB")
+    // A port one away from a known one must NOT inherit its name.
+    assert_eq(scanlogic.service(23), "-")
+    assert_eq(scanlogic.service(81), "-")
+    assert_eq(scanlogic.service(0), "-")
+    assert_eq(scanlogic.service(65535), "-")
+}
+
+test "the default port list is all valid ports" {
+    // Every port the app scans with no arguments must survive its own validator --
+    // otherwise the default run silently skips one.
+    var defaults = "22 80 443 3000 3306 5432 6379 8080 8443 9090 27017"
+    var n = 0
+    for w in defaults.words() {
+        assert_true(scanlogic.parse_port("" + w) > 0)
+        n += 1
+    }
+    assert_eq(n, 11)
+}

@@ -1,0 +1,91 @@
+// The decision core of portscanner, split out so it can be tested without opening a
+// socket. Nothing here calls `nc`, `System.exec` or the clock: every function takes a
+// string or an int.
+//
+// Two things this app can get silently wrong, and both live here:
+//
+//   1. WHICH PORTS TO SCAN. The argument is a string from the command line. `to_int()`
+//      ABORTS THE PROCESS on non-numeric input, so `portscanner http` used to die with
+//      `panic: to_int parse error: "http" is not a valid integer` after printing its
+//      banner -- the check for a valid range ran AFTER the conversion that crashed.
+//
+//   2. WHAT A PROBE MEANT. `nc -z -w1` exits 0 on accept and 1 on refuse, and TIMES OUT
+//      when a firewall drops the packet -- which also exits non-zero. Open / Closed /
+//      Filtered is therefore decided by the exit code AND the elapsed time together, and
+//      the threshold between "refused instantly" and "dropped, waited a full second" is a
+//      judgement that deserves a test at the boundary.
+//
+// Signatures are primitives only. On the compiler in this repo, returning an enum, a
+// struct or a list across a module boundary miscompiles (see
+// wyncanvas/tests/test_crossmodule.wyn), so the enum State stays in main.wyn and this
+// module answers in canonical strings.
+
+// A port number, or 0 for anything that is not one. Checked BEFORE conversion, because
+// `to_int()` on "http" aborts the process rather than returning a sentinel.
+//
+// Rejected: empty, negative, non-digits, 0, and anything above 65535. Accepted with
+// surrounding whitespace, since a shell can pass it.
+export fn parse_port(arg: string) -> int {
+    var t = arg.trim()
+    if t.len() == 0 { return 0 }
+    if t.len() > 5 { return 0 }          // 65535 is the longest legal port
+    for i in 0..t.len() {
+        var c = t.substring(i, i + 1)
+        if c < "0" or c > "9" { return 0 }
+    }
+    var p = t.to_int()
+    if p < 1 or p > 65535 { return 0 }
+    return p
+}
+
+// The well-known service on a port, or "-". A match rather than an if-chain: adding a
+// port is adding a line.
+export fn service(port: int) -> string => match port {
+    22 => "SSH",
+    25 => "SMTP",
+    53 => "DNS",
+    80 => "HTTP",
+    443 => "HTTPS",
+    3000 => "Dev Server",
+    3306 => "MySQL",
+    5432 => "PostgreSQL",
+    6379 => "Redis",
+    8080 => "HTTP Alt",
+    8443 => "HTTPS Alt",
+    9090 => "Prometheus",
+    27017 => "MongoDB",
+    _ => "-"
+}
+
+// The exit status from `nc -z -w1 host port 2>/dev/null; echo $?`.
+//
+// `nc` may write to stdout before the status is echoed, so the status is the LAST line,
+// not the whole output. Returns -1 when no status can be read, which classify() treats
+// as not-open rather than guessing.
+export fn exit_code(out: string) -> int {
+    var t = out.trim()
+    if t.len() == 0 { return -1 }
+    var nl = t.last_index_of("\n")
+    if nl >= 0 { t = t.substring(nl + 1, t.len()).trim() }
+    if t.len() == 0 { return -1 }
+    for i in 0..t.len() {
+        var c = t.substring(i, i + 1)
+        if c < "0" or c > "9" { return -1 }
+    }
+    return t.to_int()
+}
+
+// The threshold, in ms, above which a non-accepting probe is read as FILTERED rather than
+// closed. `-w1` is a one-second timeout, so a probe that used most of a second was
+// dropped; a refusal comes back on the loopback in single-digit milliseconds. 900ms
+// leaves headroom for scheduling jitter without reaching into refusal territory.
+export fn filtered_after_ms() -> int => 900
+
+// Open / closed / filtered, from the exit code and the elapsed time TOGETHER. Exit 0
+// means something accepted, whatever the timing; otherwise the elapsed time is what
+// distinguishes an active refusal from a silently dropped packet.
+export fn classify(code: int, elapsed_ms: int) -> string {
+    if code == 0 { return "open" }
+    if elapsed_ms >= filtered_after_ms() { return "filtered" }
+    return "closed"
+}
