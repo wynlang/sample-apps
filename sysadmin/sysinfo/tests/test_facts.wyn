@@ -1,0 +1,379 @@
+// Tests for sysinfo's parsers.
+//
+// Every fixture below is REAL captured output -- the macOS ones from an arm64 Mac
+// (16384-byte pages), the Linux ones from a debian:trixie container. That matters:
+// the point of these tests is that the same parser handles both, so a Linux run is
+// not a wall of blank fields. No test here shells out, so they pass on any platform
+// and they fail if a parser regresses rather than if the machine changes.
+
+import facts
+
+// ---- fixtures ------------------------------------------------------------
+
+fn mac_vm_stat() -> string {
+    return "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n" +
+        "Pages free:                                     3753.\n" +
+        "Pages active:                                 537685.\n" +
+        "Pages inactive:                               533964.\n" +
+        "Pages speculative:                              2310.\n" +
+        "Pages throttled:                                   0.\n" +
+        "Pages wired down:                             311336.\n" +
+        "Pages purgeable:                                   4.\n"
+}
+
+fn linux_meminfo() -> string {
+    return "MemTotal:        8126204 kB\n" +
+        "MemFree:         6992216 kB\n" +
+        "MemAvailable:    7440840 kB\n" +
+        "Buffers:           57632 kB\n" +
+        "Cached:           518600 kB\n"
+}
+
+fn mac_df() -> string {
+    return "Filesystem     1024-blocks      Used Available Capacity  Mounted on\n" +
+        "/dev/disk3s3s1   482797652  12270012 245521064     5%    /\n" +
+        "devfs                  220       220         0   100%    /dev\n" +
+        "/dev/disk3s6     482797652   4194324 245521064     2%    /System/Volumes/VM\n"
+}
+
+fn linux_df() -> string {
+    return "Filesystem     1024-blocks     Used Available Capacity Mounted on\n" +
+        "overlay          474095688 10601084 439338396       3% /\n" +
+        "tmpfs                65536        0     65536       0% /dev\n" +
+        "/dev/vda1        474095688 10601084 439338396       3% /etc/hosts\n"
+}
+
+fn mac_ps() -> string {
+    return "  PID  %CPU %MEM    RSS COMM\n" +
+        "    1   0.2  0.1  18992 /sbin/launchd\n" +
+        "  233   0.0  0.0  13552 /System/Library/CoreServices/Keychain Circle Notification.app/Contents/MacOS/Keychain Circle Notification\n" +
+        "  444   0.0  0.0  10016 /usr/libexec/mlhostd\n"
+}
+
+fn mac_ifconfig() -> string {
+    return "lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384\n" +
+        "\tinet 127.0.0.1 netmask 0xff000000\n" +
+        "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n" +
+        "\tinet 192.168.1.42 netmask 0xffffff00 broadcast 192.168.1.255\n" +
+        "utun3: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380\n"
+}
+
+fn linux_ip_addr() -> string {
+    return "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever\n" +
+        "2: eth0    inet 172.17.0.2/16 brd 172.17.255.255 scope global eth0\\       valid_lft forever\n"
+}
+
+fn linux_ip_link() -> string {
+    return "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN\n" +
+        "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP\n" +
+        "3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN\n"
+}
+
+// ---- num(): the only gate to to_int(), which panics --------------------
+
+test "num parses digits and rejects everything else" {
+    // to_int() panics on non-numeric text, so every parser funnels through num().
+    // If this returned a 0 for "n/a" the app would print a confident wrong number.
+    assert_eq(facts.num(" 42 "), 42)
+    assert_eq(facts.num("0"), 0)
+    assert_eq(facts.num("4x"), -1)
+    assert_eq(facts.num("n/a"), -1)
+    assert_eq(facts.num(""), -1)
+    assert_eq(facts.num("3.5"), -1)
+    assert_eq(facts.num("-7"), -1)
+}
+
+test "field collapses runs of spaces, unlike split_at" {
+    // The old sysinfo used split_at(" ", n) on `df` output, which returns "" for any
+    // run of more than one space -- that is why it printed "used / total ()".
+    var line = "/dev/disk3s3s1   482797652  12270012 245521064     5%    /"
+    assert_eq(facts.field(line, 0), "/dev/disk3s3s1")
+    assert_eq(facts.field(line, 1), "482797652")
+    assert_eq(facts.field(line, 4), "5%")
+    assert_eq(facts.field(line, 5), "/")
+}
+
+test "field returns empty rather than reading off the end" {
+    assert_eq(facts.field("only one", 9), "")
+    assert_eq(facts.field("", 0), "")
+    assert_eq(facts.field("a b", 0 - 1), "")
+}
+
+// ---- key: value ---------------------------------------------------------
+
+test "kv is prefix-anchored so near-miss keys do not match" {
+    assert_eq(facts.kv(linux_meminfo(), "MemTotal"), "8126204 kB")
+    assert_eq(facts.kv(mac_vm_stat(), "Pages free"), "3753.")
+    // "Pages wired" must not answer with the "Pages wired down" line's value by
+    // accident, and a key that is absent must report absent, not a neighbour.
+    assert_eq(facts.kv(linux_meminfo(), "Mem"), "")
+    assert_eq(facts.kv(linux_meminfo(), "SwapTotal"), "")
+}
+
+// ---- memory -------------------------------------------------------------
+
+test "page size is read from vm_stat, never assumed to be 4096" {
+    // This machine has 16384-byte pages. Assuming 4096 (as the old sysmon did as a
+    // fallback) understates every memory figure by 4x.
+    assert_eq(facts.vm_page_size(mac_vm_stat()), 16384)
+    assert_eq(facts.vm_page_size("no header here\n"), -1)
+}
+
+test "macOS total memory sums the page buckets" {
+    // 1389048 pages * 16384 / 1048576 = 21703 MB (a 22 GB machine)
+    assert_eq(facts.vm_total_mb(mac_vm_stat()), 21703)
+}
+
+test "macOS used memory counts active+wired, not everything" {
+    // (537685 + 311336) * 16384 / 1048576 = 13265 MB. Inactive and speculative pages
+    // are reclaimable; counting them as used is what makes monitors cry wolf at 95%.
+    assert_eq(facts.vm_used_mb(mac_vm_stat()), 13265)
+    assert(facts.vm_used_mb(mac_vm_stat()) < facts.vm_total_mb(mac_vm_stat()))
+}
+
+test "truncated vm_stat reports unknown, not a short total" {
+    // A partial read must not produce a plausible-looking smaller number.
+    var partial = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 3753.\n"
+    assert_eq(facts.vm_total_mb(partial), -1)
+    assert_eq(facts.vm_used_mb(partial), -1)
+}
+
+test "Linux memory comes from /proc/meminfo in kB" {
+    assert_eq(facts.meminfo_kb(linux_meminfo(), "MemTotal"), 8126204)
+    // (8126204 - 7440840) / 1024 = 669 MB really in use
+    assert_eq(facts.meminfo_used_mb(linux_meminfo()), 669)
+    assert_eq(facts.meminfo_kb(linux_meminfo(), "Nonesuch"), -1)
+}
+
+test "meminfo without MemAvailable reports unknown" {
+    var old = "MemTotal:        8126204 kB\nMemFree:         6992216 kB\n"
+    assert_eq(facts.meminfo_used_mb(old), -1)
+}
+
+test "pct refuses to divide by zero or by a missing total" {
+    assert_eq(facts.pct(50, 200), 25)
+    assert_eq(facts.pct(0, 200), 0)
+    assert_eq(facts.pct(5, 0), -1)
+    assert_eq(facts.pct(5, 0 - 1), -1)
+    assert_eq(facts.pct(0 - 1, 200), -1)
+}
+
+// ---- disk ---------------------------------------------------------------
+
+test "df -Pk columns are found by mount point on both platforms" {
+    // Same parser, same column numbers, two very different `df` outputs. -Pk is
+    // POSIX-specified; -h is not, which is why the old apps hardcoded macOS units.
+    assert_eq(facts.df_total_kb(mac_df(), "/"), 482797652)
+    assert_eq(facts.df_used_kb(mac_df(), "/"), 12270012)
+    assert_eq(facts.df_pct(mac_df(), "/"), 5)
+
+    assert_eq(facts.df_total_kb(linux_df(), "/"), 474095688)
+    assert_eq(facts.df_used_kb(linux_df(), "/"), 10601084)
+    assert_eq(facts.df_pct(linux_df(), "/"), 3)
+}
+
+test "a mount point that is not present reports unknown" {
+    assert_eq(facts.df_total_kb(mac_df(), "/nonexistent"), -1)
+    assert_eq(facts.df_pct(mac_df(), "/nonexistent"), -1)
+}
+
+test "the df header row is never mistaken for a filesystem" {
+    // "Mounted on" ends the header line, so a naive last-column match on "on" or a
+    // blind skip-line-1 both go wrong. The header's mount column is never "/".
+    assert_eq(facts.df_col(mac_df(), "on", 1), "")
+}
+
+test "RAM-backed and kernel mounts are classified out without a grep chain" {
+    // Every one of the six old apps filtered these with `grep -v devfs | grep -v map`.
+    assert(not facts.is_real_fs("devfs", "/dev"))
+    assert(not facts.is_real_fs("tmpfs", "/run/lock"))
+    assert(not facts.is_real_fs("shm", "/dev/shm"))
+    assert(not facts.is_real_fs("proc", "/proc"))
+    // macOS firmlinks report the same figures as / and would triple-count it.
+    assert(not facts.is_real_fs("/dev/disk3s6", "/System/Volumes/VM"))
+}
+
+test "overlay is a REAL filesystem -- it is the root of every container" {
+    // Denylisting "overlay" by name means no root filesystem row on Linux at all.
+    assert(facts.is_real_fs("overlay", "/"))
+    assert(facts.is_real_fs("/dev/disk3s3s1", "/"))
+    assert(facts.is_real_fs("/dev/vda1", "/home"))
+}
+
+// ---- load average ------------------------------------------------------
+
+test "load average is normalised from both uptime dialects" {
+    // macOS says "load averages:" with spaces; Linux says "load average:" with
+    // commas. Both must yield three plain numbers.
+    var mac = "13:39  up 8 days,  8:54, 2 users, load averages: 4.98 6.72 7.16"
+    var linux = "13:39:02 up 3 days,  1:12,  1 user,  load average: 0.14, 0.11, 0.09"
+    assert_eq(facts.load_from_uptime(mac), "4.98 6.72 7.16")
+    assert_eq(facts.load_from_uptime(linux), "0.14 0.11 0.09")
+}
+
+test "uptime output with no load average reports empty, not garbage" {
+    assert_eq(facts.load_from_uptime("13:39 up 8 days"), "")
+    assert_eq(facts.load_from_uptime(""), "")
+}
+
+test "/proc/loadavg is the fallback where uptime does not exist" {
+    // A debian:trixie container genuinely has no `uptime` binary -- this is where
+    // the old apps printed a blank field.
+    assert_eq(facts.load_from_proc("0.14 0.11 0.09 1/406 15"), "0.14 0.11 0.09")
+    assert_eq(facts.load_from_proc("0.00"), "")
+}
+
+// ---- cpu ---------------------------------------------------------------
+
+test "cpu model comes out of /proc/cpuinfo, with an ARM fallback" {
+    var x86 = "processor\t: 0\nmodel name\t: Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz\ncache size\t: 12288 KB\n"
+    assert_eq(facts.cpu_model_linux(x86), "Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz")
+    // ARM Linux has no "model name" line at all -- most tools print nothing there.
+    var arm = "processor\t: 0\nBogoMIPS\t: 50.00\nCPU part\t: 0xd0c\n"
+    assert_eq(facts.cpu_model_linux(arm), "ARM 0xd0c")
+    assert_eq(facts.cpu_model_linux("processor\t: 0\n"), "")
+}
+
+// ---- network -----------------------------------------------------------
+
+test "one IPv4 parser handles ifconfig and ip -o addr" {
+    // Found by the word "inet" rather than by line shape, which is what lets the two
+    // formats share the code.
+    assert_eq(facts.first_ipv4(mac_ifconfig()), "192.168.1.42")
+    assert_eq(facts.first_ipv4(linux_ip_addr()), "172.17.0.2")
+}
+
+test "loopback and link-local are never reported as the host address" {
+    assert_eq(facts.first_ipv4("lo0: flags=8049\n\tinet 127.0.0.1 netmask 0xff000000\n"), "")
+    assert_eq(facts.first_ipv4("en0:\n\tinet 169.254.3.4 netmask 0xffff0000\n"), "")
+    assert_eq(facts.first_ipv4(""), "")
+}
+
+test "interface names are collected from all three formats, minus loopback" {
+    // macOS ifconfig: the name is the first token, "en0:".
+    assert_eq(facts.iface_names(mac_ifconfig()), "en0 utun3")
+    // Linux `ip -o link`: a leading "2:" is an INDEX, not a name -- reading the first
+    // token here would report interfaces called "1", "2", "3".
+    assert_eq(facts.iface_names(linux_ip_link()), "eth0 docker0")
+    // Linux `ip -o -4 addr`: same leading index, but the name carries no colon.
+    assert_eq(facts.iface_names(linux_ip_addr()), "eth0")
+}
+
+test "nameservers are read from resolv.conf, comments ignored" {
+    var conf = "# generated\nnameserver 8.8.8.8\nnameserver 1.1.1.1\nsearch lan\n"
+    assert_eq(facts.nameservers(conf), "8.8.8.8 1.1.1.1")
+    assert_eq(facts.nameservers("search lan\n"), "")
+}
+
+// ---- processes ---------------------------------------------------------
+
+test "ps rows are counted by having a numeric PID, not by position" {
+    // Skipping "line 1" blindly loses the busiest process on a `ps` with no header.
+    assert_eq(facts.ps_rows(mac_ps()), 3)
+    assert_eq(facts.ps_rows("  PID  %CPU %MEM    RSS COMM\n"), 0)
+    assert_eq(facts.ps_rows(""), 0)
+}
+
+test "a command containing spaces is not truncated at the space" {
+    // This is a real process name on macOS. words()[4] would stop at "Circle".
+    assert_eq(facts.ps_field(mac_ps(), 2, 0), "233")
+    assert_eq(facts.ps_field(mac_ps(), 2, 4),
+        "/System/Library/CoreServices/Keychain Circle Notification.app/Contents/MacOS/Keychain Circle Notification")
+}
+
+test "ps columns and out-of-range ranks" {
+    assert_eq(facts.ps_field(mac_ps(), 1, 0), "1")
+    assert_eq(facts.ps_field(mac_ps(), 1, 1), "0.2")
+    assert_eq(facts.ps_field(mac_ps(), 1, 3), "18992")
+    assert_eq(facts.ps_field(mac_ps(), 1, 4), "/sbin/launchd")
+    assert_eq(facts.ps_field(mac_ps(), 99, 0), "")
+}
+
+test "centi reads a percentage without float parsing, and refuses non-numbers" {
+    // ps prints "-" or "?" in %CPU for some kernel threads; to_float() panics on both.
+    assert_eq(facts.centi("80.4"), 8040)
+    assert_eq(facts.centi("0.0"), 0)
+    assert_eq(facts.centi("100"), 10000)
+    assert_eq(facts.centi("5.25"), 525)
+    assert_eq(facts.centi("-"), -1)
+    assert_eq(facts.centi("?"), -1)
+    assert_eq(facts.centi(""), -1)
+}
+
+test "a one-digit fraction is tenths, not hundredths" {
+    // "5.4" is 5.40, so it must outrank "5.04" -- reading the fraction as-is inverts them.
+    assert(facts.centi("5.4") > facts.centi("5.04"))
+    assert_eq(facts.centi("5.4"), 540)
+}
+
+test "ps_row hands back a whole row so one scan serves every column" {
+    // Reading columns via ps_field rescans the text per column; the report takes the
+    // row once instead. With ~650 processes the difference was 22 seconds.
+    var row = facts.ps_row(mac_ps(), 1)
+    assert_eq(facts.field(row, 0), "1")
+    assert_eq(facts.field(row, 1), "0.2")
+    assert_eq(facts.ps_command(row), "/sbin/launchd")
+    assert_eq(facts.ps_row(mac_ps(), 99), "")
+}
+
+test "processes are ranked by CPU in Wyn, not by a non-portable ps flag" {
+    // macOS `ps -r` sorts by CPU; Linux `ps -r` filters to RUNNING only and so returns
+    // nothing on an idle box. This app sorts its own rows, and this is that sort.
+    var ps = "  PID  %CPU %MEM    RSS COMM\n" +
+        "    1   0.2  0.1  18992 /sbin/launchd\n" +
+        "  233  44.3  2.0  13552 /usr/bin/busy\n" +
+        "  444   9.5  0.3  10016 /usr/libexec/middling\n"
+    // Busiest first, whatever order ps listed them in.
+    var top = facts.ps_top(ps, 3).words()
+    assert_eq(top.len(), 3)
+    assert_eq(facts.ps_field(ps, facts.num("" + top[0]), 0), "233")
+    assert_eq(facts.ps_field(ps, facts.num("" + top[1]), 0), "444")
+    assert_eq(facts.ps_field(ps, facts.num("" + top[2]), 0), "1")
+}
+
+test "asking for more ranks than there are processes yields only what exists" {
+    var ps = "  PID  %CPU %MEM    RSS COMM\n    1   0.2  0.1  18992 /sbin/launchd\n"
+    assert_eq(facts.ps_top(ps, 9).words().len(), 1)
+    assert_eq(facts.ps_top("  PID  %CPU %MEM    RSS COMM\n", 1), "")
+    assert_eq(facts.ps_top("", 5), "")
+    assert_eq(facts.ps_top(ps, 0), "")
+}
+
+test "each process is ranked once -- no row appears twice" {
+    // Without marking rows taken, the busiest process fills every slot in the table.
+    var top = facts.ps_top(mac_ps(), 3).words()
+    assert(("" + top[0]) != ("" + top[1]))
+    assert(("" + top[1]) != ("" + top[2]))
+    assert(("" + top[0]) != ("" + top[2]))
+}
+
+test "a process whose CPU column is unparseable still ranks last, not first" {
+    // centi() returns -1 for "-", so it must sort below a real 0.0 rather than above
+    // everything -- otherwise a kernel thread heads the "top CPU" table.
+    var ps = "  PID  %CPU %MEM    RSS COMM\n" +
+        "    2     -  0.0      0 kthreadd\n" +
+        "    9   0.0  0.1   1024 /usr/bin/idle\n"
+    var top = facts.ps_top(ps, 2).words()
+    assert_eq(facts.ps_field(ps, facts.num("" + top[0]), 0), "9")
+    assert_eq(facts.ps_field(ps, facts.num("" + top[1]), 0), "2")
+}
+
+test "basename strips the path but survives having none" {
+    assert_eq(facts.basename("/usr/libexec/mlhostd"), "mlhostd")
+    assert_eq(facts.basename("kernel_task"), "kernel_task")
+    assert_eq(facts.basename("/"), "")
+}
+
+// ---- formatting --------------------------------------------------------
+
+test "human_kb picks a unit and keeps one decimal" {
+    assert_eq(facts.human_kb(512), "512 KB")
+    assert_eq(facts.human_kb(2048), "2.0 MB")
+    assert_eq(facts.human_kb(1572864), "1.5 GB")
+    assert_eq(facts.human_kb(482797652), "460.4 GB")
+}
+
+test "human_kb says ? for an unknown size rather than 0" {
+    // A missing measurement must never render as "0 KB", which reads as a fact.
+    assert_eq(facts.human_kb(0 - 1), "?")
+}

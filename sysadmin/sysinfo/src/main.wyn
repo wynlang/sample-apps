@@ -1,94 +1,253 @@
-// sysinfo -- Concurrent system information dashboard
-// Demonstrates: spawn for parallel data gathering, structs, string interpolation
-// Non-interactive: prints and exits
+// sysinfo -- one non-interactive system report: host, CPU, memory, disks,
+// processes, network.
+//
+// This app replaces four that overlapped almost completely (sysinfo, procwatch,
+// netstat-lite, and the read-only half of sysmon). They shared a shape and a bug:
+// each pasted a macOS-only shell pipeline into `System.exec`, split the output on
+// single spaces, and printed whatever came back. On Linux that produced a page of
+// blank fields; on a container with no `ps` it produced blank fields and said
+// nothing was wrong.
+//
+// Two things are different here:
+//
+//   1. CAPABILITY, NOT PLATFORM. Nothing branches on "am I on a Mac". Each fact
+//      declares the sources it could come from -- `vm_stat`, then /proc/meminfo --
+//      and `source()` picks the first that is actually present. The same binary uses
+//      whichever exists, and a new platform means a new source, not a new branch.
+//
+//   2. A MISSING FACT IS A FACT. When no source answers, the row prints
+//      "unavailable -- no vm_stat or /proc/meminfo" instead of "0 MB". The old apps
+//      could not tell you the difference between an idle machine and a failed
+//      measurement, and neither could their output.
+//
+// All the parsing lives in facts.wyn and is covered by tests/test_facts.wyn against
+// captured macOS and Linux output, so none of it needs this machine to be verified.
 
-struct SysData { label: string, value: string }
+import facts
 
-fn gather(cmd: string, results: [SysData], idx: int, label: string) {
-    var val = System.exec(cmd).trim()
-    results[idx] = SysData { label: label, value: val }
+// ---------------------------------------------------------------- capability
+
+// Does this box have the command at all? `command -v` is POSIX, so this probe works
+// wherever the shell does.
+fn have(cmd: string) -> bool => System.exec_code("command -v ${cmd} >/dev/null 2>&1") == 0
+
+// Run the first source whose command exists. Returns "" if none do -- which the
+// caller must treat as "unknown", never as "empty".
+fn source(cmds: [string]) -> string {
+    for c in cmds {
+        var cmd = "" + c
+        var exe = facts.field(cmd, 0)
+        if not have(exe) { continue }
+        var out = System.exec("${cmd} 2>/dev/null")
+        if out.trim().len() > 0 { return out }
+    }
+    return ""
+}
+
+// A file source -- for Linux's /proc, which is where the portable facts live.
+//
+// Files under /proc are generated on read and report a size of 0 to fseek/ftell, so
+// a size-then-read implementation (which `File.read` is) comes back empty even though
+// `cat` prints 8 kB. That is the single reason the first Linux run of this app said
+// "no /proc/meminfo" while /proc/meminfo was sitting right there. So: try File.read,
+// and if it yields nothing for a file that demonstrably exists, stream it instead.
+fn read_or_empty(path: string) -> string {
+    if not File.exists(path) { return "" }
+    var text = File.read(path)
+    if text.len() > 0 { return text }
+    return System.exec("cat ${path} 2>/dev/null")
+}
+
+// ---------------------------------------------------------------- reporting
+
+// The only two ways to print a value. `fact` states one; `missing` states that we
+// could not get one and why. There is deliberately no third option that prints a
+// blank or a zero, because that is the habit this app exists to break.
+fn fact(label: string, value: string) {
+    print("    \x1b[90m${label.pad_right(11, " ")}\x1b[0m ${value}")
+}
+
+fn missing(label: string, why: string) {
+    print("    \x1b[90m${label.pad_right(11, " ")}\x1b[0m \x1b[33munavailable\x1b[0m \x1b[90m-- ${why}\x1b[0m")
+}
+
+// A value that is present-but-empty is reported as such rather than as a blank line.
+fn fact_or(label: string, value: string, why: string) {
+    if value.trim().len() == 0 { missing(label, why) } else { fact(label, value.trim()) }
+}
+
+fn heading(title: string) {
+    print("")
+    print("  \x1b[1;33m● ${title}\x1b[0m")
+}
+
+fn bar(percent: int, width: int) -> string {
+    if percent < 0 { return "\x1b[90m${"?".pad_right(width, "?")}\x1b[0m" }
+    var p = percent
+    if p > 100 { p = 100 }
+    var filled = p * width / 100
+    var colour = "\x1b[32m"
+    if p > 85 { colour = "\x1b[31m" } else if p > 65 { colour = "\x1b[33m" }
+    var out = colour
+    for i in 0..filled { out += "█" }
+    out += "\x1b[90m"
+    for j in filled..width { out += "░" }
+    return out + "\x1b[0m"
+}
+
+// ---------------------------------------------------------------- sections
+
+fn show_host() {
+    heading("Host")
+    fact_or("Hostname", source(["hostname"]), "no hostname command")
+    var os = source(["uname -s"]).trim()
+    var rel = source(["uname -r"]).trim()
+    fact_or("OS", "${os} ${rel}", "no uname")
+    fact_or("Arch", source(["uname -m"]), "no uname")
+    fact_or("User", System.env("USER"), "USER not set in the environment")
+
+    // Load average: `uptime` on a Mac, /proc/loadavg on a container that has no
+    // `uptime` binary at all -- debian:trixie genuinely does not ship one.
+    var load = facts.load_from_uptime(source(["uptime"]))
+    if load.len() == 0 { load = facts.load_from_proc(read_or_empty("/proc/loadavg")) }
+    fact_or("Load", load, "no uptime and no /proc/loadavg")
+}
+
+fn show_cpu() {
+    heading("CPU")
+    // Core count: sysctl (macOS/BSD), nproc (GNU), then getconf.
+    var cores = source(["sysctl -n hw.ncpu", "nproc", "getconf _NPROCESSORS_ONLN"]).trim()
+    fact_or("Cores", cores, "no sysctl, nproc or getconf")
+
+    var model = source(["sysctl -n machdep.cpu.brand_string"]).trim()
+    if model.len() == 0 { model = facts.cpu_model_linux(read_or_empty("/proc/cpuinfo")) }
+    // ARM Macs answer the sysctl; ARM Linux boxes often have no model string anywhere,
+    // and saying so is more useful than printing an empty label.
+    fact_or("Model", model, "not exposed by sysctl or /proc/cpuinfo on this machine")
+}
+
+fn show_memory() {
+    heading("Memory")
+    var used = 0 - 1
+    var total = 0 - 1
+    var vm = source(["vm_stat"])
+    if vm.len() > 0 {
+        used = facts.vm_used_mb(vm)
+        total = facts.vm_total_mb(vm)
+    } else {
+        var mi = read_or_empty("/proc/meminfo")
+        if mi.len() > 0 {
+            used = facts.meminfo_used_mb(mi)
+            total = facts.meminfo_kb(mi, "MemTotal") / 1024
+        }
+    }
+    if used < 0 or total < 1 {
+        missing("Used", "no vm_stat and no /proc/meminfo")
+        return
+    }
+    var percent = facts.pct(used, total)
+    fact("Used", "[${bar(percent, 24)}] ${percent}%  ${used} / ${total} MB")
+    // "Used" here is committed memory (active+wired, or MemTotal-MemAvailable), not
+    // everything the kernel has touched -- see facts.wyn.
+    fact("Free", "${total - used} MB \x1b[90m(reclaimable cache not counted as used)\x1b[0m")
+}
+
+fn show_disks() {
+    heading("Disks")
+    // `df -Pk` is POSIX: fixed 6 columns, 1024-byte blocks, same on macOS and Linux.
+    // `df -h` is not, and the pseudo-filesystems get classified out in facts.wyn
+    // rather than by a `grep -v devfs | grep -v map` chain.
+    var df = source(["df -Pk"])
+    if df.len() == 0 {
+        missing("Disks", "no df command")
+        return
+    }
+    var shown = 0
+    for raw in df.lines() {
+        var line = ("" + raw).trim()
+        var w = line.words()
+        if w.len() < 6 { continue }
+        var device = "" + w[0]
+        var mount = "" + w[w.len() - 1]
+        if facts.num("" + w[1]) < 0 { continue }
+        if not facts.is_real_fs(device, mount) { continue }
+        // Columns are read off the row already in hand; df_total_kb(df, mount) & co.
+        // would each rescan the whole `df` output to find this same line again.
+        var total = facts.num("" + w[1])
+        var used = facts.num("" + w[2])
+        var percent = facts.num(("" + w[4]).replace("%", ""))
+        if total < 0 or used < 0 { continue }
+        fact(mount, "[${bar(percent, 18)}] ${percent}%  ${facts.human_kb(used)} / ${facts.human_kb(total)}")
+        shown += 1
+    }
+    if shown == 0 { missing("Disks", "df returned no real filesystems") }
+}
+
+fn show_processes() {
+    heading("Processes")
+    // No `-r`: on macOS that flag sorts by CPU, but on Linux procps it FILTERS to
+    // running-only, which on an idle box matches nothing -- the first Linux run of this
+    // app printed a header and no processes because of it. The ranking is done in
+    // facts.ps_rank instead, which behaves the same on every platform and is tested.
+    var ps = source(["ps -eo pid,pcpu,pmem,rss,comm"])
+    if ps.len() == 0 {
+        missing("Top CPU", "no ps command \x1b[90m(minimal containers often omit it)\x1b[0m")
+        return
+    }
+    var rows = facts.ps_rows(ps)
+    // `ps` can exist and still answer with nothing but a header -- inside a container
+    // with a hidden PID namespace, for instance. "0 processes" is never true of a
+    // machine running this program, so it is a failed measurement, not a reading.
+    if rows == 0 {
+        missing("Top CPU", "ps returned no process rows \x1b[90m(restricted PID namespace?)\x1b[0m")
+        return
+    }
+    fact("Total", "${rows} processes")
+    print("")
+    print("      \x1b[1m${"PID".pad_left(7, " ")}  ${"CPU%".pad_left(5, " ")}  ${"RSS".pad_left(9, " ")}  COMMAND\x1b[0m")
+    var limit = 8
+    if rows < limit { limit = rows }
+    // Rank the whole table in one pass, then take each row once. Ranking per position
+    // and then reading each column separately rescanned the `ps` text about five times
+    // per process -- with 650 processes that made this report take 22 seconds.
+    for slot in facts.ps_top(ps, limit).words() {
+        var line = facts.ps_row(ps, facts.num("" + slot))
+        if line.len() == 0 { continue }
+        var pid = facts.field(line, 0)
+        var cpu = facts.field(line, 1)
+        var rss = facts.num(facts.field(line, 3))
+        var cmd = facts.basename(facts.ps_command(line))
+        if cmd.len() > 34 { cmd = cmd.substring(0, 34) }
+        print("      ${pid.pad_left(7, " ")}  ${cpu.pad_left(5, " ")}  ${facts.human_kb(rss).pad_left(9, " ")}  ${cmd}")
+    }
+}
+
+fn show_network() {
+    heading("Network")
+    // ifconfig on macOS, `ip` on modern Linux -- one parser reads both, by looking
+    // for the word "inet" rather than for a line shape.
+    var addrs = source(["ip -o -4 addr show", "ifconfig"])
+    fact_or("IPv4", facts.first_ipv4(addrs), "no ip or ifconfig command")
+
+    var links = source(["ip -o link show", "ifconfig"])
+    var names = facts.iface_names(links).words()
+    var listed = names.len()
+    if listed > 8 { listed = 8 }
+    var shown = names.slice(0, listed).join(" ")
+    if names.len() > listed { shown += " \x1b[90m... and ${names.len() - listed} more\x1b[0m" }
+    fact_or("Interfaces", shown, "no ip or ifconfig command")
+    fact_or("DNS", facts.nameservers(read_or_empty("/etc/resolv.conf")),
+        "/etc/resolv.conf absent \x1b[90m(macOS may use scutil instead)\x1b[0m")
 }
 
 fn main() {
     print("")
-    print("  \x1b[1;36m┌─────────────────────────────────────────────────────┐\x1b[0m")
-    print("  \x1b[1;36m│\x1b[0m              \x1b[1msysinfo\x1b[0m -- System Dashboard             \x1b[1;36m│\x1b[0m")
-    print("  \x1b[1;36m└─────────────────────────────────────────────────────┘\x1b[0m")
-    print("")
-
-    // Gather all system info concurrently
-    var data = []
-    var cmds = [
-        "uname -s", "uname -r", "uname -m", "hostname",
-        "uptime",
-        "sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo ?",
-        "sysctl -n machdep.cpu.brand_string 2>/dev/null || cat /proc/cpuinfo 2>/dev/null | grep 'model name' | head -1 | cut -d: -f2 || echo unknown",
-        "sysctl -n hw.memsize 2>/dev/null || grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2*1024}' || echo 0",
-        "df -Ph / | tail -1",
-        "ifconfig 2>/dev/null | grep 'inet ' | grep -v 127.0.0.1 | head -1 | awk '{print $2}'",
-        "curl -s --connect-timeout 2 ifconfig.me 2>/dev/null || echo N/A",
-        "whoami"
-    ]
-    var labels = [
-        "OS", "Kernel", "Arch", "Hostname",
-        "Uptime", "Cores", "CPU Model", "Memory",
-        "Disk", "Local IP", "Public IP", "User"
-    ]
-    var count = cmds.len()
-
-    for i in 0..count {
-        data.push(SysData { label: "", value: "" })
-    }
-
-    // Spawn all info gathering concurrently -- ~2s instead of ~5s
-    for i in 0..count {
-        spawn gather(cmds[i], data, i, labels[i])
-    }
-
-    Time.sleep(3000)
-
-    // Display
-    print("  \x1b[1;33m● System\x1b[0m")
-    print("    Hostname:  ${data[3].value}")
-    print("    OS:        ${data[0].value} ${data[1].value}")
-    print("    Arch:      ${data[2].value}")
-    print("    Uptime:    ${data[4].value}")
-    print("")
-
-    print("  \x1b[1;33m● CPU\x1b[0m")
-    print("    Model:     ${data[6].value}")
-    print("    Cores:     ${data[5].value}")
-    print("")
-
-    var mem_bytes = data[7].value.to_int()
-    var mem_gb = mem_bytes / 1073741824
-    print("  \x1b[1;33m● Memory\x1b[0m")
-    print("    Total:     ${mem_gb} GB")
-    print("")
-
-    // `df -Ph` pads its columns, and split_at(" ", n) returns "" on any run of
-    // more than one space - so this printed "used /  total ()" with every field
-    // blank. words() collapses whitespace runs, which is what diskmon and
-    // procwatch already use for the same reason.
-    var df = data[8].value
-    var cols = df.words()
-    var size = cols[1]
-    var used = cols[2]
-    var cap = cols[4]
-    print("  \x1b[1;33m● Disk\x1b[0m")
-    print("    Root (/):  ${used} used / ${size} total (${cap})")
-    print("")
-
-    print("  \x1b[1;33m● Network\x1b[0m")
-    print("    Local IP:  ${data[9].value}")
-    print("    Public IP: ${data[10].value}")
-    print("")
-
-    var shell = System.env("SHELL")
-    var home = System.env("HOME")
-    print("  \x1b[1;33m● Environment\x1b[0m")
-    print("    User:      ${data[11].value}")
-    print("    Shell:     ${shell}")
-    print("    Home:      ${home}")
+    print("  \x1b[1;36msysinfo\x1b[0m \x1b[90m-- system report; every unavailable fact says so\x1b[0m")
+    show_host()
+    show_cpu()
+    show_memory()
+    show_disks()
+    show_processes()
+    show_network()
     print("")
 }
