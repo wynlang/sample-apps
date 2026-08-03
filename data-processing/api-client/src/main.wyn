@@ -1,9 +1,28 @@
 // API Client -- exercises Http, Json, Encoding, Crypto, DateTime, StringBuilder
 // Fetches data from httpbin.org and processes it
+//
+// NOTE ON TESTING: this app has NO test suite, deliberately. Every line of it is a direct
+// call into a Wyn stdlib namespace (Http, Json, Encoding, Crypto, Csv, StringBuilder, Os)
+// with no logic of its own -- no parsing rule, no threshold, no classification, nothing
+// that could be wrong independently of the stdlib. A test here would either re-test the
+// standard library or assert that `Encoding.base64_encode` was called, which is not
+// coverage. The checks it makes ARE its test suite; what was missing was a truthful
+// verdict, added below.
+//
+// It also needs the network: `Http.get("https://httpbin.org/get")` returns an empty body
+// offline, so this program cannot pass on a machine with no egress. That is inherent to
+// what it demonstrates.
 
 fn main() {
     print("=== Wyn API Client ===")
     print("")
+
+    // `Test.assert` PRINTS a failure and CARRIES ON -- it does not exit and does not set
+    // the exit status. So this program used to print "=== All checks passed ===" after
+    // reporting "✗ Got origin IP", and exit 0, which is worse than failing: a CI job
+    // running it offline went green while every network check had failed. The failures are
+    // counted here and the verdict is derived from the count.
+    var failed = 0
     
     // 1. HTTP GET with JSON parsing
     print("[1] GET request with JSON parsing...")
@@ -12,12 +31,14 @@ fn main() {
     var origin = Json.get(doc, "origin")
     print("  Origin IP: ${origin}")
     Test.assert(origin.len() > 0, "Got origin IP")
+    if not (origin.len() > 0) { failed += 1 }
     
     // 2. Base64 auth header
     print("[2] Base64 encoding for auth...")
     var creds = Encoding.base64_encode("user:pass123")
     print("  Auth: Basic ${creds}")
     Test.assert_eq_str(Encoding.base64_decode(creds), "user:pass123", "Base64 roundtrip")
+    if not (Encoding.base64_decode(creds) == "user:pass123") { failed += 1 }
     
     // 3. SHA256 request signing
     print("[3] Request signing with HMAC...")
@@ -26,6 +47,7 @@ fn main() {
     var sig = Crypto.hmac_sha256("secret-key", payload)
     print("  Signature: ${sig}")
     Test.assert_eq_int(sig.len(), 64, "HMAC-SHA256 length")
+    if not (sig.len() == 64) { failed += 1 }
     
     // 4. Build JSON request body
     print("[4] Building JSON request...")
@@ -36,6 +58,7 @@ fn main() {
     var pretty: string = Json.to_pretty_string(req)
     print(pretty)
     Test.assert(pretty.contains("Wyn Language"), "Pretty JSON")
+    if not (pretty.contains("Wyn Language")) { failed += 1 }
     
     // 5. CSV parsing
     print("[5] CSV parsing...")
@@ -63,14 +86,18 @@ fn main() {
     StringBuilder.free(sb)
     
     Test.assert_eq_str(Csv.get_field(csv, 1, "lang"), "Wyn", "CSV field lookup")
+    if not (Csv.get_field(csv, 1, "lang") == "Wyn") { failed += 1 }
     Test.assert_eq_str(Csv.get_field(csv, 1, "year"), "2024", "CSV year")
+    if not (Csv.get_field(csv, 1, "year") == "2024") { failed += 1 }
     
     // 6. Timing
     var start = DateTime.millis()
     var hash = Crypto.sha256("benchmark data")
     var elapsed = DateTime.millis() - start
     var dur = DateTime.format_duration(elapsed)
-    print("[6] SHA256 in ${dur}")
+    print("[6] SHA256 in ${dur} -> ${hash.substring(0, 16)}...")
+    Test.assert_eq_int(hash.len(), 64, "SHA256 length")
+    if not (hash.len() == 64) { failed += 1 }
     
     // 7. System info
     var plat = Os.platform()
@@ -82,5 +109,11 @@ fn main() {
     print("    PID: ${pid}")
     
     print("")
-    print("=== All checks passed ===")
+    if failed == 0 {
+        print("=== All checks passed ===")
+    } else {
+        print("=== ${failed} check(s) FAILED ===")
+        print("    (offline? [1] needs https://httpbin.org to be reachable)")
+        System.exit(1)
+    }
 }
