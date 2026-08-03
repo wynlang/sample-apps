@@ -1,29 +1,30 @@
 // csv-analyzer -- read a real CSV, infer each column's type, profile it, print it aligned.
 //
-// The previous version was a "Student Grade Analyzer" with the five students HARDCODED in
-// the source, and its table was ragged because the name column was never padded:
+// The previous version was a "Student Grade Analyzer" with five students HARDCODED in the
+// source, and its table was ragged because the name column was never padded -- real output:
 //     Alice     85    92    78    85   B
 //     Bob     90    88    95    91   A
 //     Charlie     72    68    80    73   C
-// It also walked `content[idx]` a character at a time hunting for "\n", and it knew the
-// schema (name, math, sci, eng) at compile time - so it could analyze exactly one CSV:
+// It also walked `content[idx]` one character at a time hunting for "\n", and it knew the
+// schema (name, math, sci, eng) at compile time -- so it could analyze exactly one CSV:
 // the one already inside it.
 //
 // Rewritten as an actual CSV analyzer:
 //   * `.lines()` / `.split(",")` replace the hand-rolled character scan.
-//   * NO schema knowledge. `infer()` reads the values and returns `Kind { Int, Float,
-//     Text }`; `match` then picks statistics that make sense - min/max/mean/median for
-//     numbers, cardinality and top values for text - into one `struct Column`.
-//   * every column profiled CONCURRENTLY: `spawn` per column, joined by `await_all`.
-//   * every width computed from the widest cell and applied with `pad_right` (UTF-8
-//     aware), so nothing is ragged. Plus an 8-bucket histogram per numeric column.
+//   * NO schema knowledge. `infer()` reads the values and returns `Kind { Int, Float, Text }`;
+//     `match` then picks statistics that make sense -- min/max/mean/median for numbers,
+//     cardinality and top values for text -- into one `struct Column`.
+//   * every column is profiled CONCURRENTLY: one `spawn` each, joined by `await_all`.
+//   * every width is the widest cell, applied with `pad_right`/`pad_left` (both UTF-8 aware,
+//     so the rule and non-ASCII names line up); numeric columns align right and get an
+//     8-bucket histogram.
 //
 //   wyn run src/main.wyn [file.csv]
 
 enum Kind { Int, Float, Text }
 
 struct Column {
-    name: string, kind: Kind, top: string, distinct: int,
+    name: string, kind: Kind, facts: string,
     min: float, max: float, mean: float, median: float, hist: [int]
 }
 
@@ -41,22 +42,6 @@ fn f2(x: float) -> string {
 }
 fn num(k: Kind, x: float) -> string => match k { Kind.Int => "${x.to_int()}", _ => f2(x) }
 
-// One column's values: a stride through the flat cell array.
-fn column(cells: [string], ncol: int, j: int) -> [string] {
-    var out = []
-    var i = j
-    while i < cells.len() { out.push("" + cells[i])  i = i + ncol }
-    return out
-}
-
-// One aligned row. The last cell is left unpadded, so no line has trailing space.
-fn row(vals: [string], widths: [int]) -> string {
-    var out = []
-    var n = vals.len()
-    for j in 0..n { out.push(("" + vals[j]).pad_right(widths[j] * (n - 1 - j).min(1), " ")) }
-    return out.join("  ")
-}
-
 // 2 = looks like a float, 1 = looks like an int, 0 = anything else.
 fn shape(v: string) -> int {
     var digits = 0
@@ -71,7 +56,10 @@ fn shape(v: string) -> int {
     return dots + 1
 }
 
-// The type is whatever EVERY value agrees to be - no schema, no configuration.
+// A column's type is whatever EVERY value in it agrees to be. No schema, no configuration.
+// (Written as a loop, not `vals.map((v) => shape(v))`: a lambda that calls a USER-DEFINED
+// function is emitted above that function's forward declaration in the generated C ->
+// "call to undeclared function". Lambdas over builtin methods, as below, are fine.)
 fn infer(vals: [string]) -> Kind {
     var shapes = []
     for v in vals { shapes.push(shape(v)) }
@@ -80,16 +68,12 @@ fn infer(vals: [string]) -> Kind {
     return Kind.Float
 }
 
-fn distinct_of(vals: [string]) -> int {
-    var seen = HashMap.new()
-    for v in vals { seen.insert_int(v, 1) }
-    return seen.keys().len()
-}
-
-// The two commonest values, as "Berlin 4x, Austin 3x".
-fn top_values(vals: [string]) -> string {
+// What there is to say about a text column: how many distinct values, and the top two.
+fn text_facts(vals: [string]) -> string {
     var counts = HashMap.new()
     for v in vals { counts.insert_int(v, counts.get_int(v) + 1) }
+    var distinct = counts.keys().len()
+    if distinct == vals.len() { return "distinct ${distinct} -- every value unique" }
     var out = []
     for round in 0..2 {
         var best = ""
@@ -99,15 +83,38 @@ fn top_values(vals: [string]) -> string {
         out.push("${best} ${n}x")
         counts.insert_int(best, 0)
     }
-    return out.join(", ")
+    return "distinct ${distinct}, top: ${out.join(", ")}"
 }
 
-// `top`/`distinct` come from the caller: HashMap is not concurrency-safe in the current
-// runtime, so the spawned half of the work stays purely numeric.
-fn profile(name: string, top: string, distinct: int, vals: [string]) -> Column {
-    var c = Column { name: name, kind: infer(vals), top: top, distinct: distinct,
+// One column's values: a stride through the flat cell array.
+fn values_of(cells: [string], ncol: int, j: int) -> [string] {
+    var out = []
+    var i = j
+    while i < cells.len() { out.push("" + cells[i])  i = i + ncol }
+    return out
+}
+
+// One aligned row: pad_left for the numeric columns, pad_right for the rest (and never the
+// last one, so no line carries trailing space).
+fn row(vals: [string], widths: [int], right: [int]) -> string {
+    var out = []
+    for j in 0..vals.len() {
+        var v = "" + vals[j]
+        if right[j] == 1 { v = v.pad_left(widths[j], " ") }
+        else if j < vals.len() - 1 { v = v.pad_right(widths[j], " ") }
+        out.push(v)
+    }
+    return out.join("  ")
+}
+
+// The statistics. `facts` arrives pre-computed for text columns (HashMap is not
+// concurrency-safe in the current runtime) so the spawned half stays purely numeric.
+fn profile(name: string, facts: string, vals: [string]) -> Column {
+    var c = Column { name: name, kind: infer(vals), facts: facts,
         min: 0.0, max: 0.0, mean: 0.0, median: 0.0, hist: [0, 0, 0, 0, 0, 0, 0, 0] }
     if not numeric(c.kind) { return c }
+    // A loop, not `vals.map((v) => v.to_float())`: a float-returning lambda in `.map()`
+    // yields [1, 1, 1] on this compiler -- silently wrong rather than a compile error.
     var nums = []
     for v in vals { nums.push(v.to_float()) }
     var s = nums.sorted()
@@ -120,24 +127,28 @@ fn profile(name: string, top: string, distinct: int, vals: [string]) -> Column {
     var span = c.max - c.min
     if span == 0.0 { span = 1.0 }
     for x in nums { c.hist[((x - c.min) / span * 7.99).to_int()] += 1 }
+    c.facts = "min ${num(c.kind, c.min)}  max ${num(c.kind, c.max)}  mean ${f2(c.mean)}  median ${f2(c.median)}"
     return c
 }
 
 fn main() {
     print("\x1b[1;36m═══ csv analyzer ═══\x1b[0m")
 
-    // The argument, or data.csv found from the app dir, the repo root, or src/.
-    var path = "data.csv"
+    // The argument, or the bundled data.csv, found from the app dir, src/, or the repo root.
+    var path = ""
     var args = System.args()
     if args.len() > 1 { path = "" + args[1] }
-    else if File.exists("data-processing/csv-analyzer/data.csv") == 1 { path = "data-processing/csv-analyzer/data.csv" }
-    else if File.exists("../data.csv") == 1 { path = "../data.csv" }
-    if File.exists(path) == 0 {
-        print("  \x1b[31mno such file:\x1b[0m ${path}   (usage: wyn run src/main.wyn [file.csv])")
+    else {
+        for cand in ["data.csv", "../data.csv", "data-processing/csv-analyzer/data.csv"] {
+            if File.exists(cand) == 1 { path = "" + cand  break }
+        }
+    }
+    if path == "" or File.exists(path) == 0 {
+        print("  \x1b[31mno such file:\x1b[0m ${path}  (usage: wyn run src/main.wyn [file.csv])")
         return
     }
 
-    // The header names the columns; each later row appends its cells to one flat array.
+    // The header names the columns; every later row appends its cells to one flat array.
     var header = []
     var cells = []
     var rows = 0
@@ -156,40 +167,43 @@ fn main() {
     // Width = widest cell in the column. Profiling = one spawn each, joined by await_all.
     var futs = []
     var widths = []
-    var upper = []
-    var rule = []
     for j in 0..ncol {
-        var vals = column(cells, ncol, j)
+        var vals = values_of(cells, ncol, j)
         var name = "" + header[j]
-        var w = name.len()
-        for v in vals { if v.len() > w { w = v.len() } }
-        widths.push(w)
-        upper.push(name.upper())
-        rule.push("─".repeat(w))
-        futs.push(spawn profile(name, top_values(vals), distinct_of(vals), vals))
+        var lens = vals.map((v) => v.len())
+        lens.push(name.len())
+        widths.push(lens.max())
+        futs.push(spawn profile(name, text_facts(vals), vals))
     }
     var cols = await_all(futs)
 
+    // The inferred type also decides the alignment: numbers right, text left.
+    var right = []
+    var head = []
+    var rule = []
+    for j in 0..ncol {
+        var r = 0
+        if numeric(cols[j].kind) { r = 1 }
+        right.push(r)
+        head.push(("" + cols[j].name).upper())
+        rule.push("─".repeat(widths[j]))
+    }
+
     print("")
-    print("  \x1b[1m${row(upper, widths)}\x1b[0m")
+    print("  \x1b[1m${row(head, widths, right)}\x1b[0m")
     print("  \x1b[90m${rule.join("  ")}\x1b[0m")
     for i in 0..rows {
         var cs = []
         for j in 0..ncol { cs.push("" + cells[i * ncol + j]) }
-        print("  ${row(cs, widths)}")
+        print("  ${row(cs, widths, right)}")
     }
 
-    // Which facts a column gets is decided by its inferred type - and a numeric column
-    // also gets its distribution, 8 equal buckets from min to max.
+    // Numeric columns also get their distribution: 8 equal buckets from min to max.
     print("")
     print("  \x1b[1mcolumn profile\x1b[0m")
     for c in cols {
-        var facts = "distinct ${c.distinct}, top: ${"" + c.top}"
-        if numeric(c.kind) {
-            facts = "min ${num(c.kind, c.min)}  max ${num(c.kind, c.max)}  mean ${f2(c.mean)}  median ${f2(c.median)}"
-        }
         print("")
-        print("  \x1b[1m${("" + c.name).pad_right(12, " ")}\x1b[0m \x1b[36m${kname(c.kind).pad_right(6, " ")}\x1b[0m ${facts}")
+        print("  \x1b[1m${("" + c.name).pad_right(14, " ")}\x1b[0m \x1b[36m${kname(c.kind).pad_right(6, " ")}\x1b[0m ${"" + c.facts}")
         if not numeric(c.kind) or c.min == c.max { continue }
         var peak = c.hist.max()
         for b in 0..8 {
