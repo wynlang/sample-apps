@@ -15,24 +15,22 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-WYN="${WYN:-$WYN_ROOT/wyn}"
-if [ ! -x "$WYN" ]; then
-    echo "SKIP: no wyn binary (set WYN or WYN_ROOT)"
-    exit 0
-fi
+# Compiler lookup (SKIPs cleanly when there is none) and the bounded runner that
+# makes a hang impossible - see tests/lib_ui_test.sh for why both are shared.
+. tests/lib_ui_test.sh
+ui_test_init
 
 PASS=0
 FAIL=0
 ok(){ echo "  ok    $1"; PASS=$((PASS+1)); }
 bad(){ echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 
-# A stale src/ui.wyn.out silently ignores every edit to ui.wyn or an imported
-# module - it is what made five mutation tests falsely survive while this feature
-# was being built. Delete it before every run, not once.
+# ui_run deletes the stale src/ui.wyn.out before each run (a stale one silently
+# ignores every edit to ui.wyn or an imported module - it is what made five
+# mutation tests falsely survive while this feature was being built) and bounds
+# the run so it cannot hang.
 run_script() {
-    rm -f src/ui.wyn.out src/ui.wyn.c
-    SDL_VIDEODRIVER=dummy WYNCANVAS_FRAMES=3 WYNCANVAS_SCRIPT="$1" \
-        "$WYN" run src/ui.wyn 2>&1 | grep -E '^  (screen|selat|marquee)'
+    ui_run 3 "$1" | grep -E '^  (screen|selat|marquee)|^  TIMEOUT'
 }
 
 echo "=== Running marching-ants test ==="
@@ -113,6 +111,13 @@ if [ -n "$EDGE" ] && [ -n "$MID" ] && [ "$EDGE" -gt "$MID" ]; then
   ok "a rect selection is outlined on its edge, not through its middle"
 else
   bad "rect edge=${EDGE:-none} mid=${MID:-none}"; printf '%s\n' "$OUT" | sed 's/^/        /'
+fi
+
+# A killed run is a failure even if no assertion above happened to notice.
+TIMEOUTS=$(ui_test_timeouts)
+if [ "$TIMEOUTS" -gt 0 ]; then
+  echo "  FAIL  $TIMEOUTS run(s) were killed for exceeding the time bound"
+  FAIL=$((FAIL+TIMEOUTS))
 fi
 
 echo ""

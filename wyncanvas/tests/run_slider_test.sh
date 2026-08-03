@@ -18,21 +18,24 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-WYN="${WYN:-$WYN_ROOT/wyn}"
-if [ ! -x "$WYN" ]; then
-    echo "SKIP: no wyn binary (set WYN or WYN_ROOT)"
-    exit 0
-fi
+# Compiler lookup (SKIPs cleanly when there is none) and the bounded runner that
+# makes a hang impossible - see tests/lib_ui_test.sh for why both are shared.
+#
+# THIS SUITE IS WHY THE BOUND EXISTS. It is the longest of the four - 18 separate
+# runs of the editor, three of them at WYNCANVAS_FRAMES=8 - so it is both the one
+# most likely to be sitting on a genuinely stuck run and the one where "it is
+# still going" is hardest to tell apart from "it will never stop".
+. tests/lib_ui_test.sh
+ui_test_init
 
 PASS=0; FAIL=0
 ok(){ echo "  ok    $1"; PASS=$((PASS+1)); }
 bad(){ echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 
-# A stale src/ui.wyn.out ignores every edit to ui.wyn or an imported module.
+# ui_run deletes the stale src/ui.wyn.out (which would ignore every edit to
+# ui.wyn or an imported module) and bounds the run so it cannot hang.
 run_script() {
-    rm -f src/ui.wyn.out src/ui.wyn.c
-    SDL_VIDEODRIVER=dummy WYNCANVAS_FRAMES=3 WYNCANVAS_SCRIPT="$1" \
-        "$WYN" run src/ui.wyn 2>&1 | grep -E '^  (winpx|sliderx|strength)'
+    ui_run 3 "$1" | grep -E '^  (winpx|sliderx|strength)|^  TIMEOUT'
 }
 
 echo "=== Running filter-strength slider test ==="
@@ -126,10 +129,8 @@ fi
 # that merely differ would also be satisfied by a mapping that scrambled them.
 STROKE='brush:6:1.0:1.0,hsv:0.0:0.0:1.0,stroke:32:10:32:54'
 probe_blur() {
-    rm -f src/ui.wyn.out src/ui.wyn.c
-    SDL_VIDEODRIVER=dummy WYNCANVAS_FRAMES=8 \
-        WYNCANVAS_SCRIPT="$STROKE,strength:$1,filter:blur,px:40:32" \
-        "$WYN" run src/ui.wyn 2>&1 | sed -n 's/.*px(40,32)=\([0-9.]*\).*/\1/p'
+    ui_run 8 "$STROKE,strength:$1,filter:blur,px:40:32" \
+        | sed -n 's/.*px(40,32)=\([0-9.]*\).*/\1/p'
 }
 B0=$(probe_blur 0)
 B100=$(probe_blur 100)
@@ -163,6 +164,15 @@ for S in 0 50 100 200; do
     bad "a filter produced no output at ${S}%"
   fi
 done
+
+# A killed run is a failure even if no assertion above happened to notice - the
+# "every filter runs" checks in particular only require SOME output, so a run that
+# printed a line and then wedged would otherwise read as a pass.
+TIMEOUTS=$(ui_test_timeouts)
+if [ "$TIMEOUTS" -gt 0 ]; then
+  echo "  FAIL  $TIMEOUTS run(s) were killed for exceeding the time bound"
+  FAIL=$((FAIL+TIMEOUTS))
+fi
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

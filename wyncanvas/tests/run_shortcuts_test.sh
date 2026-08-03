@@ -40,26 +40,23 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-WYN="${WYN:-$WYN_ROOT/wyn}"
-if [ ! -x "$WYN" ]; then
-    echo "SKIP: no wyn binary (set WYN or WYN_ROOT)"
-    exit 0
-fi
+# Compiler lookup (SKIPs cleanly when there is none) and the bounded runner that
+# makes a hang impossible - see tests/lib_ui_test.sh for why both are shared.
+. tests/lib_ui_test.sh
+ui_test_init
 
 PASS=0
 FAIL=0
 
 # Run the editor with a script and echo its shortcut trace.
 #
-# The generated binary is REMOVED first. `wyn run` caches the executable next to
-# the source as src/ui.wyn.out, and a stale one silently ignores every edit to
+# ui_run REMOVES the generated binary first. `wyn run` caches the executable next
+# to the source as src/ui.wyn.out, and a stale one silently ignores every edit to
 # ui.wyn or to an imported module - which made five mutation tests falsely
 # "survive" while this feature was being written. Deleting it is not paranoia; it
 # is the difference between testing this build and testing an old one.
 run_script() {
-    rm -f src/ui.wyn.out src/ui.wyn.c
-    SDL_VIDEODRIVER=dummy WYNCANVAS_FRAMES=3 WYNCANVAS_SCRIPT="$1" \
-        "$WYN" run src/ui.wyn 2>&1 | grep '^  key '
+    ui_run 3 "$1" | grep -E '^  key |^  TIMEOUT'
 }
 
 # check <label> <haystack> <needle>
@@ -129,6 +126,13 @@ check "] grows it back"            "$OUT" "key rbracket -> tool=brush sel=none m
 # ---- an unbound key is inert, not a crash ----------------------------------
 OUT=$(run_script 'key:zzz')
 check "an unknown key name is reported" "$OUT" "unknown key"
+
+# A killed run is a failure even if no assertion above happened to notice.
+TIMEOUTS=$(ui_test_timeouts)
+if [ "$TIMEOUTS" -gt 0 ]; then
+    echo "  FAIL  $TIMEOUTS run(s) were killed for exceeding the time bound"
+    FAIL=$((FAIL + TIMEOUTS))
+fi
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then
