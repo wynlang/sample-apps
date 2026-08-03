@@ -1,0 +1,194 @@
+// Tests for gitdash's porcelain parsing.
+//
+// The fixtures are real `git status --porcelain -b` output, captured from throwaway
+// repositories put into each state deliberately. That is the point of testing this way:
+// getting one repo to hold a staged file, a conflicted file, a rename and an untracked
+// directory all at once -- and keeping it there while you eyeball the display -- is
+// fiddly and unrepeatable. Asserting against the text is neither.
+
+import porcelain
+
+// A repo with one file modified both staged and unstaged, a staged rename with spaces in
+// both names, an untracked file and an untracked directory. Captured verbatim.
+fn mixed() -> string {
+    return "## main...origin/main [ahead 2, behind 1]\n" +
+        "MM a.txt\n" +
+        "R  \"b file.txt\" -> \"renamed file.txt\"\n" +
+        "?? c.txt\n" +
+        "?? d/\n"
+}
+
+fn conflicted() -> string {
+    return "## main...origin/main\n" +
+        "UU both_modified.txt\n" +
+        "AA both_added.txt\n" +
+        "DU deleted_by_us.txt\n" +
+        "M  staged.txt\n"
+}
+
+fn clean() -> string { return "## main...origin/main\n" }
+
+// ---- status codes ------------------------------------------------------
+
+test "the status field is two fixed-width characters, and the path may contain spaces" {
+    // Splitting on whitespace to find the code would break on "b file.txt".
+    assert_eq(porcelain.code("MM a.txt"), "MM")
+    assert_eq(porcelain.code(" M spaced name.txt"), " M")
+    assert_eq(porcelain.code("?"), "")
+    assert_eq(porcelain.code(""), "")
+}
+
+test "a rename shows the new name, and quotes are stripped" {
+    // git prints `old -> new` and quotes paths containing spaces. The new name is the
+    // one that exists now, and the quotes are noise.
+    assert_eq(porcelain.path("R  \"b file.txt\" -> \"renamed file.txt\""), "renamed file.txt")
+    assert_eq(porcelain.path("MM a.txt"), "a.txt")
+    assert_eq(porcelain.path("?? d/"), "d/")
+    assert_eq(porcelain.path("?? \"quoted name.txt\""), "quoted name.txt")
+}
+
+// ---- classification ----------------------------------------------------
+
+test "every unmerged code pair is recognised as a conflict" {
+    // These seven pairs are exactly git's documented unmerged states -- listed, not
+    // guessed at.
+    assert(porcelain.is_conflict("UU"))
+    assert(porcelain.is_conflict("AA"))
+    assert(porcelain.is_conflict("DD"))
+    assert(porcelain.is_conflict("AU"))
+    assert(porcelain.is_conflict("UA"))
+    assert(porcelain.is_conflict("DU"))
+    assert(porcelain.is_conflict("UD"))
+}
+
+test "ordinary codes are not conflicts" {
+    assert(not porcelain.is_conflict("MM"))
+    assert(not porcelain.is_conflict("M "))
+    assert(not porcelain.is_conflict("??"))
+    assert(not porcelain.is_conflict("R "))
+}
+
+test "a conflict is a conflict, NOT staged-and-modified" {
+    // THE bug in the old gitdash: its rule was "contains ? => untracked, else col 0 is
+    // staged and col 1 is modified", so "UU" was counted as staged AND modified and the
+    // word conflict never appeared -- for the single most important thing a git
+    // dashboard can tell you.
+    assert_eq(porcelain.classify("UU both.txt"), porcelain.bucket_conflict())
+    assert_eq(porcelain.classify("AA both.txt"), porcelain.bucket_conflict())
+    assert(porcelain.classify("UU both.txt") != porcelain.bucket_both())
+}
+
+test "staged, unstaged and both are told apart" {
+    assert_eq(porcelain.classify("M  staged.txt"), porcelain.bucket_staged())
+    assert_eq(porcelain.classify("A  added.txt"), porcelain.bucket_staged())
+    assert_eq(porcelain.classify("R  old -> new"), porcelain.bucket_staged())
+    assert_eq(porcelain.classify(" M dirty.txt"), porcelain.bucket_modified())
+    assert_eq(porcelain.classify(" D gone.txt"), porcelain.bucket_modified())
+    assert_eq(porcelain.classify("MM both.txt"), porcelain.bucket_both())
+}
+
+test "untracked and ignored are distinct from each other and from modified" {
+    assert_eq(porcelain.classify("?? new.txt"), porcelain.bucket_untracked())
+    assert_eq(porcelain.classify("!! build/"), porcelain.bucket_ignored())
+}
+
+// ---- counting ----------------------------------------------------------
+
+test "a file staged AND modified counts in both buckets but is one change" {
+    // "MM a.txt" really is in both states, so both counters should see it -- but the
+    // change total must not double-count it.
+    assert_eq(porcelain.count(mixed(), porcelain.bucket_staged()), 2)
+    assert_eq(porcelain.count(mixed(), porcelain.bucket_modified()), 1)
+    assert_eq(porcelain.count(mixed(), porcelain.bucket_untracked()), 2)
+    assert_eq(porcelain.count_changes(mixed()), 4)
+}
+
+test "conflicts are counted as conflicts and not swept into the other buckets" {
+    assert_eq(porcelain.count(conflicted(), porcelain.bucket_conflict()), 3)
+    assert_eq(porcelain.count(conflicted(), porcelain.bucket_staged()), 1)
+    assert_eq(porcelain.count(conflicted(), porcelain.bucket_modified()), 0)
+    assert_eq(porcelain.count_changes(conflicted()), 4)
+}
+
+test "the branch header is never counted as a changed file" {
+    // "## main..." starts with a character pair that would otherwise classify.
+    assert_eq(porcelain.count_changes(clean()), 0)
+    assert_eq(porcelain.count(clean(), porcelain.bucket_staged()), 0)
+    assert_eq(porcelain.count_changes(""), 0)
+}
+
+test "ignored files are not changes" {
+    var s = "## main\n!! build/\n!! .DS_Store\n M real.txt\n"
+    assert_eq(porcelain.count_changes(s), 1)
+    assert_eq(porcelain.count(s, porcelain.bucket_ignored()), 2)
+}
+
+// ---- branch and divergence --------------------------------------------
+
+test "branch name is read from the header, without upstream or tracking noise" {
+    assert_eq(porcelain.branch(mixed()), "main")
+    assert_eq(porcelain.branch("## feature/long-name...origin/feature/long-name\n"), "feature/long-name")
+    // No upstream configured at all -- still a perfectly good branch name.
+    assert_eq(porcelain.branch("## local-only\n"), "local-only")
+}
+
+test "a detached HEAD reports as detached, not as an empty branch name" {
+    // `git branch --show-current` prints NOTHING on a detached HEAD, which is why the
+    // old gitdash showed a blank branch. The porcelain header always says something.
+    assert_eq(porcelain.branch("## HEAD (no branch)\n"), "HEAD (detached)")
+}
+
+test "a repository with no commits keeps git's own wording" {
+    // A fresh `git init` reports "## No commits yet on main". It is a real state, and
+    // passing the phrase through is clearer than blanking the field.
+    assert_eq(porcelain.branch("## No commits yet on main\n"), "No commits yet on main")
+    assert_eq(porcelain.upstream("## No commits yet on main\n"), "")
+    assert_eq(porcelain.divergence("## No commits yet on main\n", "ahead"), -1)
+}
+
+test "upstream is reported when configured and empty when not" {
+    // "no upstream" and "in sync with upstream" are different states.
+    assert_eq(porcelain.upstream(mixed()), "origin/main")
+    assert_eq(porcelain.upstream("## local-only\n"), "")
+}
+
+test "ahead and behind are parsed from the tracking bracket" {
+    assert_eq(porcelain.divergence(mixed(), "ahead"), 2)
+    assert_eq(porcelain.divergence(mixed(), "behind"), 1)
+}
+
+test "one-sided divergence reports zero for the other side, not garbage" {
+    var ahead_only = "## main...origin/main [ahead 3]\n"
+    assert_eq(porcelain.divergence(ahead_only, "ahead"), 3)
+    assert_eq(porcelain.divergence(ahead_only, "behind"), 0)
+    var behind_only = "## main...origin/main [behind 7]\n"
+    assert_eq(porcelain.divergence(behind_only, "behind"), 7)
+    assert_eq(porcelain.divergence(behind_only, "ahead"), 0)
+}
+
+test "level with upstream is 0, but having NO upstream is -1" {
+    // The display must not say "up to date with remote" when there is no remote.
+    assert_eq(porcelain.divergence(clean(), "ahead"), 0)
+    assert_eq(porcelain.divergence(clean(), "behind"), 0)
+    assert_eq(porcelain.divergence("## local-only\n", "ahead"), -1)
+    assert_eq(porcelain.divergence("## local-only\n", "behind"), -1)
+}
+
+test "num refuses non-numeric text instead of panicking" {
+    // to_int() panics on bad input, so it is only ever reached through num().
+    assert_eq(porcelain.num("42"), 42)
+    assert_eq(porcelain.num(""), -1)
+    assert_eq(porcelain.num("x"), -1)
+}
+
+// ---- log ---------------------------------------------------------------
+
+test "log lines are counted, so a young repo is not an error" {
+    var log = "4282cd4 (HEAD -> main) third\n9a1b2c3 second\nabc1234 first\n"
+    assert_eq(porcelain.log_count(log), 3)
+    assert_eq(porcelain.log_line(log, 1), "4282cd4 (HEAD -> main) third")
+    assert_eq(porcelain.log_line(log, 3), "abc1234 first")
+    // Asking past the end is empty, not a crash -- a fresh repo has one commit or none.
+    assert_eq(porcelain.log_line(log, 9), "")
+    assert_eq(porcelain.log_count(""), 0)
+}

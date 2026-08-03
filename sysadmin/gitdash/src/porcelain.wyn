@@ -1,0 +1,224 @@
+// porcelain.wyn -- parsing `git status --porcelain` and friends.
+//
+// Kept apart from the printing so it can be tested against captured git output rather
+// than by running the app inside a repo in a particular state. Getting a repo into
+// "one file staged, another with a conflict, a rename, and an untracked directory" to
+// eyeball the display is fiddly and unrepeatable; asserting on the fixture below is
+// neither.
+//
+// `git status --porcelain` is a stable, documented, machine-readable format -- that is
+// what `--porcelain` means, as against `git status`'s human output which changes between
+// versions and with locale. Each line is:
+//
+//     XY <path>
+//
+// X is the state of the INDEX (staged), Y the state of the WORK TREE (unstaged), and
+// a space in either position means "unchanged there".
+//
+//     "M " staged modification        " M" unstaged modification
+//     "MM" both                       "A " newly added, staged
+//     "R " staged rename              "??" untracked        "!!" ignored
+//     "UU" "AA" "DD" "AU" "UA" "DU" "UD"  -- UNMERGED, i.e. a conflict
+//
+// That last row is the interesting one. The old gitdash classified every line with the
+// rule "if it contains ? it is untracked, otherwise column 0 means staged and column 1
+// means modified" -- so a conflicted file was silently counted as staged *and* modified
+// and the word "conflict" never appeared. A merge conflict is the single most important
+// thing a git dashboard can tell you, and it was the one state it could not express.
+
+// Buckets, as ints so this module exports no enum (exported enums do not currently
+// survive codegen across a module boundary).
+export fn bucket_untracked() -> int => 1
+export fn bucket_conflict() -> int => 2
+export fn bucket_staged() -> int => 3
+export fn bucket_modified() -> int => 4
+export fn bucket_both() -> int => 5
+export fn bucket_ignored() -> int => 6
+export fn bucket_none() -> int => 0
+
+// The two status characters of a porcelain line, or "" if the line is too short to have
+// them. Note the path is NOT trimmed off by splitting on whitespace: a path may contain
+// spaces, and the status field is fixed-width by specification.
+export fn code(line: string) -> string {
+    if line.len() < 2 { return "" }
+    return line.substring(0, 2)
+}
+
+// The path, which begins at column 3. Quoted when it contains unusual characters, and
+// for a rename it is "old -> new" -- see `path` below.
+export fn raw_path(line: string) -> string {
+    if line.len() < 4 { return "" }
+    return line.substring(3, line.len()).trim()
+}
+
+// The path a user cares about. For a rename git prints `old -> new`; the new name is the
+// one that now exists, so that is what gets shown. Quotes are stripped: git quotes paths
+// containing spaces or non-ASCII, and printing the quotes back is noise.
+export fn path(line: string) -> string {
+    var p = raw_path(line)
+    var arrow = p.index_of(" -> ")
+    if arrow >= 0 { p = p.substring(arrow + 4, p.len()) }
+    if p.len() >= 2 and p.starts_with("\"") and p.ends_with("\"") {
+        return p.substring(1, p.len() - 1)
+    }
+    return p
+}
+
+// Is this an unmerged (conflicted) line? Per git's documentation the unmerged states are
+// exactly these seven code pairs -- not "anything unusual", which is why they are listed
+// rather than guessed at.
+export fn is_conflict(c: string) -> bool {
+    if c == "DD" or c == "AU" or c == "UD" or c == "UA" { return true }
+    if c == "DU" or c == "AA" or c == "UU" { return true }
+    return false
+}
+
+// Which bucket a line belongs in. ONE function returning ONE bucket, so a line cannot be
+// counted twice (the old version incremented `staged` and `modified` from separate `if`s
+// and had no way to represent a conflict at all).
+export fn classify(line: string) -> int {
+    var c = code(line)
+    if c.len() < 2 { return bucket_none() }
+    if c == "??" { return bucket_untracked() }
+    if c == "!!" { return bucket_ignored() }
+    // Conflicts are checked BEFORE the staged/modified split, because their code pairs
+    // (e.g. "AA", "UU") otherwise look exactly like "changed in both index and tree".
+    if is_conflict(c) { return bucket_conflict() }
+    var x = c.substring(0, 1)
+    var y = c.substring(1, 2)
+    var staged = x != " " and x != "?"
+    var dirty = y != " " and y != "?"
+    if staged and dirty { return bucket_both() }
+    if staged { return bucket_staged() }
+    if dirty { return bucket_modified() }
+    return bucket_none()
+}
+
+// How many lines fall in `want`. "Both" counts towards staged AND modified, because the
+// file genuinely is in both states -- but it is ONE line, so the totals are derived here
+// rather than by incrementing counters at the parse site.
+export fn count(status: string, want: int) -> int {
+    var n = 0
+    for raw in status.lines() {
+        var line = "" + raw
+        if line.starts_with("##") { continue }
+        var b = classify(line)
+        if b == bucket_none() { continue }
+        if b == want { n += 1 }
+        else if b == bucket_both() and (want == bucket_staged() or want == bucket_modified()) { n += 1 }
+    }
+    return n
+}
+
+// Every line that is a change of some kind, ignoring the branch header and ignored
+// files. Counted from the same classification the display uses, so the summary can never
+// disagree with the rows above it.
+export fn count_changes(status: string) -> int {
+    var n = 0
+    for raw in status.lines() {
+        var line = "" + raw
+        if line.starts_with("##") { continue }
+        var b = classify(line)
+        if b == bucket_none() or b == bucket_ignored() { continue }
+        n += 1
+    }
+    return n
+}
+
+// ---------------------------------------------------------------- branch header
+
+// `git status --porcelain -b` prefixes a "## " line, which is worth using because it
+// gives the branch AND its divergence in the same call, and it is populated on a
+// detached HEAD too -- where `git branch --show-current` prints nothing at all and the
+// old gitdash therefore displayed an empty branch name.
+//
+//   "## main...origin/main [ahead 2, behind 1]"
+//   "## main"                       (no upstream configured)
+//   "## HEAD (no branch)"           (detached)
+export fn branch(status: string) -> string {
+    for raw in status.lines() {
+        var line = "" + raw
+        if not line.starts_with("## ") { continue }
+        var rest = line.substring(3, line.len()).trim()
+        // Cut the tracking-info bracket first, then the ...upstream suffix.
+        var bracket = rest.index_of(" [")
+        if bracket > 0 { rest = rest.substring(0, bracket) }
+        var dots = rest.index_of("...")
+        if dots > 0 { rest = rest.substring(0, dots) }
+        if rest == "HEAD (no branch)" { return "HEAD (detached)" }
+        return rest.trim()
+    }
+    return ""
+}
+
+// The upstream branch, or "" when none is configured -- which is a real and common state
+// ("no upstream" is not "up to date", and the display must not conflate them).
+export fn upstream(status: string) -> string {
+    for raw in status.lines() {
+        var line = "" + raw
+        if not line.starts_with("## ") { continue }
+        var rest = line.substring(3, line.len()).trim()
+        var bracket = rest.index_of(" [")
+        if bracket > 0 { rest = rest.substring(0, bracket) }
+        var dots = rest.index_of("...")
+        if dots < 0 { return "" }
+        return rest.substring(dots + 3, rest.len()).trim()
+    }
+    return ""
+}
+
+// "ahead"/"behind" out of "## main...origin/main [ahead 2, behind 1]". -1 when there is
+// no upstream to compare against, 0 when there is one and we are level -- a distinction
+// the display needs, since "no upstream" and "in sync" are different situations.
+export fn divergence(status: string, word: string) -> int {
+    if upstream(status) == "" { return -1 }
+    for raw in status.lines() {
+        var line = "" + raw
+        if not line.starts_with("## ") { continue }
+        var at = line.index_of("[")
+        if at < 0 { return 0 }
+        var tail = line.substring(at, line.len())
+        var w = tail.index_of(word)
+        if w < 0 { return 0 }
+        // The number follows the word, and `words()` handles the trailing "," and "]".
+        var after = tail.substring(w + word.len(), tail.len()).replace(",", " ").replace("]", " ")
+        var parts = after.words()
+        if parts.len() < 1 { return 0 }
+        return num("" + parts[0])
+    }
+    return -1
+}
+
+// `to_int()` PANICS on non-numeric text, so nothing parses a number without this.
+export fn num(s: string) -> int {
+    var t = s.trim()
+    if t.len() == 0 { return -1 }
+    for i in 0..t.len() {
+        var c = t.substring(i, i + 1)
+        if c < "0" or c > "9" { return -1 }
+    }
+    return t.to_int()
+}
+
+// ---------------------------------------------------------------- log
+
+// `git log --oneline` lines, trimmed and with blanks dropped. Counted rather than
+// assumed, so "fewer commits than requested" (a brand-new repo) is not an error.
+export fn log_count(text: string) -> int {
+    var n = 0
+    for raw in text.lines() {
+        if ("" + raw).trim().len() > 0 { n += 1 }
+    }
+    return n
+}
+
+export fn log_line(text: string, n: int) -> string {
+    var i = 0
+    for raw in text.lines() {
+        var line = ("" + raw).trim()
+        if line.len() == 0 { continue }
+        i += 1
+        if i == n { return line }
+    }
+    return ""
+}
