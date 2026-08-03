@@ -6,12 +6,19 @@ A math library written in Wyn, compiled to a shared library, and called from Pyt
 
 ```bash
 cd sample-apps/python/math-lib
-wyn build main.wyn --python
+wyn build --python
 ```
 
 This generates:
-- `libmain.dylib` (macOS) / `libmain.so` (Linux) / `libmain.dll` (Windows)
-- `main.py` - Python wrapper with typed bindings
+- `libmath_lib.dylib` (macOS) / `.so` (Linux) / `.dll` (Windows)
+- `math_lib.py` - Python wrapper with typed bindings
+
+The module is `math_lib`, not `math-lib`: the project name is sanitized to a valid
+identifier, because `from math-lib import add` is a Python syntax error.
+
+Neither is committed. They are build output, and a stale 227KB `libmain.dylib` from an
+old compiler was in this repo for weeks - it would have kept working while the source
+drifted, which is the worst way for a demo to fail.
 
 ## Test
 
@@ -48,3 +55,26 @@ print(is_prime(17))         # True
 | `abs_val` | `(int) → int` | Absolute value |
 | `greet` | `(string) → string` | Greeting message |
 | `repeat_str` | `(string, int) → string` | Repeat string N times |
+
+## Why bother
+
+`add(2, 3)` through an FFI is *slower* than doing it in Python — the ctypes call overhead
+dwarfs the work. The case that pays is one call doing a lot of work:
+
+```bash
+wyn build --python --release && python3 bench.py
+```
+
+Collatz, longest chain below 300,000, identical answers (442) in both languages:
+
+| | time |
+|---|---|
+| wyn via ctypes | **43 ms** |
+| pure Python | 2090 ms |
+
+**48x** — with `--release`. At the default `-O0` it is 15x, so the flag is worth about 3x
+and `bench.py` says which build it measured rather than letting you guess.
+
+Honest limits: the wrapper is ctypes, not a CPython extension, so a per-element callback
+would be dominated by call overhead — PyO3 is the right tool for that shape. What Wyn has
+here is compile time and zero setup.

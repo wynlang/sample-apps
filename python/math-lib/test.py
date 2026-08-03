@@ -1,5 +1,5 @@
 """Test the Wyn-compiled math library from Python"""
-from main import (
+from math_lib import (
     add, subtract, multiply, divide, modulo,
     power, factorial, fibonacci, calc_gcd, is_prime,
     calc_clamp, calc_abs, greet, repeat_str

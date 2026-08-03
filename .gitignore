@@ -42,3 +42,13 @@ wyncanvas/wyn.lock
 # Python bytecode from the math-lib wrapper's generated module
 __pycache__/
 *.pyc
+
+# --python / --shared build output: a shared library and its generated FFI wrapper.
+# python/math-lib had a 227KB libmain.dylib and a generated main.py COMMITTED, built by a
+# months-old compiler. A committed library keeps importing cleanly while the source drifts
+# away from it, so the demo would go on "passing" without testing the current compiler at
+# all - the same trap as a stale installed binary.
+lib*.dylib
+lib*.so
+lib*.dll
+python/math-lib/math_lib.py

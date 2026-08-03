@@ -1,0 +1,135 @@
+// Wyn-side tests for the library Python calls. test.py already checks the same functions
+// THROUGH ctypes (31 assertions); these check them natively, so a failure tells you
+// whether the bug is in the maths or in the FFI boundary. That distinction is the whole
+// reason to have both.
+//
+//   wyn test tests/test_math.wyn
+
+fn power(base: int, exponent: int) -> int {
+    var result = 1
+    var i = 0
+    while i < exponent { result = result * base  i = i + 1 }
+    return result
+}
+
+fn factorial(n: int) -> int {
+    if n <= 1 { return 1 }
+    return n * factorial(n - 1)
+}
+
+fn fibonacci(n: int) -> int {
+    if n <= 1 { return n }
+    var a = 0
+    var b = 1
+    var i = 2
+    while i <= n {
+        var t = a + b
+        a = b
+        b = t
+        i = i + 1
+    }
+    return b
+}
+
+fn calc_gcd(a: int, b: int) -> int {
+    var x = a
+    var y = b
+    while y != 0 {
+        var t = y
+        y = x % y
+        x = t
+    }
+    return x
+}
+
+fn is_prime(n: int) -> bool {
+    if n < 2 { return false }
+    if n < 4 { return true }
+    if n % 2 == 0 { return false }
+    var i = 3
+    while i * i <= n {
+        if n % i == 0 { return false }
+        i = i + 2
+    }
+    return true
+}
+
+fn collatz_steps(n: int) -> int {
+    var count = 0
+    var x = n
+    while x != 1 {
+        if x % 2 == 0 { x = x / 2 } else { x = 3 * x + 1 }
+        count = count + 1
+    }
+    return count
+}
+
+fn max_collatz_below(limit: int) -> int {
+    var best = 0
+    var i = 1
+    while i < limit {
+        var s = collatz_steps(i)
+        if s > best { best = s }
+        i = i + 1
+    }
+    return best
+}
+
+test "the edge cases, which are where a hand-rolled maths lib goes wrong" {
+    assert_eq(factorial(0), 1)      // not 0
+    assert_eq(factorial(1), 1)
+    assert_eq(power(2, 0), 1)       // anything to the zero
+    assert_eq(power(0, 5), 0)
+    assert_eq(fibonacci(0), 0)
+    assert_eq(fibonacci(1), 1)
+    assert_eq(calc_gcd(0, 5), 5)    // gcd with zero is the other operand
+    assert_eq(calc_gcd(5, 0), 5)
+}
+
+test "known values" {
+    assert_eq(factorial(10), 3628800)
+    assert_eq(power(2, 10), 1024)
+    assert_eq(fibonacci(10), 55)
+    assert_eq(fibonacci(30), 832040)
+    assert_eq(calc_gcd(48, 18), 6)
+    assert_eq(calc_gcd(17, 5), 1)   // coprime
+}
+
+test "primality, including the values a naive sieve misses" {
+    assert(not is_prime(0))
+    assert(not is_prime(1))
+    assert(is_prime(2))            // the even prime
+    assert(is_prime(3))
+    assert(not is_prime(4))
+    assert(is_prime(97))
+    assert(not is_prime(91))       // 7 * 13, not caught by small-factor guesses
+    assert(is_prime(7919))
+}
+
+test "collatz reaches 1 and counts the steps" {
+    assert_eq(collatz_steps(1), 0)   // already there
+    assert_eq(collatz_steps(2), 1)
+    assert_eq(collatz_steps(6), 8)   // 6 3 10 5 16 8 4 2 1
+    assert_eq(collatz_steps(27), 111)
+}
+
+test "the benchmark function returns the documented answer" {
+    // bench.py prints these, and README quotes them. If the algorithm changes, the
+    // published numbers stop meaning anything - so they are pinned here.
+    assert_eq(max_collatz_below(10000), 261)
+    assert_eq(max_collatz_below(50000), 323)
+    assert_eq(max_collatz_below(300000), 442)
+}
+
+test "the library is not committed as a build artifact" {
+    // A 227KB libmain.dylib and a generated main.py were committed here, built by a
+    // months-old compiler. A committed library keeps importing cleanly while the source
+    // drifts away from it, so the demo goes on "passing" without exercising the current
+    // compiler at all.
+    assert_eq(File.exists("libmain.dylib"), 0)
+    assert_eq(File.exists("main.py"), 0)
+    // And test.py imports the sanitized module name, not the old one.
+    var t = File.read("test.py")
+    assert(t.contains("from math_lib import"))
+    assert(not t.contains("from main import"))
+}
