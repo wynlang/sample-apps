@@ -1,28 +1,87 @@
-test "parse key=value" {
-    var line = "port=8080"
-    var eq_pos = line.index_of("=")
-    assert(eq_pos > 0)
-    var key = line.substring(0, eq_pos)
-    var value = line.substring(eq_pos + 1, line.len())
-    assert_eq(key, "port")
-    assert_eq(value, "8080")
+// Tests for the parsing and validation rules main.wyn relies on.
+
+enum Value { Int, Float, Bool, Str }
+
+fn type_name(k: Value) -> string => match k {
+    Value.Int   => "int",
+    Value.Float => "float",
+    Value.Bool  => "bool",
+    Value.Str   => "string"
 }
 
-test "skip comments" {
-    var line = "# this is a comment"
-    assert(line.starts_with("#"))
+fn infer(v: string) -> Value {
+    if v == "true" or v == "false" { return Value.Bool }
+    if v.len() == 0 { return Value.Str }
+    var dots = 0
+    var digits = true
+    for i in 0..v.len() {
+        var c = v.substring(i, i + 1)
+        if c == "." { dots += 1 }
+        else if c < "0" or c > "9" { digits = false }
+    }
+    if digits and dots == 0 { return Value.Int }
+    if digits and dots == 1 { return Value.Float }
+    return Value.Str
 }
 
-test "skip empty lines" {
-    var line = "   "
-    assert_eq(line.trim().len(), 0)
+// Strip a `#` comment only when it is outside quotes -- the same rule main.wyn uses.
+fn strip_comment(line: string) -> string {
+    var t = line.trim()
+    var cut = t.len()
+    var quotes = 0
+    for i in 0..t.len() {
+        var c = t.substring(i, i + 1)
+        if c == "\"" { quotes += 1 }
+        if c == "#" and quotes % 2 == 0 { cut = i; break }
+    }
+    return t.substring(0, cut).trim()
 }
 
-test "hashmap storage" {
-    var config = HashMap.new()
-    config.set("host", "localhost")
-    config.set("port", "8080")
-    assert_eq(config.get("host"), "localhost")
-    assert_eq(config.get("port"), "8080")
-    assert_eq(config.len(), 2)
+test "infer distinguishes int, float, bool and string" {
+    assert_eq(type_name(infer("8080")), "int")
+    assert_eq(type_name(infer("2.5")), "float")
+    assert_eq(type_name(infer("true")), "bool")
+    assert_eq(type_name(infer("false")), "bool")
+    assert_eq(type_name(infer("four")), "string")
+    assert_eq(type_name(infer("1.2.3")), "string")
+    assert_eq(type_name(infer("")), "string")
+}
+
+test "comments are stripped, but not inside quotes" {
+    assert_eq(strip_comment("port = 8080   # the port"), "port = 8080")
+    assert_eq(strip_comment("# whole line"), "")
+    assert_eq(strip_comment("tag = \"a#b\""), "tag = \"a#b\"")
+    assert_eq(strip_comment("   "), "")
+}
+
+test "section header yields a nested path, not a flat name" {
+    var header = "[database]"
+    var close = header.index_of("]")
+    var section = header.substring(1, close)
+    var key = "host"
+    assert_eq("${section}.${key}", "database.host")
+}
+
+test "quoted values keep their quoted string type" {
+    var val = "\"8080\""
+    var quoted = val.len() > 1 and val.substring(0, 1) == "\""
+    assert(quoted)
+    var body = val.substring(1, val.len())
+    assert_eq(body.substring(0, body.index_of("\"")), "8080")
+}
+
+test "a line with no = is malformed" {
+    assert(("keepalive true").index_of("=") < 1)
+    assert(("port = 8080").index_of("=") > 0)
+}
+
+test "port range check catches an out-of-range value" {
+    var port = ("99999").to_int()
+    assert(port < 1 or port > 65535)
+    assert_eq(("5432").to_int(), 5432)
+}
+
+test "line numbers need split, because lines() drops blanks" {
+    var text = "a\n\nb"
+    assert_eq(text.split("\n").len(), 3)
 }
