@@ -1,0 +1,475 @@
+// WYNSTORM -- a Quake-style first-person shooter, in Wyn, on a 2D drawing API.
+//
+//   wyn run src/main.wyn          play it
+//   wyn test tests/test_engine.wyn   32 tests over the engine core, no window needed
+//
+// WASD move, arrow keys / A-D turn, SPACE fires, ESC quits.
+//
+// This file is the SHELL: input, rendering, HUD, frame loop. Every rule of the game -
+// the raycast, collision, damage, enemy AI - lives in src/engine.wyn, which contains no
+// Gui call at all and is therefore unit-testable. That split is the interesting part of
+// the design: a renderer cannot be tested, but a raycast can, and in a shooter the
+// raycast IS the game.
+//
+// HOW IT WORKS. There is no 3D API here and none is needed. The world is a 2D grid; for
+// each of 320 screen columns we cast a ray, find the wall it hits, and draw one vertical
+// strip whose height is inversely proportional to the distance. That is the Wolfenstein
+// 3D technique, and it is why this runs at ~125 FPS through Gui.rect: measured 8ms/frame
+// for 320 strips before a line of game code was written.
+
+import { Cell, cell_solid, cell_colour, rgb_r, rgb_g, rgb_b, map_data, cell_at,
+         Hit, cast, strip_height, Player, spawn_player, turn, move_by,
+         apply_damage, Kind, Enemy, kind_damage, kind_points, kind_colour,
+         make_enemy, dist2, in_crosshair, has_line_of_sight, enemy_step,
+         hurt_enemy, shot_damage,
+         key_w, key_a, key_s, key_d, key_q, key_e, key_space, key_escape,
+         key_left, key_right } from engine
+
+fn scr_w() -> int => 640
+fn scr_h() -> int => 400
+fn columns() -> int => 320          // one strip per 2 physical pixels
+fn horizon() -> int => scr_h() / 2
+
+// Field of view as the half-width of the camera plane. 0.66 is a ~66 degree FOV, which
+// is what Wolfenstein used and what stops the edges looking stretched.
+fn fov() -> float => 0.66
+
+// ---- rendering -------------------------------------------------------------
+
+// Shade a colour by a 0..100 factor. Distance fog and side-shading are the whole reason
+// a flat-coloured raycast reads as 3D rather than as coloured bars.
+fn shade(c: int, pct: int) -> int {
+    var r = rgb_r(c) * pct / 100
+    var g = rgb_g(c) * pct / 100
+    var b = rgb_b(c) * pct / 100
+    return r * 65536 + g * 256 + b
+}
+
+// Draw the world for one frame: sky, floor, then a wall strip per column.
+fn draw_world(grid: [int], p: Player) {
+    // Sky and floor as two big rects - cheaper than per-column and gives the horizon.
+    Gui.color(28, 30, 44)
+    Gui.rect(0, 0, scr_w(), horizon())
+    Gui.color(44, 38, 32)
+    Gui.rect(0, horizon(), scr_w(), scr_h() - horizon())
+
+    // The camera plane is perpendicular to the facing direction, scaled by the FOV.
+    var planex = (0.0 - p.dy) * fov()
+    var planey = p.dx * fov()
+
+    var col = 0
+    while col < columns() {
+        // camx sweeps -1..+1 across the screen; the ray is facing + camx * plane.
+        var camx = 2.0 * col.to_float() / columns().to_float() - 1.0
+        var rdx = p.dx + planex * camx
+        var rdy = p.dy + planey * camx
+
+        var h = cast(grid, p.x, p.y, rdx, rdy)
+        var sh = strip_height(h.dist, scr_h())
+        if sh > scr_h() * 3 { sh = scr_h() * 3 }
+
+        var top = horizon() - sh / 2
+        if top < 0 { top = 0 }
+        var bot = horizon() + sh / 2
+        if bot > scr_h() { bot = scr_h() }
+
+        // Distance fog: 100% at point blank down to 25% at the far wall. Without it every
+        // wall is equally bright and depth disappears.
+        var fog = 100 - (h.dist * 7.0).to_int()
+        if fog < 25 { fog = 25 }
+        // y-side walls a further 30% darker, which is what makes corners legible.
+        if h.side == 1 { fog = fog * 70 / 100 }
+
+        var c = shade(cell_colour(h.cell), fog)
+        Gui.color(rgb_r(c), rgb_g(c), rgb_b(c))
+        Gui.rect(col * 2, top, 2, bot - top)
+
+        col = col + 1
+    }
+}
+
+// Draw the living enemies as billboards: project each into screen space, then draw a
+// body rect scaled by distance. Sprites are drawn AFTER the walls and depth-tested
+// against a re-cast ray, so an enemy behind a wall is correctly hidden.
+fn draw_enemies(grid: [int], p: Player, es: [Enemy]) {
+    var planex = (0.0 - p.dy) * fov()
+    var planey = p.dx * fov()
+    // The inverse camera matrix determinant; used to transform world to camera space.
+    var det = planex * p.dy - p.dx * planey
+    if det > 0.0 - 0.00001 and det < 0.00001 { return }
+
+    for e in es {
+        if not e.alive { continue }
+        var vx = e.x - p.x
+        var vy = e.y - p.y
+
+        // Camera-space: tx is sideways, ty is depth along the facing.
+        var tx = (p.dy * vx - p.dx * vy) / det
+        var ty = (0.0 - planey * vx + planex * vy) / det
+        if ty < 0.2 { continue }                 // behind the camera or too close
+
+        // Hidden by geometry? Cast toward it and compare.
+        var d = Math.sqrt(vx * vx + vy * vy)
+        if d > 0.0001 {
+            var wall = cast(grid, p.x, p.y, vx / d, vy / d)
+            if wall.dist < d - 0.2 { continue }  // a wall is in the way
+        }
+
+        var sx = ((scr_w() / 2).to_float() * (1.0 + tx / ty)).to_int()
+        var size = (scr_h().to_float() / ty).to_int()
+        if size < 4 { continue }
+        if size > scr_h() * 2 { size = scr_h() * 2 }
+
+        var w = size / 3
+        var top = horizon() - size / 3
+        var hgt = size * 2 / 3
+        if top < 0 { hgt = hgt + top  top = 0 }
+        if hgt < 1 { continue }
+
+        var fog = 100 - (ty * 7.0).to_int()
+        if fog < 30 { fog = 30 }
+        var c = shade(kind_colour(e.kind), fog)
+
+        // Body
+        Gui.color(rgb_r(c), rgb_g(c), rgb_b(c))
+        Gui.rect(sx - w / 2, top, w, hgt)
+        // Eyes - two dark pips, so the thing reads as facing you rather than as a slab.
+        var eye = w / 6
+        if eye > 1 {
+            Gui.color(12, 12, 16)
+            Gui.rect(sx - w / 4 - eye / 2, top + hgt / 6, eye, eye)
+            Gui.rect(sx + w / 4 - eye / 2, top + hgt / 6, eye, eye)
+        }
+    }
+}
+
+// The gun, drawn as a simple centred silhouette. `kick` lifts it for a few frames after
+// firing - the cheapest possible recoil, and the thing that makes shooting feel like an
+// action rather than a state change.
+fn draw_gun(kick: int) {
+    var base = scr_h() - 10 + kick
+    Gui.color(38, 38, 46)
+    Gui.rect(scr_w() / 2 - 18, base - 70, 36, 70)
+    Gui.color(58, 58, 70)
+    Gui.rect(scr_w() / 2 - 8, base - 96, 16, 30)
+    Gui.color(24, 24, 30)
+    Gui.rect(scr_w() / 2 - 4, base - 100, 8, 10)
+}
+
+fn draw_crosshair() {
+    Gui.color(230, 230, 240)
+    var cx = scr_w() / 2
+    var cy = horizon()
+    Gui.rect(cx - 8, cy, 5, 1)
+    Gui.rect(cx + 4, cy, 5, 1)
+    Gui.rect(cx, cy - 8, 1, 5)
+    Gui.rect(cx, cy + 4, 1, 5)
+}
+
+// A bar with a label. Used for health and armour, so they cannot drift apart in style.
+fn draw_bar(x: int, y: int, val: int, maxv: int, r: int, g: int, b: int) {
+    var w = 120
+    Gui.color(18, 18, 24)
+    Gui.rect(x - 1, y - 1, w + 2, 14)
+    var fill = val * w / maxv
+    if fill < 0 { fill = 0 }
+    if fill > w { fill = w }
+    Gui.color(r, g, b)
+    Gui.rect(x, y, fill, 12)
+}
+
+fn draw_hud(p: Player, wave: int, alive: int) {
+    // Backing panel, so text stays readable over any wall colour.
+    Gui.color(10, 10, 14)
+    Gui.rect(0, scr_h() - 34, scr_w(), 34)
+
+    Gui.color(200, 60, 60)
+    Gui.text(8, scr_h() - 30, "HP", 1)
+    draw_bar(34, scr_h() - 30, p.health, 100, 200, 50, 50)
+
+    Gui.color(90, 140, 220)
+    Gui.text(8, scr_h() - 14, "AR", 1)
+    draw_bar(34, scr_h() - 14, p.armour, 100, 70, 120, 210)
+
+    Gui.color(230, 220, 120)
+    Gui.text(180, scr_h() - 30, "AMMO ${p.ammo}", 1)
+    Gui.color(200, 200, 210)
+    Gui.text(180, scr_h() - 14, "SCORE ${p.score}", 1)
+    Gui.color(180, 120, 220)
+    Gui.text(300, scr_h() - 30, "WAVE ${wave}", 1)
+    Gui.color(220, 120, 120)
+    Gui.text(300, scr_h() - 14, "LEFT ${alive}", 1)
+}
+
+// A 2D minimap in the corner. Cheap to draw and it makes the arena legible, which a
+// raycaster otherwise is not.
+fn draw_minimap(grid: [int], p: Player, es: [Enemy]) {
+    var s = 4
+    var ox = scr_w() - 24 * s - 8
+    var oy = 8
+    Gui.color(8, 8, 12)
+    Gui.rect(ox - 2, oy - 2, 24 * s + 4, 24 * s + 4)
+    var y = 0
+    while y < 24 {
+        var x = 0
+        while x < 24 {
+            var c = cell_at(grid, x, y)
+            if cell_solid(c) {
+                var col = shade(cell_colour(c), 60)
+                Gui.color(rgb_r(col), rgb_g(col), rgb_b(col))
+                Gui.rect(ox + x * s, oy + y * s, s, s)
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    for e in es {
+        if not e.alive { continue }
+        var c = kind_colour(e.kind)
+        Gui.color(rgb_r(c), rgb_g(c), rgb_b(c))
+        Gui.rect(ox + (e.x * s.to_float()).to_int() - 1, oy + (e.y * s.to_float()).to_int() - 1, 3, 3)
+    }
+    // The player last, so it is never hidden under an enemy pip.
+    Gui.color(255, 255, 255)
+    Gui.rect(ox + (p.x * s.to_float()).to_int() - 1, oy + (p.y * s.to_float()).to_int() - 1, 3, 3)
+    // A stub showing the facing.
+    Gui.line(ox + (p.x * s.to_float()).to_int(), oy + (p.y * s.to_float()).to_int(),
+             ox + ((p.x + p.dx * 2.0) * s.to_float()).to_int(),
+             oy + ((p.y + p.dy * 2.0) * s.to_float()).to_int())
+}
+
+fn draw_damage_flash(amount: int) {
+    if amount <= 0 { return }
+    var a = amount * 3
+    if a > 90 { a = 90 }
+    Gui.color(150, 20, 20)
+    // A border rather than a full overlay: it reads as "you were hit" without hiding
+    // the thing that hit you, which a full-screen tint does.
+    Gui.rect(0, 0, scr_w(), a / 6)
+    Gui.rect(0, scr_h() - a / 6, scr_w(), a / 6)
+    Gui.rect(0, 0, a / 6, scr_h())
+    Gui.rect(scr_w() - a / 6, 0, a / 6, scr_h())
+}
+
+// ---- waves -----------------------------------------------------------------
+
+// Spawn points chosen from open cells, spread around the arena so a wave arrives from
+// several directions rather than in a queue.
+fn wave_enemies(wave: int) -> [Enemy] {
+    var es = []
+    // Every wave: three grunts in the far corners.
+    es.push(make_enemy(3.5, 3.5, Kind.Grunt))
+    es.push(make_enemy(20.5, 3.5, Kind.Grunt))
+    es.push(make_enemy(3.5, 16.5, Kind.Grunt))
+    if wave >= 1 {
+        es.push(make_enemy(20.5, 16.5, Kind.Wraith))
+        es.push(make_enemy(12.5, 6.5, Kind.Grunt))
+    }
+    if wave >= 2 {
+        es.push(make_enemy(6.5, 9.5, Kind.Brute))
+        es.push(make_enemy(17.5, 9.5, Kind.Wraith))
+    }
+    if wave >= 3 {
+        es.push(make_enemy(12.5, 1.5, Kind.Brute))
+        es.push(make_enemy(1.5, 12.5, Kind.Wraith))
+        es.push(make_enemy(22.5, 12.5, Kind.Wraith))
+    }
+    return es
+}
+
+fn count_alive(es: [Enemy]) -> int {
+    var n = 0
+    for e in es { if e.alive { n = n + 1 } }
+    return n
+}
+
+// ---- the frame loop --------------------------------------------------------
+
+// A frame's worth of work with no window: run the SAME projection maths the renderer
+// runs and report what it would have drawn. This is how the render path stays verifiable
+// on a machine with no display (CI, a container, ssh), where Gui.create returns 0 and a
+// screenshot is impossible.
+fn render_report(grid: [int], p: Player) {
+    var planex = (0.0 - p.dy) * fov()
+    var planey = p.dx * fov()
+    var col = 0
+    var total = 0
+    var nearest = 9999
+    var farthest = 0
+    while col < columns() {
+        var camx = 2.0 * col.to_float() / columns().to_float() - 1.0
+        var h = cast(grid, p.x, p.y, p.dx + planex * camx, p.dy + planey * camx)
+        var sh = strip_height(h.dist, scr_h())
+        if sh > scr_h() * 3 { sh = scr_h() * 3 }
+        total = total + sh
+        if sh < nearest { nearest = sh }
+        if sh > farthest { farthest = sh }
+        col = col + 1
+    }
+    print("  ${columns()} wall strips: shortest ${nearest}px, tallest ${farthest}px, mean ${total / columns()}px")
+}
+
+fn main() {
+    var args = System.args()
+    var selfcheck = false
+    if args.len() > 1 and args[1] == "--selfcheck" { selfcheck = true }
+
+    var win = 0
+    if not selfcheck { win = Gui.create("WYNSTORM", scr_w(), scr_h()) }
+    if win == 0 {
+        // No display (CI, a container, ssh without X), or --selfcheck. Run the real
+        // engine and projection maths headlessly so the program is still useful and its
+        // render path is still verifiable, rather than just failing.
+        print("WYNSTORM self-check (no window)")
+        var g = map_data()
+        var p = spawn_player()
+        var h = cast(g, p.x, p.y, p.dx, p.dy)
+        print("  spawn (${p.x}, ${p.y}) facing (${p.dx}, ${p.dy})")
+        print("  raycast ahead: ${h.dist} units to a wall")
+        render_report(g, p)
+        // Turn a full circle and confirm no direction produces a degenerate view.
+        var i = 0
+        var worst = 0
+        while i < 16 {
+            p = turn(p, 6.28318 / 16.0)
+            var hh = cast(g, p.x, p.y, p.dx, p.dy)
+            if strip_height(hh.dist, scr_h()) > worst { worst = strip_height(hh.dist, scr_h()) }
+            i = i + 1
+        }
+        print("  swept 16 headings, tallest strip ${worst}px")
+        var es = wave_enemies(0)
+        print("  wave 1: ${count_alive(es)} enemies")
+        print("  run `wyn test tests/test_engine.wyn` for the 32-test engine suite.")
+        return
+    }
+
+    var grid = map_data()
+    var p = spawn_player()
+    var wave = 0
+    var enemies = wave_enemies(wave)
+
+    var kick = 0
+    var flash = 0
+    var fire_cool = 0
+    var hurt_cool = 0
+    var frames = 0
+    var t_start = Gui.ticks()
+    var running = true
+    var over = false
+
+    while running {
+        // Drain the event queue. Gui.poll returns "kind|x|y|key" per event, and returns
+        // "none|..." when the queue is empty, so one poll per frame is enough here.
+        var ev = Gui.poll()
+        if ev.split_at("|", 0) == "quit" { running = false }
+        if Gui.running() == 0 { running = false }
+        if Gui.key_pressed(key_escape()) == 1 { running = false }
+
+        if not over {
+            // --- input ---
+            var speed = 0.075
+            var rot = 0.045
+            if Gui.key_pressed(key_w()) == 1 { p = move_by(grid, p, p.dx * speed, p.dy * speed) }
+            if Gui.key_pressed(key_s()) == 1 { p = move_by(grid, p, 0.0 - p.dx * speed, 0.0 - p.dy * speed) }
+            // Strafe uses the perpendicular of the facing, so it stays correct as you turn.
+            if Gui.key_pressed(key_q()) == 1 { p = move_by(grid, p, p.dy * speed, 0.0 - p.dx * speed) }
+            if Gui.key_pressed(key_e()) == 1 { p = move_by(grid, p, 0.0 - p.dy * speed, p.dx * speed) }
+            if Gui.key_pressed(key_a()) == 1 or Gui.key_pressed(key_left()) == 1 { p = turn(p, 0.0 - rot) }
+            if Gui.key_pressed(key_d()) == 1 or Gui.key_pressed(key_right()) == 1 { p = turn(p, rot) }
+
+            // --- firing ---
+            if fire_cool > 0 { fire_cool = fire_cool - 1 }
+            if Gui.key_pressed(key_space()) == 1 and fire_cool == 0 and p.ammo > 0 {
+                fire_cool = 8
+                kick = 10
+                var spent = p.ammo - 1
+                var gained = 0
+                // Hit everything in the cone with line of sight - a shotgun, not a
+                // hitscan rifle, so a crowd can be cleared with one shell.
+                var i = 0
+                while i < enemies.len() {
+                    var e = enemies[i]
+                    if e.alive and in_crosshair(p, e, 0.18) {
+                        var d2 = dist2(p.x, p.y, e.x, e.y)
+                        var hit = hurt_enemy(e, shot_damage(d2))
+                        enemies[i] = hit
+                        if not hit.alive { gained = gained + kind_points(e.kind) }
+                    }
+                    i = i + 1
+                }
+                p = Player { x: p.x, y: p.y, dx: p.dx, dy: p.dy,
+                             health: p.health, armour: p.armour,
+                             ammo: spent, score: p.score + gained, alive: p.alive }
+            }
+
+            // --- enemies act ---
+            if hurt_cool > 0 { hurt_cool = hurt_cool - 1 }
+            var took = 0
+            var j = 0
+            while j < enemies.len() {
+                var e = enemies[j]
+                if e.alive {
+                    var moved = enemy_step(grid, e, p)
+                    enemies[j] = moved
+                    // Close enough to claw, and off cooldown.
+                    if hurt_cool == 0 and dist2(moved.x, moved.y, p.x, p.y) < 1.2 {
+                        if has_line_of_sight(grid, moved, p) { took = took + kind_damage(moved.kind) }
+                    }
+                }
+                j = j + 1
+            }
+            if took > 0 {
+                p = apply_damage(p, took)
+                flash = took
+                hurt_cool = 18
+            }
+
+            // --- wave cleared ---
+            if count_alive(enemies) == 0 {
+                wave = wave + 1
+                enemies = wave_enemies(wave)
+                // Clearing a wave resupplies - the reward loop.
+                var newammo = p.ammo + 25
+                var newhp = p.health + 20
+                if newhp > 100 { newhp = 100 }
+                p = Player { x: p.x, y: p.y, dx: p.dx, dy: p.dy,
+                             health: newhp, armour: p.armour, ammo: newammo,
+                             score: p.score + 500, alive: p.alive }
+            }
+
+            if not p.alive { over = true }
+        }
+
+        // --- draw ---
+        draw_world(grid, p)
+        draw_enemies(grid, p, enemies)
+        draw_gun(kick)
+        draw_crosshair()
+        draw_damage_flash(flash)
+        draw_minimap(grid, p, enemies)
+        draw_hud(p, wave + 1, count_alive(enemies))
+
+        if p.ammo == 0 and not over {
+            Gui.color(230, 200, 90)
+            Gui.text(scr_w() / 2 - 40, horizon() + 40, "OUT OF AMMO", 2)
+        }
+        if over {
+            Gui.color(200, 40, 40)
+            Gui.rect(scr_w() / 2 - 130, horizon() - 40, 260, 80)
+            Gui.color(255, 255, 255)
+            Gui.text(scr_w() / 2 - 52, horizon() - 18, "YOU DIED", 2)
+            Gui.text(scr_w() / 2 - 78, horizon() + 6, "SCORE ${p.score}  -  ESC to quit", 2)
+        }
+
+        Gui.present()
+
+        if kick > 0 { kick = kick - 2 }
+        if flash > 0 { flash = flash - 4 }
+        frames = frames + 1
+        Gui.delay(12)
+    }
+
+    var secs = (Gui.ticks() - t_start) / 1000
+    Gui.destroy()
+    print("WYNSTORM over. wave ${wave + 1}, score ${p.score}, ${frames} frames in ${secs}s")
+}

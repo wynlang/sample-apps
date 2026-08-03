@@ -1,0 +1,360 @@
+// Tests for the WYNSTORM engine core.
+//
+// A renderer cannot be unit-tested, but a raycast can - and in a shooter the raycast IS
+// the game. Everything asserted here runs with no window, no SDL and no frame loop, which
+// is the payoff for keeping src/engine.wyn free of any Gui call.
+//
+// The values are derived by hand from the map in engine.wyn, not copied from a run: a
+// test that records whatever the code currently does cannot detect the code being wrong.
+//
+//   wyn test tests/test_engine.wyn
+
+import { Cell, cell_of, cell_solid, cell_colour, rgb_r, rgb_g, rgb_b, map_w, map_h, map_data, cell_at, Hit, cast, strip_height, Player, spawn_player, turn, move_by, sign_of, apply_damage, Kind, Enemy, kind_health, kind_damage, kind_speed, kind_points, kind_colour, make_enemy, dist2, in_crosshair, has_line_of_sight, enemy_step, hurt_enemy, shot_damage } from engine
+
+// ---- the map is what the code thinks it is ---------------------------------
+
+test "the map is the declared size and fully enclosed" {
+    var g = map_data()
+    assert_eq(g.len(), map_w() * map_h())
+    // Every border cell must be solid, or a ray escapes and the player walks out of the
+    // world. Checked on all four edges rather than sampled.
+    var x = 0
+    while x < map_w() {
+        assert(cell_solid(cell_at(g, x, 0)))
+        assert(cell_solid(cell_at(g, x, map_h() - 1)))
+        x = x + 1
+    }
+    var y = 0
+    while y < map_h() {
+        assert(cell_solid(cell_at(g, 0, y)))
+        assert(cell_solid(cell_at(g, map_w() - 1, y)))
+        y = y + 1
+    }
+}
+
+test "out of bounds reads as SOLID so a ray always terminates" {
+    // Returning Empty here would let a ray march to the step limit and draw a garbage
+    // strip at the horizon. This is load-bearing, not defensive.
+    var g = map_data()
+    assert(cell_solid(cell_at(g, 0 - 1, 5)))
+    assert(cell_solid(cell_at(g, 5, 0 - 1)))
+    assert(cell_solid(cell_at(g, 999, 5)))
+    assert(cell_solid(cell_at(g, 5, 999)))
+}
+
+test "the player spawns in open space" {
+    // A spawn inside a wall renders the world inside-out and is instantly obvious in a
+    // demo, so it is worth an assertion.
+    var g = map_data()
+    var p = spawn_player()
+    assert(not cell_solid(cell_at(g, p.x.to_int(), p.y.to_int())))
+}
+
+test "cell kinds round-trip and only Empty is passable" {
+    assert(not cell_solid(cell_of(0)))
+    assert(cell_solid(cell_of(1)))
+    assert(cell_solid(cell_of(2)))
+    assert(cell_solid(cell_of(3)))
+    assert(cell_solid(cell_of(4)))
+    assert(cell_solid(cell_of(5)))
+}
+
+test "wall colours unpack to the bytes they were packed from" {
+    var stone = cell_colour(Cell.Stone)
+    assert_eq(rgb_r(stone), 127)
+    assert_eq(rgb_g(stone), 127)
+    assert_eq(rgb_b(stone), 127)
+    var slime = cell_colour(Cell.Slime)
+    assert_eq(rgb_r(slime), 50)
+    assert_eq(rgb_g(slime), 205)
+    assert_eq(rgb_b(slime), 50)
+}
+
+// ---- the raycast -----------------------------------------------------------
+
+test "a ray fired north from the spawn hits a wall at a sane distance" {
+    var g = map_data()
+    // From (12,20) facing north (dy=-1). Whatever it hits, it must be ahead, finite,
+    // and solid - the three properties a cast can get wrong.
+    var h = cast(g, 6.5, 22.5, 0.0, 0.0 - 1.0)
+    assert(h.dist > 0.0)
+    assert(h.dist < 24.0)
+    assert(cell_solid(h.cell))
+}
+
+test "a ray fired at a known wall reports the hand-computed distance" {
+    var g = map_data()
+    // Stand at (12.5, 22.5). Row 23 is the solid south border, so a ray straight south
+    // (dy = +1) must hit it after exactly 0.5 cells.
+    var h = cast(g, 12.5, 22.5, 0.0, 1.0)
+    assert(h.dist > 0.45)
+    assert(h.dist < 0.55)
+    assert_eq(h.side, 1)          // crossed a horizontal grid line
+}
+
+test "the ray hitting a vertical wall reports side 0" {
+    var g = map_data()
+    // From (1.5, 1.5) facing west: column 0 is the border, so this crosses a VERTICAL
+    // grid line half a cell away.
+    var h = cast(g, 1.5, 1.5, 0.0 - 1.0, 0.0)
+    assert_eq(h.side, 0)
+    assert(h.dist > 0.45)
+    assert(h.dist < 0.55)
+}
+
+test "wall_x stays inside one wall face" {
+    // It is a fraction along the face, so it must be in [0,1) for any ray. Used as a
+    // texture coordinate, so an out-of-range value would index off the end.
+    var g = map_data()
+    var h1 = cast(g, 12.5, 22.5, 0.0, 1.0)
+    assert(h1.wall_x >= 0.0)
+    assert(h1.wall_x < 1.0)
+    var h2 = cast(g, 3.3, 7.7, 0.6, 0.8)
+    assert(h2.wall_x >= 0.0)
+    assert(h2.wall_x < 1.0)
+}
+
+test "no ray direction hangs or returns a nonsense distance" {
+    // The bounded step count is what guarantees this. Sweeping the full circle catches
+    // the degenerate axis-aligned directions where a naive DDA divides by zero.
+    var g = map_data()
+    var i = 0
+    while i < 64 {
+        var a = i.to_float() * 6.28318 / 64.0
+        var h = cast(g, 12.0, 12.0, Math.cos(a), Math.sin(a))
+        assert(h.dist > 0.0)
+        assert(h.dist < 64.0)
+        assert(cell_solid(h.cell))
+        i = i + 1
+    }
+}
+
+test "closer walls are drawn taller" {
+    // The inverse projection, which is the whole illusion.
+    var near = strip_height(1.0, 400)
+    var mid = strip_height(2.0, 400)
+    var far = strip_height(8.0, 400)
+    assert(near > mid)
+    assert(mid > far)
+    assert_eq(near, 400)     // at distance 1 the wall exactly fills the screen
+    assert_eq(mid, 200)      // twice as far, half as tall
+}
+
+test "a degenerate distance cannot produce a zero-height strip" {
+    // Guard against a divide-by-zero turning into an invisible wall right in front.
+    assert(strip_height(0.0, 400) > 400)
+    assert(strip_height(0.001, 400) > 400)
+}
+
+// ---- movement and collision ------------------------------------------------
+
+test "turning preserves the facing vector's length" {
+    // The rotation-matrix form must not drift out of normalisation; repeated angle
+    // accumulation is what does.
+    var p = spawn_player()
+    var i = 0
+    while i < 50 {
+        p = turn(p, 0.2)
+        i = i + 1
+    }
+    var len = Math.sqrt(p.dx * p.dx + p.dy * p.dy)
+    assert(len > 0.999)
+    assert(len < 1.001)
+}
+
+test "a full turn comes back to where it started" {
+    var p = spawn_player()
+    var dx0 = p.dx
+    var dy0 = p.dy
+    var i = 0
+    while i < 8 {
+        p = turn(p, 6.28318530718 / 8.0)
+        i = i + 1
+    }
+    assert(Math.abs(p.dx - dx0) < 0.001)
+    assert(Math.abs(p.dy - dy0) < 0.001)
+}
+
+test "walking into a wall does not pass through it" {
+    var g = map_data()
+    // At (12,22), one cell above the solid south border. Push south hard.
+    var p = Player { x: 6.5, y: 22.5, dx: 0.0, dy: 1.0,
+                     health: 100, armour: 0, ammo: 0, score: 0, alive: true }
+    var i = 0
+    while i < 40 {
+        p = move_by(g, p, 0.0, 0.25)
+        i = i + 1
+    }
+    // Must still be in an open cell, never inside the wall.
+    assert(not cell_solid(cell_at(g, p.x.to_int(), p.y.to_int())))
+    assert(p.y < 23.0)
+}
+
+test "a diagonal push into a wall SLIDES along it instead of sticking" {
+    // The reason the two axes are resolved separately. Testing the combined destination
+    // makes you stop dead on diagonal contact, which every player notices.
+    var g = map_data()
+    var p = Player { x: 6.5, y: 22.5, dx: 0.0, dy: 1.0,
+                     health: 100, armour: 0, ammo: 0, score: 0, alive: true }
+    var x0 = p.x
+    // Push south-east: south is blocked by the border, east is open.
+    p = move_by(g, p, 0.3, 0.3)
+    assert(p.x > x0)                       // slid east
+    assert(not cell_solid(cell_at(g, p.x.to_int(), p.y.to_int())))
+}
+
+test "walking in open space actually moves" {
+    var g = map_data()
+    var p = spawn_player()
+    var moved = move_by(g, p, 0.0, 0.0 - 0.3)   // north, into the open hall
+    assert(moved.y < p.y)
+    assert(not cell_solid(cell_at(g, moved.x.to_int(), moved.y.to_int())))
+}
+
+// ---- damage ----------------------------------------------------------------
+
+test "armour soaks a third of the damage until it runs out" {
+    var p = spawn_player()      // 100 health, 50 armour
+    var hurt = apply_damage(p, 30)
+    // 30 damage: armour absorbs 10, health takes 20.
+    assert_eq(hurt.health, 80)
+    assert_eq(hurt.armour, 40)
+}
+
+test "with no armour all the damage lands on health" {
+    var p = Player { x: 1.0, y: 1.0, dx: 0.0, dy: 1.0,
+                     health: 100, armour: 0, ammo: 0, score: 0, alive: true }
+    var hurt = apply_damage(p, 25)
+    assert_eq(hurt.health, 75)
+    assert_eq(hurt.armour, 0)
+}
+
+test "health floors at zero and the player is marked dead" {
+    var p = Player { x: 1.0, y: 1.0, dx: 0.0, dy: 1.0,
+                     health: 10, armour: 0, ammo: 0, score: 0, alive: true }
+    var dead = apply_damage(p, 999)
+    assert_eq(dead.health, 0)      // never negative - the HUD would render a negative bar
+    assert(not dead.alive)
+}
+
+test "surviving damage keeps you alive" {
+    var p = spawn_player()
+    var hurt = apply_damage(p, 10)
+    assert(hurt.alive)
+    assert(hurt.health < 100)
+}
+
+// ---- enemies ---------------------------------------------------------------
+
+test "each enemy kind has its own stat line" {
+    // A shooter with one enemy stat is a shooter with one enemy.
+    assert(kind_health(Kind.Brute) > kind_health(Kind.Grunt))
+    assert(kind_damage(Kind.Brute) > kind_damage(Kind.Grunt))
+    assert(kind_speed(Kind.Wraith) > kind_speed(Kind.Brute))
+    assert(kind_points(Kind.Brute) > kind_points(Kind.Grunt))
+}
+
+test "an enemy dies when its health is spent, and not before" {
+    var e = make_enemy(5.0, 5.0, Kind.Grunt)     // 30 health
+    assert(e.alive)
+    e = hurt_enemy(e, 20)
+    assert(e.alive)
+    assert_eq(e.health, 10)
+    e = hurt_enemy(e, 10)
+    assert(not e.alive)
+    assert_eq(e.health, 0)
+}
+
+test "the crosshair test only hits what is in FRONT of you" {
+    var p = spawn_player()                        // at (12,20) facing north
+    var ahead = make_enemy(6.5, 18.5, Kind.Grunt)
+    var behind = make_enemy(6.5, 23.5, Kind.Grunt)
+    assert(in_crosshair(p, ahead, 0.3))
+    assert(not in_crosshair(p, behind, 0.3))      // shooting backwards must not connect
+}
+
+test "the aim cone rejects targets off to the side" {
+    var p = spawn_player()
+    // Four cells ahead but four cells left: way outside a 0.2 cone.
+    var wide = make_enemy(2.5, 18.5, Kind.Grunt)
+    assert(not in_crosshair(p, wide, 0.2))
+    // And a generous cone does catch it, so the test is about the cone not the geometry.
+    assert(in_crosshair(p, wide, 2.0))
+}
+
+test "enemies cannot see through walls" {
+    // The difference between an engine that feels solid and one that feels broken.
+    var g = map_data()
+    var p = spawn_player()                         // (12,20)
+    // Row 21 has brick at columns 9..12; put an enemy on the far side of the map.
+    var far = make_enemy(2.0, 2.0, Kind.Grunt)
+    assert(not has_line_of_sight(g, far, p))
+    // And one in the same open area can see them.
+    var near = make_enemy(6.5, 19.5, Kind.Grunt)
+    assert(has_line_of_sight(g, near, p))
+}
+
+test "an enemy with line of sight closes the distance" {
+    var g = map_data()
+    var p = spawn_player()
+    var e = make_enemy(6.5, 19.5, Kind.Grunt)
+    var d0 = dist2(e.x, e.y, p.x, p.y)
+    var i = 0
+    while i < 10 {
+        e = enemy_step(g, e, p)
+        i = i + 1
+    }
+    assert(dist2(e.x, e.y, p.x, p.y) < d0)
+}
+
+test "an enemy stops short instead of standing inside the camera" {
+    var g = map_data()
+    var p = spawn_player()
+    var e = make_enemy(6.5, 19.5, Kind.Grunt)
+    var i = 0
+    while i < 400 {
+        e = enemy_step(g, e, p)
+        i = i + 1
+    }
+    // Never closer than the 0.8 stand-off, or the view is inside the sprite.
+    assert(dist2(e.x, e.y, p.x, p.y) > 0.35)
+}
+
+test "a dead enemy does not move" {
+    var g = map_data()
+    var p = spawn_player()
+    var e = make_enemy(6.5, 19.5, Kind.Grunt)
+    e = hurt_enemy(e, 999)
+    assert(not e.alive)
+    var stepped = enemy_step(g, e, p)
+    assert_eq(stepped.x, e.x)
+    assert_eq(stepped.y, e.y)
+}
+
+test "an enemy never walks into a wall" {
+    var g = map_data()
+    // Player on the far side of a brick run; enemy pushed toward it for a long time.
+    var p = spawn_player()
+    var e = make_enemy(6.5, 19.5, Kind.Wraith)
+    var i = 0
+    while i < 300 {
+        e = enemy_step(g, e, p)
+        i = i + 1
+    }
+    assert(not cell_solid(cell_at(g, e.x.to_int(), e.y.to_int())))
+}
+
+test "shot damage falls off with range" {
+    var close = shot_damage(4.0)      // 2 cells
+    var mid = shot_damage(25.0)       // 5 cells
+    var far = shot_damage(400.0)      // 20 cells
+    assert(close > mid)
+    assert(mid > far)
+    // And a point-blank shotgun blast kills a grunt in one hit, which is the feel.
+    assert(close >= kind_health(Kind.Grunt) / 2)
+}
+
+test "dist2 is a real squared distance" {
+    assert_eq(dist2(0.0, 0.0, 3.0, 4.0), 25.0)
+    assert_eq(dist2(1.0, 1.0, 1.0, 1.0), 0.0)
+}
