@@ -1,0 +1,122 @@
+// Tests for web/server. A server that compiles proves nothing, so these do a real HTTP
+// round trip over loopback and assert on the bytes that come back.
+//
+// web/ had NO tests at all - four apps, all of which returned byte-identical HTML from
+// `/`, and nothing checked any of it. The one that had nothing of its own (web/website,
+// whose only unique call was Json.stringify) was folded into this app as /api/info.min.
+//
+// SINGLE-THREADED BY CONSTRUCTION, the same shape the compiler's own
+// tests/stdlib/test_web_e2e.wyn uses: the client write buffers in the socket until the
+// server accepts, so no spawn or scheduler participates and there is nothing to race.
+// The server side is closed explicitly before draining - Http.respond deliberately does
+// not close the connection (a handler loop owns the fd), and there is no handler loop
+// here, so without that close the drain blocks forever waiting for a peer that will
+// never hang up. That is a guaranteed hang, not a flake.
+//
+// Ports are in the 189xx range and distinct per test so a re-run cannot collide with a
+// socket still in TIME_WAIT.
+//
+//   wyn test tests/test_server.wyn
+
+// One request in, one response out. Returns the raw response text ("" on failure).
+fn round_trip(port: int, method: string, path: string, ctype: string, resp_body: string) -> string {
+    var srv = Http.serve(port)
+    if srv <= 0 { return "" }
+
+    var client = Net.connect("127.0.0.1", port)
+    if client <= 0 {
+        Http.close_server(srv)
+        return ""
+    }
+    Net.send(client, method + " " + path + " HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+
+    var accepted = Http.accept(srv)
+    var client_fd = Http.fd(accepted)
+    Http.respond(client_fd, 200, ctype, resp_body)
+    Net.close(client_fd)
+
+    // Net.recv is a single read(); the head and body need not arrive together.
+    var got = ""
+    var i = 0
+    while i < 16 {
+        var chunk = Net.recv(client)
+        if chunk.len() == 0 { break }
+        got = got + chunk
+        i = i + 1
+    }
+    Net.close(client)
+    Http.close_server(srv)
+    return got
+}
+
+// ---- the transport actually works ------------------------------------------
+
+test "a GET round trip returns a 200 with the body" {
+    var r = round_trip(18901, "GET", "/", "text/html", "<h1>hello</h1>")
+    assert(r.len() > 0)
+    assert(r.contains("200"))
+    assert(r.contains("<h1>hello</h1>"))
+}
+
+test "the content type the handler chose is the one sent" {
+    var r = round_trip(18902, "GET", "/api/info", "application/json", "{\"ok\":true}")
+    assert(r.contains("application/json"))
+    assert(r.contains("{\"ok\":true}"))
+}
+
+test "a POST round trip works too" {
+    var r = round_trip(18903, "POST", "/api/users", "application/json", "{\"id\":4}")
+    assert(r.contains("200"))
+    assert(r.contains("{\"id\":4}"))
+}
+
+// ---- both JSON serializers, which is why website was folded in here --------
+
+test "Json.stringify is compact and Json.to_pretty_string is not" {
+    var j = Json.new()
+    Json.set(j, "server", "wyn")
+    Json.set_int(j, "users", 3)
+
+    var compact = Json.stringify(j)
+    var pretty = Json.to_pretty_string(j)
+
+    // Both carry the same data...
+    assert(compact.contains("wyn"))
+    assert(pretty.contains("wyn"))
+    assert(compact.contains("3"))
+    assert(pretty.contains("3"))
+
+    // ...and the compact form is the one you put on the wire: no newlines, and
+    // strictly shorter. This is the whole distinction web/website existed to show.
+    assert(not compact.contains("\n"))
+    assert(pretty.contains("\n"))
+    assert(compact.len() < pretty.len())
+}
+
+test "a JSON document survives a round trip through the socket" {
+    var j = Json.new()
+    Json.set(j, "platform", "test")
+    Json.set_int(j, "uptime", 42)
+    var r = round_trip(18904, "GET", "/api/info.min", "application/json", Json.stringify(j))
+    assert(r.contains("platform"))
+    assert(r.contains("42"))
+}
+
+// ---- the version string that went stale for thirteen releases --------------
+
+test "the advertised version matches the compiler's VERSION file" {
+    // The footer and /api/info both said 1.8.0 while the compiler was at 1.20.0. There is
+    // no runtime accessor for the compiler version, so the app hardcodes it - which means
+    // the only thing that can keep it honest is a test that reads VERSION.
+    assert_eq(File.exists("../../../wyn/VERSION"), 1)
+    var want = File.read("../../../wyn/VERSION").trim()
+    var src = File.read("src/main.wyn")
+    assert(src.contains("Powered by Wyn v" + want))
+    assert(src.contains("\"version\", \"" + want + "\""))
+    // And the stale value is gone from the two places that SERVE it. Checked as the
+    // exact served strings rather than a bare `contains("1.8.0")`: the source comment
+    // explaining this bug mentions the old version, and a test that cannot survive its
+    // own explanation is a test that will be deleted rather than fixed.
+    assert(not src.contains("Powered by Wyn v1.8.0"))
+    assert(not src.contains("\"version\", \"1.8.0\""))
+}

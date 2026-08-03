@@ -42,14 +42,18 @@ Real-world programs written in Wyn. Every app compiles and runs.
 | **sorting** | Quicksort, mergesort, bubblesort |
 | **fibonacci** | Recursive vs iterative comparison |
 
-### 🌐 web/ (5 apps)
-| App | Description |
-|-----|-------------|
-| **website** | Web server with HTML templating and JSON API |
-| **server** | Full web server with routing, SQLite, JSON API, arena GC |
-| **rest-api** | REST API server with SQLite + JSON |
-| **template-demo** | HTML templating on its own |
-| **wyn-web-demo** | Minimal web app |
+### 🌐 web/ (4 apps)
+
+All four serve real HTTP and spawn a coroutine per request. They are kept apart because
+each shows a different layer, not a different look: `curl localhost:8080/` returned
+**byte-identical** HTML from all of them, so the distinction is the API underneath.
+
+| App | What only this one shows |
+|-----|--------------------------|
+| **server** | the full stack: routing, SQLite, and both JSON serializers (`/api/info` pretty, `/api/info.min` compact) |
+| **rest-api** | clean shutdown -- `Http.close_server` and `Db.close` |
+| **template-demo** | `Template.render` against a real `templates/index.html` |
+| **wyn-web-demo** | the `Web.*` router (`Web.get`/`post`/`match`) instead of hand-parsing paths |
 
 ### 📱 mobile/ (1 app)
 | App | Description |

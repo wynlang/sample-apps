@@ -8,7 +8,7 @@ fn css() -> string {
 
 fn html(title: string, body: string) -> string {
     var style = css()
-    return "<!DOCTYPE html><html><head><meta charset=utf-8><title>${title}</title><style>${style}</style></head><body><header><h1>Wyn Server</h1><nav><a href=/>Home</a> <a href=/status>Status</a> <a href=/users>Users</a> <a href=/api/info>API</a></nav></header><main>${body}</main><footer>Powered by Wyn v1.8.0</footer></body></html>"
+    return "<!DOCTYPE html><html><head><meta charset=utf-8><title>${title}</title><style>${style}</style></head><body><header><h1>Wyn Server</h1><nav><a href=/>Home</a> <a href=/status>Status</a> <a href=/users>Users</a> <a href=/api/info>API</a></nav></header><main>${body}</main><footer>Powered by Wyn v1.20.0</footer></body></html>"
 }
 
 fn page_home() -> string {
@@ -47,13 +47,28 @@ fn page_users(db: int) -> string {
 fn api_info(db: int, start_time: int) -> string {
     var j = Json.new()
     Json.set(j, "server", "Wyn")
-    Json.set(j, "version", "1.8.0")
+    // One constant, checked against repos/wyn/VERSION. There is no runtime accessor for
+    // the compiler version, so this is hand-maintained - it said 1.8.0 for thirteen
+    // releases, which is exactly the kind of detail that makes a demo look abandoned.
+    Json.set(j, "version", "1.20.0")
     Json.set(j, "platform", Os.platform())
     Json.set(j, "arch", Os.arch())
     Json.set_int(j, "uptime", DateTime.now() - start_time)
     Json.set_int(j, "users", Db.query_one(db, "SELECT COUNT(*) FROM users").to_int())
     Json.set(j, "time", DateTime.to_iso(DateTime.now()))
     return Json.to_pretty_string(j)
+}
+
+// The same document, serialized COMPACTLY. Json.to_pretty_string is for a human reading
+// curl output; Json.stringify is what you send over the wire. Folded in from web/website,
+// which existed only to show this one call.
+fn api_info_compact(db: int, start_time: int) -> string {
+    var j = Json.new()
+    Json.set(j, "server", "wyn")
+    Json.set(j, "platform", Os.platform())
+    Json.set_int(j, "uptime", DateTime.now() - start_time)
+    Json.set_int(j, "users", Db.query_one(db, "SELECT COUNT(*) FROM users").to_int())
+    return Json.stringify(j)
 }
 
 fn api_add_user(db: int, body: string) -> string {
@@ -78,6 +93,8 @@ fn handle_request(method: string, path: string, body: string, fd: int, db: int, 
             Http.respond(fd, 200, "text/html", page_users(db))
         } else if path == "/api/info" {
             Http.respond(fd, 200, "application/json", api_info(db, start_time))
+        } else if path == "/api/info.min" {
+            Http.respond(fd, 200, "application/json", api_info_compact(db, start_time))
         } else {
             Http.respond(fd, 404, "text/html", html("404", "<div class=card><h2>404</h2><p><code>${path}</code> not found.</p></div>"))
         }
@@ -109,7 +126,7 @@ fn main() {
 
     var server = Http.serve(port)
     print("Wyn Server running on http://localhost:${port}")
-    print("Routes: / /status /users /api/info POST /api/users")
+    print("Routes: / /status /users /api/info /api/info.min POST /api/users")
     print("Press Ctrl+C to stop")
 
     while 1 == 1 {
