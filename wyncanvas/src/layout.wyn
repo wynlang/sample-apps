@@ -1,0 +1,205 @@
+// layout - window-space geometry: the chrome rectangles, the hit tests, the
+// colour picker's two directions, and the layer row bands.
+//
+// WHY THIS IS A MODULE AND NOT ARITHMETIC IN THE UI.
+//
+// Every number here is a pixel in window space, and each one is used at least
+// TWICE in opposite directions: once by a painter that draws a control, and once
+// by a hit test or a click target that decides what a press at (mx, my) meant. A
+// control drawn at one x and hit-tested at another is a control the user cannot
+// click, and that is invisible in a screenshot - the picture is right and only
+// the pointer disagrees. src/view.wyn makes this argument for the document
+// transform; this is the same argument for the chrome around it.
+//
+// The pairs that must agree, spelled out because they are the failure modes:
+//
+//   in_sv / in_hue          <->  sv_x_of_sat, sv_y_of_val, hue_y_of
+//                                (the crosshair must sit where a click lands)
+//   sv_sat / sv_val / hue_at
+//   row_band_x / row_band_w <->  the SAME numbers in build_form's click targets
+//   hits_twisty             <->  twisty_x   (the fold control's column)
+//   hits_visibility         <->  vis_box_x  (the eye box's column)
+//
+// The twisty/visibility pair is the sharpest of them: the twisty is drawn at
+// indent+9 and the visibility box at indent+11, two pixels apart, and the row's
+// MEANING depends on which side of a boundary the press fell. Before this module
+// existed the only way to test that boundary was to guess it from the outside -
+// tests/run_groups_test.sh still carries a comment doing exactly that arithmetic
+// by hand.
+//
+// NOTHING HERE TOUCHES SDL, THE WINDOW, OR ANY MODULE STATE. Every function is a
+// function of its arguments (and of the constants below), which is what makes the
+// whole file testable without opening a window. The two callers that are not pure
+// - "which layer is at this row" and "what colour did the picker end up at" -
+// stay in src/ui.wyn, which owns that state.
+//
+// FUNCTIONS RATHER THAN CONSTANTS, so the arithmetic relating them is written
+// once: VIEW_W is WIN_W minus the two panels, and if it were a literal it would
+// be a literal that has to be edited twice.
+//
+// CALL CONVENTION: `pub fn`s, so importers call them QUALIFIED
+// (`layout.PANEL_X()`).
+
+// ---- the window and its chrome ---------------------------------------------
+
+pub fn WIN_W() -> int { return 1180 }
+pub fn WIN_H() -> int { return 760 }
+
+pub fn TOOLBAR_H() -> int { return 46 }
+pub fn STATUS_H() -> int { return 26 }
+pub fn PANEL_W() -> int { return 250 }
+pub fn TOOLS_W() -> int { return 54 }
+
+pub fn VIEW_X() -> int { return TOOLS_W() }
+pub fn VIEW_Y() -> int { return TOOLBAR_H() }
+pub fn VIEW_W() -> int { return WIN_W() - PANEL_W() - TOOLS_W() }
+pub fn VIEW_H() -> int { return WIN_H() - TOOLBAR_H() - STATUS_H() }
+
+pub fn PANEL_X() -> int { return WIN_W() - PANEL_W() }
+pub fn ROW_H() -> int { return 24 }
+
+// Colour picker geometry, inside the right panel.
+pub fn SV_X() -> int { return PANEL_X() + 12 }
+pub fn SV_Y() -> int { return VIEW_Y() + 12 }
+pub fn SV_SIZE() -> int { return 150 }
+pub fn HUE_X() -> int { return SV_X() + SV_SIZE() + 10 }
+pub fn HUE_Y() -> int { return SV_Y() }
+pub fn HUE_W() -> int { return 22 }
+
+// The layer list starts below the picker, its swatch, and the layer buttons.
+pub fn LAYERS_Y() -> int { return SV_Y() + SV_SIZE() + 92 }
+
+// ---- hit tests -------------------------------------------------------------
+//
+// Half-open on the far edge (`>=`), so the three regions cannot both claim a
+// pixel and a press on a shared boundary has exactly one meaning.
+
+pub fn in_viewport(mx: int, my: int) -> bool {
+    if mx < VIEW_X() { return false }
+    if my < VIEW_Y() { return false }
+    if mx >= VIEW_X() + VIEW_W() { return false }
+    if my >= VIEW_Y() + VIEW_H() { return false }
+    return true
+}
+
+pub fn in_sv(mx: int, my: int) -> bool {
+    if mx < SV_X() { return false }
+    if my < SV_Y() { return false }
+    if mx >= SV_X() + SV_SIZE() { return false }
+    if my >= SV_Y() + SV_SIZE() { return false }
+    return true
+}
+
+pub fn in_hue(mx: int, my: int) -> bool {
+    if mx < HUE_X() { return false }
+    if my < HUE_Y() { return false }
+    if mx >= HUE_X() + HUE_W() { return false }
+    if my >= HUE_Y() + SV_SIZE() { return false }
+    return true
+}
+
+// ---- the colour picker, both directions ------------------------------------
+//
+// The SV square: saturation across, value down. Matches wynimg_sv_square's
+// mapping exactly, and tests/test_paint.wyn asserts that ramp against the Wyn
+// HSV conversion - so a disagreement between what is painted and what is picked
+// would fail a test rather than merely look odd.
+//
+// The divisor is SIZE-1, not SIZE, because the square's LAST pixel must be
+// saturation 1.0: dividing by SIZE would make the rightmost column 149/150 and
+// pure colour unreachable with the mouse.
+
+pub fn sv_sat(mx: int) -> float {
+    return (mx - SV_X()).to_float() / (SV_SIZE() - 1).to_float()
+}
+
+pub fn sv_val(my: int) -> float {
+    return 1.0 - (my - SV_Y()).to_float() / (SV_SIZE() - 1).to_float()
+}
+
+// The hue strip divides by SIZE rather than SIZE-1, because hue is CYCLIC: 360
+// is 0, so the last row is 359-and-a-bit degrees and there is no endpoint to
+// reach. Using SIZE-1 here would make the strip's bottom pixel wrap to red.
+pub fn hue_at(my: int) -> float {
+    return 360.0 * (my - HUE_Y()).to_float() / SV_SIZE().to_float()
+}
+
+// The inverses: where the crosshair and the strip marker are drawn. These are
+// the halves that have to agree with the three above.
+pub fn sv_x_of_sat(s: float) -> int {
+    return SV_X() + (s * (SV_SIZE() - 1).to_float()).to_int()
+}
+
+pub fn sv_y_of_val(v: float) -> int {
+    return SV_Y() + ((1.0 - v) * (SV_SIZE() - 1).to_float()).to_int()
+}
+
+pub fn hue_y_of(h: float) -> int {
+    return HUE_Y() + (h / 360.0 * SV_SIZE().to_float()).to_int()
+}
+
+// ---- layer rows ------------------------------------------------------------
+//
+// Addressed by VISIBLE row index (`vis`), never by layer index: a collapsed
+// group changes which rows are DRAWN without changing how many layers exist, so
+// a row placed by layer index would sit where it would have been had nothing
+// been folded. src/ui.wyn's painter and its click-target loop both count drawn
+// rows, and both get their y from here so they cannot disagree.
+
+pub fn row_y(vis: int) -> int { return LAYERS_Y() + vis * ROW_H() }
+
+// Does a row starting at `y` fit above the status bar? The list truncates rather
+// than drawing over the chrome, and the click targets stop at the same place.
+pub fn row_fits(y: int) -> bool { return y + ROW_H() <= VIEW_Y() + VIEW_H() }
+
+// How many rows fit at all - the same bound as row_fits, arrived at directly, for
+// a caller that wants to size something rather than walk it.
+pub fn rows_visible() -> int {
+    var n = 0
+    while row_fits(row_y(n)) { n = n + 1 }
+    return n
+}
+
+// Indentation per level of nesting.
+pub fn row_indent(depth: int) -> int { return depth * 12 }
+
+// The row's BACKGROUND BAND is indented too, not just the text: a full-width band
+// with indented text reads as a long name, whereas an indented band reads as
+// containment, which is the whole point of the indent.
+pub fn row_band_x(depth: int) -> int { return PANEL_X() + 6 + row_indent(depth) }
+pub fn row_band_w(depth: int) -> int {
+    return PANEL_W() - 12 - row_indent(depth)
+}
+// Three pixels shorter than the pitch, which is what leaves a gap between rows.
+pub fn row_band_h() -> int { return ROW_H() - 3 }
+
+// The two controls inside a row, and their hit columns.
+pub fn twisty_x(depth: int) -> int { return PANEL_X() + 9 + row_indent(depth) }
+pub fn vis_box_x(depth: int) -> int { return PANEL_X() + 11 + row_indent(depth) }
+pub fn vis_dot_x(depth: int) -> int { return PANEL_X() + 14 + row_indent(depth) }
+
+// A press left of this belongs to the fold control. Checked BEFORE the visibility
+// box, because on a group row the two would otherwise overlap and the row's
+// meaning would depend on a two-pixel difference: a group's fold control wins its
+// own column, and the visibility box moves right with the indent.
+pub fn hits_twisty(mx: int, depth: int) -> bool {
+    return mx < PANEL_X() + 22 + row_indent(depth)
+}
+
+pub fn hits_visibility(mx: int, depth: int) -> bool {
+    return mx < PANEL_X() + 28 + row_indent(depth)
+}
+
+// The name, clipped so a long name cannot run under the blend/opacity readout
+// that is right-aligned in the same row. `mw` is the measured width of that
+// readout, which is the one input here that comes from the font.
+pub fn row_name_x(depth: int) -> int {
+    return PANEL_X() + 31 + row_indent(depth)
+}
+pub fn row_clip_x(depth: int) -> int {
+    return PANEL_X() + 30 + row_indent(depth)
+}
+pub fn row_clip_w(depth: int, mw: int) -> int {
+    return PANEL_W() - 44 - mw - row_indent(depth)
+}
+pub fn row_meta_x(mw: int) -> int { return PANEL_X() + PANEL_W() - 10 - mw }

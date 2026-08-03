@@ -83,6 +83,7 @@
 
 import gui
 import widgets
+import layout
 import pixel
 import layer
 import history
@@ -113,35 +114,11 @@ extern fn wynimg_upload_tex(tex: int, p: int) -> int;
 
 // ---- layout ---------------------------------------------------------------
 //
-// Functions rather than constants so the arithmetic is written once. Every
-// number below is a pixel in window space.
-
-fn WIN_W() -> int { return 1180 }
-fn WIN_H() -> int { return 760 }
-
-fn TOOLBAR_H() -> int { return 46 }
-fn STATUS_H() -> int { return 26 }
-fn PANEL_W() -> int { return 250 }
-fn TOOLS_W() -> int { return 54 }
-
-fn VIEW_X() -> int { return TOOLS_W() }
-fn VIEW_Y() -> int { return TOOLBAR_H() }
-fn VIEW_W() -> int { return WIN_W() - PANEL_W() - TOOLS_W() }
-fn VIEW_H() -> int { return WIN_H() - TOOLBAR_H() - STATUS_H() }
-
-fn PANEL_X() -> int { return WIN_W() - PANEL_W() }
-fn ROW_H() -> int { return 24 }
-
-// Colour picker geometry, inside the right panel.
-fn SV_X() -> int { return PANEL_X() + 12 }
-fn SV_Y() -> int { return VIEW_Y() + 12 }
-fn SV_SIZE() -> int { return 150 }
-fn HUE_X() -> int { return SV_X() + SV_SIZE() + 10 }
-fn HUE_Y() -> int { return SV_Y() }
-fn HUE_W() -> int { return 22 }
-
-// The layer list starts below the picker, its swatch, and the layer buttons.
-fn LAYERS_Y() -> int { return SV_Y() + SV_SIZE() + 92 }
+// Window-space geometry, the region hit tests, the colour picker's mapping and
+// the layer row bands now live in src/layout.wyn, where they are unit-tested
+// without opening a window - see the header there for why the pairs that must
+// agree (a control's paint position and its hit column) belong next to each
+// other. This file keeps the state they are applied to.
 
 // ---- state ----------------------------------------------------------------
 //
@@ -1090,13 +1067,12 @@ fn on_layer_row(id: int) {
 
     // THE TWISTY, on a group with children: fold instead of selecting. Checked
     // BEFORE the visibility box, because on a group row the two would otherwise
-    // overlap - the twisty sits at ind+9 and the box at ind+11 - and the row's
-    // meaning would depend on a two-pixel difference. A group's fold control wins
-    // its own column, and the visibility box moves right with the indent.
-    var ind = row_depth(li) * 12
+    // overlap - see layout.hits_twisty, which owns both boundaries next to the
+    // twisty_x/vis_box_x the painter draws at.
+    var dep = row_depth(li)
     if layer.kind(li) == layer.KIND_GROUP() {
         if layer.child_count(li) > 0 {
-            if mx < PANEL_X() + 22 + ind {
+            if layout.hits_twisty(mx, dep) {
                 var was_folded = is_folded(li)
                 set_folded(li, not was_folded)
                 if was_folded { g_msg = "expanded " + layer.name(li) }
@@ -1106,7 +1082,7 @@ fn on_layer_row(id: int) {
         }
     }
 
-    if mx < PANEL_X() + 28 + ind {
+    if layout.hits_visibility(mx, dep) {
         var was = layer.visible(li)
         // Hoisted, not written inline as `record_visible(li, was, was == false)`.
         // A comparison passed DIRECTLY as a `bool` argument is typed `int` and
@@ -1480,44 +1456,17 @@ fn open_doc(path: string) {
 // either a bug in view (which tests/test_view.wyn would catch) or in these
 // ~70 lines.
 
-fn in_viewport(mx: int, my: int) -> bool {
-    if mx < VIEW_X() { return false }
-    if my < VIEW_Y() { return false }
-    if mx >= VIEW_X() + VIEW_W() { return false }
-    if my >= VIEW_Y() + VIEW_H() { return false }
-    return true
-}
-
-fn in_sv(mx: int, my: int) -> bool {
-    if mx < SV_X() { return false }
-    if my < SV_Y() { return false }
-    if mx >= SV_X() + SV_SIZE() { return false }
-    if my >= SV_Y() + SV_SIZE() { return false }
-    return true
-}
-
-fn in_hue(mx: int, my: int) -> bool {
-    if mx < HUE_X() { return false }
-    if my < HUE_Y() { return false }
-    if mx >= HUE_X() + HUE_W() { return false }
-    if my >= HUE_Y() + SV_SIZE() { return false }
-    return true
-}
-
-// The SV square: saturation across, value down. Matches wynimg_sv_square's
-// mapping exactly, and tests/test_paint.wyn asserts that ramp against the Wyn
-// HSV conversion - so a disagreement between what is painted and what is picked
-// would fail a test rather than merely look odd.
+// The picker's WINDOW->COLOUR direction is layout.sv_sat/sv_val/hue_at; these two
+// only apply the result. Keeping the arithmetic there is what puts it next to the
+// inverse (layout.sv_x_of_sat and friends), which paint_picker uses to draw the
+// crosshair - the two must agree or the marker sits where a click does not land.
 fn pick_sv(mx: int, my: int) {
-    var s = (mx - SV_X()).to_float() / (SV_SIZE() - 1).to_float()
-    var vv = 1.0 - (my - SV_Y()).to_float() / (SV_SIZE() - 1).to_float()
-    paint.set_hsv(paint.hue(), s, vv)
+    paint.set_hsv(paint.hue(), layout.sv_sat(mx), layout.sv_val(my))
     g_msg = "sat " + rounded(paint.sat()) + " val " + rounded(paint.val())
 }
 
 fn pick_hue(my: int) {
-    var h = 360.0 * (my - HUE_Y()).to_float() / SV_SIZE().to_float()
-    paint.set_hsv(h, paint.sat(), paint.val())
+    paint.set_hsv(layout.hue_at(my), paint.sat(), paint.val())
     g_msg = "hue " + rounded(paint.hue())
 }
 
@@ -1646,18 +1595,18 @@ fn canvas_press(mx: int, my: int) {
 
     // The picker first: it is inside the panel, not the viewport, so it can
     // never be confused with a canvas click.
-    if in_sv(mx, my) {
+    if layout.in_sv(mx, my) {
         g_drag = DRAG_SV
         pick_sv(mx, my)
         return
     }
-    if in_hue(mx, my) {
+    if layout.in_hue(mx, my) {
         g_drag = DRAG_HUE
         pick_hue(my)
         return
     }
 
-    if in_viewport(mx, my) == false { return }
+    if layout.in_viewport(mx, my) == false { return }
 
     // The text tool: a click PLACES text, so it needs the document position and
     // then the frame loop (which can read the entry) to do the work. Unlike a
@@ -2094,8 +2043,8 @@ fn paint_marquee() {
 // coincidence: the same origin_x/scale that place this blit are the ones
 // screen_to_doc_x inverts.
 fn paint_viewport(ui: Ui) {
-    gui.Win_rect(g_win, VIEW_X(), VIEW_Y(), VIEW_W(), VIEW_H(), 24, 24, 28)
-    gui.Win_clip(g_win, VIEW_X(), VIEW_Y(), VIEW_W(), VIEW_H())
+    gui.Win_rect(g_win, layout.VIEW_X(), layout.VIEW_Y(), layout.VIEW_W(), layout.VIEW_H(), 24, 24, 28)
+    gui.Win_clip(g_win, layout.VIEW_X(), layout.VIEW_Y(), layout.VIEW_W(), layout.VIEW_H())
 
     if g_tex >= 0 and g_doc_w > 0 {
         var dw = view.view_doc_w()
@@ -2151,7 +2100,7 @@ fn paint_viewport(ui: Ui) {
         if paints == 1 {
             var mx = gui.Win_mouse_x()
             var my = gui.Win_mouse_y()
-            if in_viewport(mx, my) {
+            if layout.in_viewport(mx, my) {
                 var rr = (paint.radius() * view.scale()).to_int()
                 if rr < 2 { rr = 2 }
                 gui.Win_rect_outline(g_win, mx - rr, my - rr, rr * 2, rr * 2,
@@ -2160,7 +2109,7 @@ fn paint_viewport(ui: Ui) {
         }
     } else {
         gui.Win_text(g_win, g_font, "no document - type a path and press Open",
-                     VIEW_X() + 20, VIEW_Y() + 20, 150, 150, 165)
+                     layout.VIEW_X() + 20, layout.VIEW_Y() + 20, 150, 150, 165)
     }
 
     gui.Win_clip(g_win, 0, 0, 0, 0)
@@ -2180,40 +2129,40 @@ fn paint_picker(ui: Ui) {
             wynimg_upload_tex(g_sv_tex, g_sv_buf)
             g_sv_hue = paint.hue()
         }
-        gui.Win_blit(g_win, g_sv_tex, SV_X(), SV_Y(), SV_SIZE(), SV_SIZE())
+        gui.Win_blit(g_win, g_sv_tex, layout.SV_X(), layout.SV_Y(), layout.SV_SIZE(), layout.SV_SIZE())
     }
-    gui.Win_rect_outline(g_win, SV_X() - 1, SV_Y() - 1, SV_SIZE() + 2,
-                         SV_SIZE() + 2, 100, 100, 118)
+    gui.Win_rect_outline(g_win, layout.SV_X() - 1, layout.SV_Y() - 1, layout.SV_SIZE() + 2,
+                         layout.SV_SIZE() + 2, 100, 100, 118)
 
     if g_hue_tex >= 0 {
-        gui.Win_blit(g_win, g_hue_tex, HUE_X(), HUE_Y(), HUE_W(), SV_SIZE())
+        gui.Win_blit(g_win, g_hue_tex, layout.HUE_X(), layout.HUE_Y(), layout.HUE_W(), layout.SV_SIZE())
     }
-    gui.Win_rect_outline(g_win, HUE_X() - 1, HUE_Y() - 1, HUE_W() + 2,
-                         SV_SIZE() + 2, 100, 100, 118)
+    gui.Win_rect_outline(g_win, layout.HUE_X() - 1, layout.HUE_Y() - 1, layout.HUE_W() + 2,
+                         layout.SV_SIZE() + 2, 100, 100, 118)
 
     // Crosshair on the SV square: double-outlined so it is visible against both
     // a white and a black corner.
-    var cx = SV_X() + (paint.sat() * (SV_SIZE() - 1).to_float()).to_int()
-    var cy = SV_Y() + ((1.0 - paint.val()) * (SV_SIZE() - 1).to_float()).to_int()
+    var cx = layout.sv_x_of_sat(paint.sat())
+    var cy = layout.sv_y_of_val(paint.val())
     gui.Win_rect_outline(g_win, cx - 4, cy - 4, 9, 9, 255, 255, 255)
     gui.Win_rect_outline(g_win, cx - 5, cy - 5, 11, 11, 20, 20, 20)
 
     // Marker on the hue strip.
-    var hy = HUE_Y() + (paint.hue() / 360.0 * SV_SIZE().to_float()).to_int()
-    gui.Win_rect_outline(g_win, HUE_X() - 2, hy - 2, HUE_W() + 4, 5,
+    var hy = layout.hue_y_of(paint.hue())
+    gui.Win_rect_outline(g_win, layout.HUE_X() - 2, hy - 2, layout.HUE_W() + 4, 5,
                          255, 255, 255)
 
     // The resulting colour, as a swatch. Painted with the sRGB bytes, because
     // Win_rect takes display values - using the linear ones would show a
     // markedly darker colour than the brush actually paints.
-    var sw_y = SV_Y() + SV_SIZE() + 8
-    gui.Win_rect(g_win, SV_X(), sw_y, 56, 22,
+    var sw_y = layout.SV_Y() + layout.SV_SIZE() + 8
+    gui.Win_rect(g_win, layout.SV_X(), sw_y, 56, 22,
                  paint.color_byte(0), paint.color_byte(1), paint.color_byte(2))
-    gui.Win_rect_outline(g_win, SV_X(), sw_y, 56, 22, 120, 120, 140)
+    gui.Win_rect_outline(g_win, layout.SV_X(), sw_y, 56, 22, 120, 120, 140)
     gui.Win_text(g_win, g_font, paint.tool_name(paint.tool())
                  + " r" + rounded(paint.radius())
                  + " a" + rounded(paint.alpha()),
-                 SV_X() + 64, sw_y + 4, 190, 190, 205)
+                 layout.SV_X() + 64, sw_y + 4, 190, 190, 205)
 }
 
 // The layer list. Drawn TOP-DOWN in stacking order, i.e. the topmost layer
@@ -2225,7 +2174,7 @@ fn paint_picker(ui: Ui) {
 // from a cached copy in a widget: after an Undo the layer module is the truth,
 // and a widget-held flag would silently disagree with the pixels on screen.
 fn paint_layers(ui: Ui) {
-    gui.Win_text(g_win, g_font, "Layers", PANEL_X() + 12, LAYERS_Y() - 18,
+    gui.Win_text(g_win, g_font, "Layers", layout.PANEL_X() + 12, layout.LAYERS_Y() - 18,
                  235, 235, 240)
 
     var n = layer.count()
@@ -2246,8 +2195,8 @@ fn paint_layers(ui: Ui) {
                 k = k + 1
                 continue
             }
-            var y = LAYERS_Y() + vis * ROW_H()
-            if y + ROW_H() > VIEW_Y() + VIEW_H() {
+            var y = layout.row_y(vis)
+            if layout.row_fits(y) == false {
                 stop = 1
             } else {
                 var id = 0 - 1
@@ -2270,17 +2219,18 @@ fn paint_layers(ui: Ui) {
                     rg = rg + 14
                     rb = rb + 14
                 }
-                // INDENT BY DEPTH, so nesting is visible at a glance. The row
-                // BACKGROUND is indented too, not just the text: a full-width band
-                // with indented text reads as a long name, whereas an indented band
-                // reads as containment, which is the whole point.
-                var ind = row_depth(li) * 12
-                gui.Win_rect(g_win, PANEL_X() + 6 + ind, y, PANEL_W() - 12 - ind,
-                             ROW_H() - 3, rr, rg, rb)
+                // INDENT BY DEPTH, so nesting is visible at a glance. The band's
+                // geometry comes from `layout` because build_form places this
+                // row's click target from the same three functions - see the note
+                // there.
+                var dep = row_depth(li)
+                gui.Win_rect(g_win, layout.row_band_x(dep), y,
+                             layout.row_band_w(dep), layout.row_band_h(),
+                             rr, rg, rb)
                 if li == g_active {
-                    gui.Win_rect_outline(g_win, PANEL_X() + 6 + ind, y,
-                                         PANEL_W() - 12 - ind, ROW_H() - 3,
-                                         110, 160, 210)
+                    gui.Win_rect_outline(g_win, layout.row_band_x(dep), y,
+                                         layout.row_band_w(dep),
+                                         layout.row_band_h(), 110, 160, 210)
                 }
 
                 // A TWISTY ONLY ON A GROUP THAT HAS CHILDREN. Drawing one on an
@@ -2290,16 +2240,16 @@ fn paint_layers(ui: Ui) {
                     if layer.child_count(li) > 0 {
                         var mark = "-"
                         if is_folded(li) { mark = "+" }
-                        gui.Win_text(g_win, g_font, mark, PANEL_X() + 9 + ind,
+                        gui.Win_text(g_win, g_font, mark, layout.twisty_x(dep),
                                      y + 3, 210, 210, 225)
                     }
                 }
 
                 // Visibility box, from the layer module.
-                gui.Win_rect_outline(g_win, PANEL_X() + 11 + ind, y + 4, 13, 13,
+                gui.Win_rect_outline(g_win, layout.vis_box_x(dep), y + 4, 13, 13,
                                      130, 130, 150)
                 if layer.visible(li) {
-                    gui.Win_rect(g_win, PANEL_X() + 14 + ind, y + 7, 7, 7,
+                    gui.Win_rect(g_win, layout.vis_dot_x(dep), y + 7, 7, 7,
                                  120, 200, 130)
                 }
 
@@ -2316,13 +2266,12 @@ fn paint_layers(ui: Ui) {
                 var meta = pixel.blend_name(layer.blend_mode(li)) + " "
                            + pct.to_string() + "%"
                 var mw = gui.Win_text_width(g_font, meta)
-                gui.Win_clip(g_win, PANEL_X() + 30 + ind, y,
-                             PANEL_W() - 44 - mw - ind, ROW_H() - 3)
-                gui.Win_text(g_win, g_font, layer.name(li), PANEL_X() + 31 + ind,
-                             y + 3, fr, fg, fb)
+                gui.Win_clip(g_win, layout.row_clip_x(dep), y,
+                             layout.row_clip_w(dep, mw), layout.row_band_h())
+                gui.Win_text(g_win, g_font, layer.name(li),
+                             layout.row_name_x(dep), y + 3, fr, fg, fb)
                 gui.Win_clip(g_win, 0, 0, 0, 0)
-                gui.Win_text(g_win, g_font, meta,
-                             PANEL_X() + PANEL_W() - 10 - mw, y + 3,
+                gui.Win_text(g_win, g_font, meta, layout.row_meta_x(mw), y + 3,
                              150, 160, 175)
                 vis = vis + 1
                 k = k + 1
@@ -2331,7 +2280,7 @@ fn paint_layers(ui: Ui) {
     }
 
     if n == 0 {
-        gui.Win_text(g_win, g_font, "(empty)", PANEL_X() + 12, LAYERS_Y() + 4,
+        gui.Win_text(g_win, g_font, "(empty)", layout.PANEL_X() + 12, layout.LAYERS_Y() + 4,
                      140, 140, 152)
     }
 }
@@ -2342,9 +2291,9 @@ fn paint_layers(ui: Ui) {
 // The pointer readout is not decoration: it is the one thing that makes a
 // mis-mapped brush diagnosable at a glance instead of by bisecting the transform.
 fn paint_status(ui: Ui) {
-    var y = WIN_H() - STATUS_H()
-    gui.Win_rect(g_win, 0, y, WIN_W(), STATUS_H(), 20, 20, 25)
-    gui.Win_line(g_win, 0, y, WIN_W(), y, 60, 60, 72)
+    var y = layout.WIN_H() - layout.STATUS_H()
+    gui.Win_rect(g_win, 0, y, layout.WIN_W(), layout.STATUS_H(), 20, 20, 25)
+    gui.Win_line(g_win, 0, y, layout.WIN_W(), y, 60, 60, 72)
 
     var s = g_doc_w.to_string() + "x" + g_doc_h.to_string()
     s = s + "  " + layer.count().to_string() + "L"
@@ -2372,19 +2321,19 @@ fn paint_status(ui: Ui) {
 fn paint(ui: Ui) {
     gui.Win_clear(g_win, 28, 28, 34)
 
-    gui.Win_rect(g_win, 0, 0, WIN_W(), TOOLBAR_H(), 38, 38, 46)
-    gui.Win_line(g_win, 0, TOOLBAR_H(), WIN_W(), TOOLBAR_H(), 60, 60, 72)
+    gui.Win_rect(g_win, 0, 0, layout.WIN_W(), layout.TOOLBAR_H(), 38, 38, 46)
+    gui.Win_line(g_win, 0, layout.TOOLBAR_H(), layout.WIN_W(), layout.TOOLBAR_H(), 60, 60, 72)
 
     // Tool strip background.
-    gui.Win_rect(g_win, 0, VIEW_Y(), TOOLS_W(), VIEW_H(), 34, 34, 41)
-    gui.Win_line(g_win, TOOLS_W(), VIEW_Y(), TOOLS_W(), VIEW_Y() + VIEW_H(),
+    gui.Win_rect(g_win, 0, layout.VIEW_Y(), layout.TOOLS_W(), layout.VIEW_H(), 34, 34, 41)
+    gui.Win_line(g_win, layout.TOOLS_W(), layout.VIEW_Y(), layout.TOOLS_W(), layout.VIEW_Y() + layout.VIEW_H(),
                  60, 60, 72)
 
     paint_viewport(ui)
 
     // Right panel background, then its contents.
-    gui.Win_rect(g_win, PANEL_X(), VIEW_Y(), PANEL_W(), VIEW_H(), 34, 34, 41)
-    gui.Win_line(g_win, PANEL_X(), VIEW_Y(), PANEL_X(), VIEW_Y() + VIEW_H(),
+    gui.Win_rect(g_win, layout.PANEL_X(), layout.VIEW_Y(), layout.PANEL_W(), layout.VIEW_H(), 34, 34, 41)
+    gui.Win_line(g_win, layout.PANEL_X(), layout.VIEW_Y(), layout.PANEL_X(), layout.VIEW_Y() + layout.VIEW_H(),
                  60, 60, 72)
     paint_picker(ui)
     paint_layers(ui)
@@ -2455,7 +2404,7 @@ fn build_form(win: int, font: int) -> Ui {
     ui = widgets.Ui_button(ui, "t+", 974, 9, 24, 28, on_text_bigger)
 
     // Tool palette, down the left edge.
-    var ty = VIEW_Y() + 8
+    var ty = layout.VIEW_Y() + 8
     ui = widgets.Ui_button(ui, "Brush", 5, ty, 44, 30, on_tool_brush)
     ui = widgets.Ui_button(ui, "Erase", 5, ty + 34, 44, 30, on_tool_eraser)
     ui = widgets.Ui_button(ui, "Fill", 5, ty + 68, 44, 30, on_tool_fill)
@@ -2470,24 +2419,24 @@ fn build_form(win: int, font: int) -> Ui {
     ui = widgets.Ui_button(ui, "Text", 5, ty + 266, 44, 28, on_tool_text)
 
     // Layer commands, above the layer list.
-    var ly = LAYERS_Y() - 48
-    ui = widgets.Ui_button(ui, "+L", PANEL_X() + 8, ly, 32, 22, on_layer_add)
-    ui = widgets.Ui_button(ui, "-L", PANEL_X() + 42, ly, 32, 22, on_layer_del)
-    ui = widgets.Ui_button(ui, "up", PANEL_X() + 76, ly, 32, 22, on_layer_up)
-    ui = widgets.Ui_button(ui, "dn", PANEL_X() + 110, ly, 32, 22, on_layer_down)
-    ui = widgets.Ui_button(ui, "o-", PANEL_X() + 148, ly, 28, 22,
+    var ly = layout.LAYERS_Y() - 48
+    ui = widgets.Ui_button(ui, "+L", layout.PANEL_X() + 8, ly, 32, 22, on_layer_add)
+    ui = widgets.Ui_button(ui, "-L", layout.PANEL_X() + 42, ly, 32, 22, on_layer_del)
+    ui = widgets.Ui_button(ui, "up", layout.PANEL_X() + 76, ly, 32, 22, on_layer_up)
+    ui = widgets.Ui_button(ui, "dn", layout.PANEL_X() + 110, ly, 32, 22, on_layer_down)
+    ui = widgets.Ui_button(ui, "o-", layout.PANEL_X() + 148, ly, 28, 22,
                            on_opacity_down)
-    ui = widgets.Ui_button(ui, "o+", PANEL_X() + 178, ly, 28, 22, on_opacity_up)
-    ui = widgets.Ui_button(ui, "<b", PANEL_X() + 8, ly + 24, 32, 22,
+    ui = widgets.Ui_button(ui, "o+", layout.PANEL_X() + 178, ly, 28, 22, on_opacity_up)
+    ui = widgets.Ui_button(ui, "<b", layout.PANEL_X() + 8, ly + 24, 32, 22,
                            on_blend_prev)
-    ui = widgets.Ui_button(ui, "b>", PANEL_X() + 42, ly + 24, 32, 22,
+    ui = widgets.Ui_button(ui, "b>", layout.PANEL_X() + 42, ly + 24, 32, 22,
                            on_blend_next)
     // Group / ungroup, in the space left on the blend row. "[G]" and "]G["
     // rather than words because the panel is 250px wide and the labels have to
     // sit beside four other controls; the brackets read as "wrap" and "unwrap".
-    ui = widgets.Ui_button(ui, "[G]", PANEL_X() + 80, ly + 24, 36, 22,
+    ui = widgets.Ui_button(ui, "[G]", layout.PANEL_X() + 80, ly + 24, 36, 22,
                            on_layer_group)
-    ui = widgets.Ui_button(ui, "]G[", PANEL_X() + 118, ly + 24, 36, 22,
+    ui = widgets.Ui_button(ui, "]G[", layout.PANEL_X() + 118, ly + 24, 36, 22,
                            on_layer_ungroup)
 
     // Filters, in the toolbar's second row. Abbreviated labels because seven
@@ -2504,27 +2453,27 @@ fn build_form(win: int, font: int) -> Ui {
     // Below the layer list rather than in the toolbar, because the toolbar's
     // second row is full: the filter buttons end at x=1166 and the window is
     // 1180 wide. paint_layers already truncates a row that would run past
-    // VIEW_Y()+VIEW_H(), so reserving the last band costs no layer rows that were
+    // layout.VIEW_Y()+layout.VIEW_H(), so reserving the last band costs no layer rows that were
     // being drawn.
     //
     // 0..200% in steps of 5: 100% reproduces exactly the values that used to be
     // hardcoded, and the range reaches past it because "more than the default"
     // is the request a fixed parameter cannot answer.
-    var stry = VIEW_Y() + VIEW_H() - 34
-    ui = widgets.Ui_slider(ui, PANEL_X() + 8, stry, PANEL_W() - 16, 20,
+    var stry = layout.VIEW_Y() + layout.VIEW_H() - 34
+    ui = widgets.Ui_slider(ui, layout.PANEL_X() + 8, stry, layout.PANEL_W() - 16, 20,
                            0, 200, 5, g_strength, on_strength)
     g_strength_id = widgets.Ui_last_id(ui)
 
     // Selection commands, under the tool palette. `All`/`Non`/`Inv` are the three
     // a user reaches for constantly and none of them is a drag.
-    var sy = VIEW_Y() + 306
+    var sy = layout.VIEW_Y() + 306
     ui = widgets.Ui_button(ui, "All", 5, sy, 44, 24, on_sel_all)
     ui = widgets.Ui_button(ui, "Non", 5, sy + 26, 44, 24, on_sel_none)
     ui = widgets.Ui_button(ui, "SInv", 5, sy + 52, 44, 24, on_sel_invert)
 
     // CLICK TARGETS ARE PLACED BY THE SAME TWO COUNTERS AS THE PAINTER, walking the
     // stack top-first and skipping rows a collapsed group hides. Placing them by
-    // layer index instead - which is what the previous `(count-1-i) * ROW_H()`
+    // layer index instead - which is what the previous `(count-1-i) * layout.ROW_H()`
     // did - would put every target at the position the row would occupy if
     // nothing were folded, so after one collapse a click would select a layer the
     // user cannot see. The two loops MUST agree, and the only way to be sure is
@@ -2537,10 +2486,11 @@ fn build_form(win: int, font: int) -> Ui {
             i2 = i2 + 1
             continue
         }
-        var y = LAYERS_Y() + vrow * ROW_H()
-        var ind2 = row_depth(li2) * 12
-        ui = widgets.Ui_button(ui, layer.name(li2), PANEL_X() + 6 + ind2, y,
-                               PANEL_W() - 12 - ind2, ROW_H() - 3, on_layer_row)
+        var y = layout.row_y(vrow)
+        var dep2 = row_depth(li2)
+        ui = widgets.Ui_button(ui, layer.name(li2), layout.row_band_x(dep2), y,
+                               layout.row_band_w(dep2), layout.row_band_h(),
+                               on_layer_row)
         remember_row(widgets.Ui_last_id(ui), li2)
         vrow = vrow + 1
         i2 = i2 + 1
@@ -2780,8 +2730,8 @@ fn run_action(ui: Ui, act: string) -> Ui {
             print("  pickat needs sx:sy")
             return ui
         }
-        canvas_press(SV_X() + qp[0].to_int(), SV_Y() + qp[1].to_int())
-        canvas_release(SV_X() + qp[0].to_int(), SV_Y() + qp[1].to_int())
+        canvas_press(layout.SV_X() + qp[0].to_int(), layout.SV_Y() + qp[1].to_int())
+        canvas_release(layout.SV_X() + qp[0].to_int(), layout.SV_Y() + qp[1].to_int())
         print("  ${act} -> hsv=${rounded(paint.hue())},${rounded(paint.sat())},${rounded(paint.val())}")
         return ui
     }
@@ -2789,8 +2739,8 @@ fn run_action(ui: Ui, act: string) -> Ui {
     // huedrag:y - drag the hue strip, y relative to its top.
     if act.starts_with("huedrag:") {
         var yp = act.substring(8, act.len()).to_int()
-        canvas_press(HUE_X() + HUE_W() / 2, HUE_Y() + yp)
-        canvas_release(HUE_X() + HUE_W() / 2, HUE_Y() + yp)
+        canvas_press(layout.HUE_X() + layout.HUE_W() / 2, layout.HUE_Y() + yp)
+        canvas_release(layout.HUE_X() + layout.HUE_W() / 2, layout.HUE_Y() + yp)
         print("  ${act} -> hue=${rounded(paint.hue())}")
         return ui
     }
@@ -3127,8 +3077,8 @@ fn run_action(ui: Ui, act: string) -> Ui {
         }
         var keep = paint.tool()
         paint.set_tool(paint.TOOL_PAN())
-        var cx = VIEW_X() + VIEW_W() / 2
-        var cy = VIEW_Y() + VIEW_H() / 2
+        var cx = layout.VIEW_X() + layout.VIEW_W() / 2
+        var cy = layout.VIEW_Y() + layout.VIEW_H() / 2
         canvas_press(cx, cy)
         canvas_drag(cx + np[0].to_int(), cy + np[1].to_int())
         canvas_release(cx + np[0].to_int(), cy + np[1].to_int())
@@ -3281,7 +3231,7 @@ fn main() -> int {
     g_doc_h = 256
     g_active = layer.count() - 1
 
-    g_win = gui.Win_window("WynCanvas", WIN_W(), WIN_H())
+    g_win = gui.Win_window("WynCanvas", layout.WIN_W(), layout.WIN_H())
     if g_win < 0 {
         print("could not open a window")
         return 1
@@ -3302,7 +3252,7 @@ fn main() -> int {
 
     // The view transform needs the viewport rectangle and the document size
     // before anything can be mapped through it.
-    view.set_viewport(VIEW_X(), VIEW_Y(), VIEW_W(), VIEW_H())
+    view.set_viewport(layout.VIEW_X(), layout.VIEW_Y(), layout.VIEW_W(), layout.VIEW_H())
     view.set_doc(g_doc_w, g_doc_h)
     view.zoom_100()
 
@@ -3315,10 +3265,10 @@ fn main() -> int {
 
     // The picker's ramps. Built once; the SV square is re-filled when the hue
     // changes (paint_picker), the hue strip never changes.
-    g_sv_buf = wynimg_new(SV_SIZE(), SV_SIZE())
-    g_sv_tex = gui.Win_texture(g_win, SV_SIZE(), SV_SIZE())
-    g_hue_buf = wynimg_new(HUE_W(), SV_SIZE())
-    g_hue_tex = gui.Win_texture(g_win, HUE_W(), SV_SIZE())
+    g_sv_buf = wynimg_new(layout.SV_SIZE(), layout.SV_SIZE())
+    g_sv_tex = gui.Win_texture(g_win, layout.SV_SIZE(), layout.SV_SIZE())
+    g_hue_buf = wynimg_new(layout.HUE_W(), layout.SV_SIZE())
+    g_hue_tex = gui.Win_texture(g_win, layout.HUE_W(), layout.SV_SIZE())
     if g_hue_buf != 0 {
         wynimg_hue_strip(g_hue_buf)
         if g_hue_tex >= 0 { wynimg_upload_tex(g_hue_tex, g_hue_buf) }

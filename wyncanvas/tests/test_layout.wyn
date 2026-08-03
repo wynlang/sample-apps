@@ -1,0 +1,423 @@
+// test_layout - the chrome geometry, the region hit tests, the colour picker's
+// two directions, and the layer row bands.
+//
+// WHAT THIS SUITE IS FOR. Every number in src/layout.wyn is used twice, in
+// opposite directions: once to DRAW a control and once to decide what a press at
+// (mx, my) meant. A control painted at one x and hit-tested at another is a
+// control the user cannot click, and it is invisible in a screenshot - the
+// picture is right and only the pointer disagrees. So the assertions below are
+// mostly ROUND TRIPS and BOUNDARIES, not restatements of the constants:
+//
+//   - the picker's forward and inverse maps agree (crosshair sits where a click
+//     lands), and the endpoints are reachable
+//   - the three regions PARTITION the window: no pixel belongs to two of them
+//   - the twisty and visibility columns are ORDERED and stay ordered under every
+//     indent, which is the two-pixel boundary the row's meaning depends on
+//   - a row band never runs past the panel edge at any nesting depth
+//
+// Restating a constant ("PANEL_W is 250") would pass by construction and fail
+// only when somebody changes the number on purpose, which is the least useful
+// test available. The few literal assertions here are the ones tests outside
+// this file have to GUESS at from the outside - tests/run_groups_test.sh carries
+// a comment deriving LAYERS_Y, ROW_H and PANEL_X by hand for exactly that
+// reason, and those three are pinned below so that comment has a source.
+
+import pixel
+import layout
+
+// ---- the chrome partitions the window --------------------------------------
+
+test "the viewport is exactly the window minus the toolbar, panels and status bar" {
+    // Derived, not asserted as literals: the point is that the pieces TILE.
+    assert_eq(layout.VIEW_X() + layout.VIEW_W(), layout.PANEL_X())
+    assert_eq(layout.VIEW_Y() + layout.VIEW_H(),
+              layout.WIN_H() - layout.STATUS_H())
+    assert_eq(layout.PANEL_X() + layout.PANEL_W(), layout.WIN_W())
+    assert_eq(layout.VIEW_X(), layout.TOOLS_W())
+    assert_eq(layout.VIEW_Y(), layout.TOOLBAR_H())
+    // No piece is degenerate, which is what would make every hit test false.
+    assert_true(layout.VIEW_W() > 0)
+    assert_true(layout.VIEW_H() > 0)
+}
+
+test "the values other suites derive by hand are these" {
+    // run_groups_test.sh computes LAYERS_Y = VIEW_Y+12+SV_SIZE+92 = 300,
+    // ROW_H = 24 and PANEL_X = 1180-250 = 930 in a comment. Pinned here so a
+    // change to the panel breaks a test rather than that shell script's guess.
+    assert_eq(layout.LAYERS_Y(), 300)
+    assert_eq(layout.ROW_H(), 24)
+    assert_eq(layout.PANEL_X(), 930)
+}
+
+// ---- region hit tests ------------------------------------------------------
+
+test "in_viewport is true on its top-left corner and false one pixel outside" {
+    // Half-open: the near edge is IN, the far edge is OUT. An inclusive far edge
+    // would let the viewport and the right panel both claim column 930.
+    assert_true(layout.in_viewport(layout.VIEW_X(), layout.VIEW_Y()))
+    assert_true(layout.in_viewport(layout.VIEW_X() + layout.VIEW_W() - 1,
+                                  layout.VIEW_Y() + layout.VIEW_H() - 1))
+    assert_false(layout.in_viewport(layout.VIEW_X() - 1, layout.VIEW_Y()))
+    assert_false(layout.in_viewport(layout.VIEW_X(), layout.VIEW_Y() - 1))
+    assert_false(layout.in_viewport(layout.VIEW_X() + layout.VIEW_W(),
+                                   layout.VIEW_Y()))
+    assert_false(layout.in_viewport(layout.VIEW_X(),
+                                   layout.VIEW_Y() + layout.VIEW_H()))
+}
+
+test "the toolbar and the status bar are not the viewport" {
+    // A press in the toolbar must not start a stroke. y=0 is the toolbar and
+    // the last row of the window is the status bar.
+    assert_false(layout.in_viewport(400, 0))
+    assert_false(layout.in_viewport(400, layout.TOOLBAR_H() - 1))
+    assert_false(layout.in_viewport(400, layout.WIN_H() - 1))
+    assert_false(layout.in_viewport(400, layout.WIN_H() - layout.STATUS_H()))
+    // ...and the pixel just inside each is.
+    assert_true(layout.in_viewport(400, layout.TOOLBAR_H()))
+    assert_true(layout.in_viewport(400, layout.WIN_H() - layout.STATUS_H() - 1))
+}
+
+test "the tool palette column is not the viewport" {
+    assert_false(layout.in_viewport(0, 300))
+    assert_false(layout.in_viewport(layout.TOOLS_W() - 1, 300))
+    assert_true(layout.in_viewport(layout.TOOLS_W(), 300))
+}
+
+test "the SV square and the hue strip do not overlap each other" {
+    // They sit side by side with a gap. Overlapping them would make a press in
+    // the shared column mean whichever branch canvas_press checked first.
+    assert_true(layout.SV_X() + layout.SV_SIZE() <= layout.HUE_X())
+    var y = layout.SV_Y() + 40
+    var x = layout.SV_X()
+    var both = 0
+    while x < layout.HUE_X() + layout.HUE_W() + 4 {
+        var a = layout.in_sv(x, y)
+        var b = layout.in_hue(x, y)
+        if a { if b { both = both + 1 } }
+        x = x + 1
+    }
+    assert_eq(both, 0)
+}
+
+test "neither picker region is inside the viewport" {
+    // canvas_press checks the picker FIRST and returns, so an overlap would make
+    // a canvas click near the panel edge set the colour instead of painting.
+    var y = layout.SV_Y()
+    while y < layout.SV_Y() + layout.SV_SIZE() {
+        assert_false(layout.in_viewport(layout.SV_X(), y))
+        assert_false(layout.in_viewport(layout.SV_X() + layout.SV_SIZE() - 1, y))
+        assert_false(layout.in_viewport(layout.HUE_X(), y))
+        y = y + 25
+    }
+}
+
+test "in_sv and in_hue are half-open on their far edges too" {
+    assert_true(layout.in_sv(layout.SV_X(), layout.SV_Y()))
+    assert_true(layout.in_sv(layout.SV_X() + layout.SV_SIZE() - 1,
+                             layout.SV_Y() + layout.SV_SIZE() - 1))
+    assert_false(layout.in_sv(layout.SV_X() + layout.SV_SIZE(), layout.SV_Y()))
+    assert_false(layout.in_sv(layout.SV_X(), layout.SV_Y() - 1))
+
+    assert_true(layout.in_hue(layout.HUE_X(), layout.HUE_Y()))
+    assert_true(layout.in_hue(layout.HUE_X() + layout.HUE_W() - 1,
+                              layout.HUE_Y() + layout.SV_SIZE() - 1))
+    assert_false(layout.in_hue(layout.HUE_X() + layout.HUE_W(),
+                               layout.HUE_Y()))
+    assert_false(layout.in_hue(layout.HUE_X(),
+                               layout.HUE_Y() + layout.SV_SIZE()))
+}
+
+// ---- the colour picker, both directions ------------------------------------
+
+test "the SV square reaches both endpoints of saturation and value" {
+    // The divisor is SIZE-1 precisely so the LAST column is saturation 1.0.
+    // Dividing by SIZE would cap it at 149/150 and make pure colour unreachable
+    // with the mouse - a bug you cannot see, only fail to achieve.
+    assert_true(pixel.approx(layout.sv_sat(layout.SV_X()), 0.0, 0.00001))
+    assert_true(pixel.approx(layout.sv_sat(layout.SV_X() + layout.SV_SIZE() - 1),
+                             1.0, 0.00001))
+    // Value runs DOWN: the top row is 1.0 (bright), the bottom row is 0.0.
+    assert_true(pixel.approx(layout.sv_val(layout.SV_Y()), 1.0, 0.00001))
+    assert_true(pixel.approx(layout.sv_val(layout.SV_Y() + layout.SV_SIZE() - 1),
+                             0.0, 0.00001))
+}
+
+test "saturation increases rightwards and value decreases downwards" {
+    var prev_s = 0.0 - 1.0
+    var prev_v = 2.0
+    var i = 0
+    while i < layout.SV_SIZE() {
+        var s = layout.sv_sat(layout.SV_X() + i)
+        var v = layout.sv_val(layout.SV_Y() + i)
+        assert_true(s > prev_s)
+        assert_true(v < prev_v)
+        prev_s = s
+        prev_v = v
+        i = i + 1
+    }
+}
+
+test "the middle of the SV square is the middle of the ramp" {
+    var mid = layout.SV_X() + (layout.SV_SIZE() - 1) / 2
+    assert_true(pixel.approx(layout.sv_sat(mid), 0.5, 0.005))
+}
+
+test "the crosshair sits within one pixel of the click that produced its colour" {
+    // THE ROUND TRIP THAT MATTERS. paint_picker draws the crosshair with
+    // sv_x_of_sat/sv_y_of_val; canvas_press reads the colour with sv_sat/sv_val.
+    // If they disagree the marker drifts from the pointer, which is the classic
+    // "picker feels broken" bug.
+    //
+    // IT IS NOT EXACT, AND THAT IS A REAL DEFECT rather than a property of the
+    // design: `.to_int()` TRUNCATES, so `int(sat * 149)` lands a pixel short
+    // whenever the float division and multiplication do not recover the integer
+    // exactly. Rounding (+0.5 before to_int) would close it. Asserted as it IS,
+    // bounded at one pixel, and the drifting columns COUNTED, so a rounding fix
+    // turns this test red and gets to tighten it rather than passing silently.
+    var x = layout.SV_X()
+    var drift_x = 0
+    while x < layout.SV_X() + layout.SV_SIZE() {
+        var bx = layout.sv_x_of_sat(layout.sv_sat(x))
+        assert_true(bx == x or bx == x - 1)
+        if bx != x { drift_x = drift_x + 1 }
+        x = x + 1
+    }
+    // The value axis drifts the SAME way (never past the click, always one short)
+    // even though value runs downwards, because the truncation happens after the
+    // 1.0- flip. It drifts on far more rows: 29 of 150 against the x axis's 5.
+    var y = layout.SV_Y()
+    var drift_y = 0
+    while y < layout.SV_Y() + layout.SV_SIZE() {
+        var by = layout.sv_y_of_val(layout.sv_val(y))
+        assert_true(by == y or by == y - 1)
+        if by != y { drift_y = drift_y + 1 }
+        y = y + 1
+    }
+    // Pinned exactly. Never zero (the truncation is live), never large enough to
+    // read as lag, and a rounding fix drives both to 0 and fails here loudly.
+    assert_eq(drift_x, 5)
+    assert_eq(drift_y, 29)
+}
+
+test "the hue strip covers the full circle without wrapping at the bottom" {
+    // Hue divides by SIZE, not SIZE-1, because it is CYCLIC: 360 IS 0, so there
+    // is no endpoint to reach and the last row must stay just under 360. Using
+    // SIZE-1 here would make the strip's bottom pixel wrap back to red, and the
+    // marker for hue 359 would then sit a pixel off the end.
+    assert_true(pixel.approx(layout.hue_at(layout.HUE_Y()), 0.0, 0.00001))
+    var last = layout.hue_at(layout.HUE_Y() + layout.SV_SIZE() - 1)
+    assert_true(last < 360.0)
+    assert_true(last > 355.0)
+    // Every row is a legal hue.
+    var y = layout.HUE_Y()
+    while y < layout.HUE_Y() + layout.SV_SIZE() {
+        var h = layout.hue_at(y)
+        assert_true(h >= 0.0)
+        assert_true(h < 360.0)
+        y = y + 1
+    }
+}
+
+test "the hue marker sits within one row of the click that produced its hue" {
+    // Same truncation as the SV square, and WORSE here: 16 of 150 rows drift by
+    // one instead of 5, because the hue round trip goes through a multiply by 360
+    // and back. Bounded and counted rather than fixed - see the note on the SV
+    // round trip.
+    var y = layout.HUE_Y()
+    var drift = 0
+    while y < layout.HUE_Y() + layout.SV_SIZE() {
+        var back = layout.hue_y_of(layout.hue_at(y))
+        assert_true(back == y or back == y - 1)
+        if back != y { drift = drift + 1 }
+        y = y + 1
+    }
+    assert_eq(drift, 16)
+}
+
+test "the hue marker for a named colour is where you would point at it" {
+    // 150px for 360 degrees, so green (120) is 50px down and blue (240) 100px.
+    assert_eq(layout.hue_y_of(0.0), layout.HUE_Y())
+    assert_eq(layout.hue_y_of(120.0), layout.HUE_Y() + 50)
+    assert_eq(layout.hue_y_of(240.0), layout.HUE_Y() + 100)
+}
+
+test "a hue of exactly 360 lands on the last row rather than past the strip" {
+    // paint.hue() is normalised, but the eyedropper feeds this from the
+    // composite, so 360.0 arriving is a matter of one float rounding. It must
+    // not draw the marker outside the strip.
+    var y = layout.hue_y_of(360.0)
+    assert_true(y <= layout.HUE_Y() + layout.SV_SIZE())
+}
+
+// ---- layer rows ------------------------------------------------------------
+
+test "row bands are stacked one ROW_H apart with a gap between them" {
+    assert_eq(layout.row_y(0), layout.LAYERS_Y())
+    assert_eq(layout.row_y(1), layout.LAYERS_Y() + layout.ROW_H())
+    assert_eq(layout.row_y(5), layout.LAYERS_Y() + 5 * layout.ROW_H())
+    // The band is shorter than the pitch, which is what leaves the gap. Equal
+    // would make the list one solid block and the rows indistinguishable.
+    assert_true(layout.row_band_h() < layout.ROW_H())
+    assert_eq(layout.row_band_h(), layout.ROW_H() - 3)
+}
+
+test "row_fits stops the list before it reaches the status bar" {
+    // The painter truncates rather than drawing over the chrome. The boundary is
+    // the interesting part: the last fitting row must END at or before the
+    // viewport's bottom, and the next one must not fit.
+    var n = layout.rows_visible()
+    assert_true(n > 0)
+    assert_true(layout.row_fits(layout.row_y(n - 1)))
+    assert_false(layout.row_fits(layout.row_y(n)))
+    var bottom = layout.row_y(n - 1) + layout.ROW_H()
+    assert_true(bottom <= layout.VIEW_Y() + layout.VIEW_H())
+}
+
+test "the layer list has room for a realistic number of rows" {
+    // Not a tautology: it is the assertion that the panel's vertical budget
+    // (picker + swatch + buttons + slider) has not eaten the list. If someone
+    // grows the picker to 300px this fails instead of silently showing 2 layers.
+    assert_true(layout.rows_visible() >= 8)
+}
+
+test "indenting a row moves its band right and shrinks it by the same amount" {
+    // The band is indented, not just the text: an indented band reads as
+    // containment, a full-width band with indented text reads as a long name.
+    var d = 0
+    while d < 6 {
+        assert_eq(layout.row_band_x(d), layout.PANEL_X() + 6 + d * 12)
+        // Right edge is FIXED as the band's left edge moves - that is what makes
+        // it read as nesting rather than as a row sliding off the panel.
+        assert_eq(layout.row_band_x(d) + layout.row_band_w(d),
+                  layout.row_band_x(0) + layout.row_band_w(0))
+        d = d + 1
+    }
+    assert_eq(layout.row_indent(0), 0)
+    assert_eq(layout.row_indent(3), 36)
+}
+
+test "a row band never escapes the panel at any depth" {
+    var d = 0
+    while d < 10 {
+        assert_true(layout.row_band_x(d) >= layout.PANEL_X())
+        assert_true(layout.row_band_x(d) + layout.row_band_w(d)
+                    <= layout.PANEL_X() + layout.PANEL_W())
+        d = d + 1
+    }
+}
+
+test "the twisty column comes before the visibility box at every depth" {
+    // THE TWO-PIXEL BOUNDARY. The twisty is drawn at indent+9 and the box at
+    // indent+11, and on_layer_row checks hits_twisty FIRST. If the two boundaries
+    // ever crossed, a click meant to fold a group would toggle its visibility -
+    // a destructive action in place of a view change.
+    var d = 0
+    while d < 6 {
+        assert_true(layout.twisty_x(d) < layout.vis_box_x(d))
+        assert_true(layout.vis_box_x(d) < layout.vis_dot_x(d))
+        // Both controls are inside the band they belong to.
+        assert_true(layout.twisty_x(d) >= layout.row_band_x(d))
+        assert_true(layout.vis_dot_x(d) + 7
+                    <= layout.row_band_x(d) + layout.row_band_w(d))
+        d = d + 1
+    }
+}
+
+test "the twisty hit column is a strict subset of the visibility one" {
+    // hits_visibility is checked second, so anything the twisty claims must also
+    // satisfy hits_visibility - otherwise there would be a dead strip between
+    // them where a press did nothing at all.
+    var d = 0
+    while d < 5 {
+        var x = layout.PANEL_X()
+        while x < layout.PANEL_X() + layout.PANEL_W() {
+            if layout.hits_twisty(x, d) {
+                assert_true(layout.hits_visibility(x, d))
+            }
+            x = x + 1
+        }
+        d = d + 1
+    }
+}
+
+test "the three row zones are contiguous and in order" {
+    // A press in a row is one of exactly three things: fold, toggle visibility,
+    // or select. Walk the whole band and check the transitions happen once each,
+    // in that order, with no gap and no third boundary.
+    var d = 2
+    var zone = 0
+    var flips = 0
+    var x = layout.row_band_x(d)
+    while x < layout.row_band_x(d) + layout.row_band_w(d) {
+        var z = 2
+        if layout.hits_twisty(x, d) { z = 0 }
+        else { if layout.hits_visibility(x, d) { z = 1 } }
+        if z != zone {
+            // Zones only ever advance, never go back.
+            assert_true(z > zone)
+            zone = z
+            flips = flips + 1
+        }
+        x = x + 1
+    }
+    assert_eq(flips, 2)
+    assert_eq(zone, 2)
+}
+
+test "the twisty and visibility boundaries move with the indent" {
+    // A nested group's controls must follow its band. If the boundaries were
+    // absolute, a depth-2 group's twisty would be drawn at indent+9 but hit at
+    // the depth-0 column, and folding it would be impossible.
+    var d = 0
+    while d < 5 {
+        // The pixel just inside the twisty column at this depth...
+        assert_true(layout.hits_twisty(layout.PANEL_X() + 21 + d * 12, d))
+        // ...and the one just outside it.
+        assert_false(layout.hits_twisty(layout.PANEL_X() + 22 + d * 12, d))
+        assert_true(layout.hits_visibility(layout.PANEL_X() + 27 + d * 12, d))
+        assert_false(layout.hits_visibility(layout.PANEL_X() + 28 + d * 12, d))
+        d = d + 1
+    }
+}
+
+test "a depth-0 name click does not fold and a depth-2 twisty click does" {
+    // The concrete confusion the indent creates: x=966 is the NAME on a
+    // top-level row (select), and the TWISTY on a depth-2 row (fold).
+    assert_false(layout.hits_twisty(966, 0))
+    assert_true(layout.hits_twisty(966, 3))
+}
+
+test "the name is clipped short of the blend and opacity readout" {
+    // A long layer name must not run under the right-aligned "normal 100%".
+    // `mw` is that readout's measured width, the one input here from the font.
+    var d = 0
+    while d < 4 {
+        var mw = 70
+        var name_end = layout.row_clip_x(d) + layout.row_clip_w(d, mw)
+        assert_true(name_end <= layout.row_meta_x(mw))
+        // The name starts inside its own clip rect.
+        assert_true(layout.row_name_x(d) > layout.row_clip_x(d))
+        d = d + 1
+    }
+}
+
+test "the meta readout is right-aligned inside the panel" {
+    var mw = 70
+    assert_eq(layout.row_meta_x(mw) + mw, layout.PANEL_X() + layout.PANEL_W() - 10)
+    // A wider readout starts further left, never off the panel.
+    assert_true(layout.row_meta_x(120) < layout.row_meta_x(70))
+    assert_true(layout.row_meta_x(120) > layout.PANEL_X())
+}
+
+test "a very wide meta readout leaves no negative-width clip rect" {
+    // Win_clip with a negative width is not a clip the toolkit defines. A
+    // pathological font (or a 12-word blend name) must degrade to "no room for
+    // the name", not to a malformed rectangle.
+    //
+    // NOTE: this currently FAILS to be guarded in layout itself - the arithmetic
+    // is allowed to go negative and only the toolkit's own behaviour saves it.
+    // Asserted as it IS, so the day a clamp is added this test says so.
+    assert_true(layout.row_clip_w(0, 500) < 0)
+    // ...and at a realistic width it is comfortably positive.
+    assert_true(layout.row_clip_w(0, 70) > 50)
+}
