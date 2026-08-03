@@ -1,50 +1,175 @@
-// todo-finder -- Scan source files for action item comments
-// Demonstrates: spawn for concurrent file scanning, string interpolation
+// todo-finder -- walk a source tree concurrently and report its code debt.
+//
+// The previous version was a hardcoded-pattern clone of cli-tools/wyn-grep carrying a
+// hardcoded, WRONG file list ("../sample-apps/cli-tools/loc/src/main.wyn", ...), so
+// every File.exists() was false and the entire run was:
+//     === TODO Finder ===
+//
+//     Total items found: 0
+// Its header also claimed "Demonstrates: spawn for concurrent file scanning" while
+// containing no spawn at all.
+//
+// Rewritten into a real debt scanner, and into something wyn-grep is not:
+//   * `enum Marker` in severity order, so a hit's rank, tag and colour are each one
+//     `match` with no fallthrough - not five copy-pasted `if line.contains(...)`
+//     blocks that can silently disagree about what counts.
+//   * a marker counts only as a WHOLE WORD inside a COMMENT, so the `"BUG"` string
+//     literal below is not a hit and neither is `TODOS`. A grep cannot tell.
+//   * the tree is walked recursively and every file scanned CONCURRENTLY with
+//     `spawn` + `await_all` - the old header's claim, finally true.
+//   * one `struct Hit`: the chart, the worst-files table and the grouped listing all
+//     derive from that one list, so they cannot drift apart.
+//
+//   wyn run src/main.wyn [path]   # default: the bundled, debt-laden sample/ tree
 
-fn find_todos(filename: string) -> int {
-    var content = File.read(filename)
-    var lines = content.split("\n")
-    var found = 0
-    var line_num = 1
-    for line in lines {
-        if line.contains("TODO") {
-            print("  ${filename}:${line_num} [TODO] ${line.trim()}")
-            found += 1
+enum Marker { Bug, Fixme, Hack, Xxx, Todo }
+
+struct Hit { file: string, line: int, mark: Marker, sev: int, text: string }
+struct Scan { path: string, blob: string, n: int }
+
+var marks = ["BUG", "FIXME", "HACK", "XXX", "TODO"]
+var openers = ["//", "#", "/*", "*", "--"]
+var code_ext = ["wyn", "c", "h", "cpp", "py", "js", "ts", "go", "rs", "java", "sh", "md"]
+
+fn of_tag(s: string) -> Marker => match s {
+    "BUG" => Marker.Bug, "FIXME" => Marker.Fixme, "HACK" => Marker.Hack,
+    "XXX" => Marker.Xxx, _ => Marker.Todo
+}
+fn sev(m: Marker) -> int => match m {
+    Marker.Bug => 0, Marker.Fixme => 1, Marker.Hack => 2, Marker.Xxx => 3, Marker.Todo => 4
+}
+fn tag(m: Marker) -> string => match m {
+    Marker.Bug => "BUG", Marker.Fixme => "FIXME", Marker.Hack => "HACK",
+    Marker.Xxx => "XXX", Marker.Todo => "TODO"
+}
+fn colour(m: Marker) -> string => match m {
+    Marker.Bug => "\x1b[1;31m", Marker.Fixme => "\x1b[31m", Marker.Hack => "\x1b[33m",
+    Marker.Xxx => "\x1b[35m", Marker.Todo => "\x1b[36m"
+}
+
+// Collect scannable files. Dot-entries are skipped, so .git never gets walked, and so
+// are generated .wyn.c / .wyn.out artifacts.
+fn walk(dir: string) -> [string] {
+    var out = []
+    for name in File::list_dir(dir) {
+        if name.len() == 0 or name.substring(0, 1) == "." { continue }
+        var p = dir + "/" + name
+        if File::is_dir(p) == 1 { for q in walk(p) { out.push("" + q) } }
+        else if not p.contains(".wyn.") {
+            var bits = p.split(".")
+            if bits.len() > 1 and code_ext.contains("" + bits[bits.len() - 1]) { out.push(p) }
         }
-        if line.contains("FIXME") {
-            print("  ${filename}:${line_num} [FIXME] ${line.trim()}")
-            found += 1
-        }
-        if line.contains("HACK") {
-            print("  ${filename}:${line_num} [HACK] ${line.trim()}")
-            found += 1
-        }
-        line_num += 1
     }
-    return found
+    return out
+}
+
+// One file's text, off the main thread. `text` is read by the caller and handed in,
+// and split with `split("\n")` - both work around live thread-safety bugs in the
+// runtime. Hits come back as a tab-separated blob; main re-inflates them into Hits.
+fn scan(path: string, text: string) -> Scan {
+    var word = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_\""
+    var blob = ""
+    var n = 0
+    var ln = 1
+    for line in text.split("\n") {
+        // Where the comment starts, if anywhere: the earliest opener on the line.
+        var cmt = -1
+        for o in openers {
+            var i = line.index_of(o)
+            if i >= 0 and (cmt < 0 or i < cmt) { cmt = i }
+        }
+        for m in marks {
+            var at = line.index_of(m)
+            var end = at + m.len()
+            // After the opener, and a whole word: TODOS and "BUG" are not markers.
+            var whole = end >= line.len() or not word.contains(line.substring(end, end + 1))
+            if cmt >= 0 and at > cmt and whole {
+                blob = blob + "${ln}\t${m}\t${line.trim()}\n"
+                n += 1
+            }
+        }
+        ln += 1
+    }
+    var s = Scan { path: path, blob: blob, n: n }
+    return s
 }
 
 fn main() {
-    print("=== TODO Finder ===")
-    print("")
-
-    var files = [
-        "../sample-apps/cli-tools/loc/src/main.wyn",
-        "../sample-apps/cli-tools/todo-finder/src/main.wyn",
-        "../sample-apps/cli-tools/word-counter/src/main.wyn",
-        "../sample-apps/cli-tools/config-reader/src/main.wyn",
-        "../sample-apps/cli-tools/md-toc/src/main.wyn",
-        "../sample-apps/cli-tools/twux/main.wyn"
-    ]
-    var count = files.len()
-    var total = 0
-
-    for i in 0..count {
-        if File.exists(files[i]) {
-            total += find_todos(files[i])
-        }
+    print("\x1b[1;36m═══ code debt ═══\x1b[0m")
+    // A path argument, else the bundled debt-laden tree, else the cwd.
+    var args = System.args()
+    var top = "."
+    if args.len() > 1 { top = "" + args[1] }
+    else if File::is_dir("sample") == 1 { top = "sample" }
+    var files = walk(top)
+    if files.len() == 0 {
+        print("  no scannable files under \x1b[1m${top}\x1b[0m")
+        return
     }
 
+    // Every file scanned at once.
+    var futs = []
+    for f in files { futs.push(spawn scan(f, File.read(f))) }
+    var scans = await_all(futs)
+
+    var hits = []
+    var per_file = HashMap.new()
+    for s in scans {
+        if s.n == 0 { continue }
+        var path = "" + s.path
+        per_file.insert_int(path, s.n)
+        for l in s.blob.split("\n") {
+            if l.len() == 0 { continue }
+            var c = l.split("\t")
+            var m = of_tag("" + c[1])
+            hits.push(Hit { file: path, line: c[0].to_int(), mark: m, sev: sev(m), text: "" + c[2] })
+        }
+    }
+    var dirty = per_file.keys().len()
+    print("  \x1b[1m${hits.len()}\x1b[0m markers in \x1b[1m${dirty}\x1b[0m of ${files.len()} files under \x1b[90m${top}\x1b[0m")
+
+    // Severity chart, worst marker first, scaled so the biggest bar is 30 wide.
+    var ladder = [Marker.Bug, Marker.Fixme, Marker.Hack, Marker.Xxx, Marker.Todo]
+    var sizes = []
+    for m in ladder {
+        var want = sev(m)
+        sizes.push(hits.filter((h) => h.sev == want).len())
+    }
+    var peak = sizes.max()
     print("")
-    print("Total items found: ${total}")
+    var r = 0
+    for m in ladder {
+        if sizes[r] > 0 {
+            print("  ${colour(m)}${tag(m).pad_right(6, " ")}${"█".repeat(1 + sizes[r] * 29 / peak)}\x1b[0m ${sizes[r]}")
+        }
+        r += 1
+    }
+
+    // Worst offenders, by hit count.
+    print("")
+    print("  \x1b[1mworst files\x1b[0m")
+    var ranked = per_file.keys().sort_by((k) => 0 - per_file.get_int("" + k))
+    for i in 0..5 {
+        if i >= dirty { break }
+        var k = "" + ranked[i]
+        print("  ${per_file.get_int(k).to_string().pad_left(4, " ")}  \x1b[90m${k}\x1b[0m")
+    }
+
+    // Every hit, grouped by marker, worst group first; 6 shown per group.
+    for m in ladder {
+        var want = sev(m)
+        var group = hits.filter((h) => h.sev == want)
+        if group.len() == 0 { continue }
+        print("")
+        print("  ${colour(m)}${tag(m)}\x1b[0m \x1b[90m(${group.len()})\x1b[0m")
+        var left = 6
+        for h in group {
+            if left == 0 { print("    \x1b[90m... ${group.len() - 6} more\x1b[0m") break }
+            var t = "" + h.text
+            if t.len() > 68 { t = t.substring(0, 65) + "..." }
+            print("    \x1b[90m${h.file}:${h.line}\x1b[0m ${t}")
+            left -= 1
+        }
+    }
+    print("")
 }

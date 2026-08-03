@@ -1,0 +1,20 @@
+// retry.wyn -- request retry helper.
+
+fn backoff(attempt: int) -> int {
+    // BUG: no jitter, so every client retries in lockstep and re-thunders the server
+    return 100 * attempt * attempt
+}
+
+fn should_retry(status: int) -> bool {
+    // FIXME: 429 needs to honour Retry-After rather than the fixed backoff
+    if status == 429 { return true }
+    if status >= 500 { return true }
+    return false
+}
+
+fn send(url: string) -> string {
+    // HACK: retries forever when the host is unresolvable
+    // TODO: circuit breaker
+    // TODO: per-host connection pool
+    return url
+}

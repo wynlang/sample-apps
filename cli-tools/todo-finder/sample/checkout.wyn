@@ -1,0 +1,22 @@
+// checkout.wyn -- order checkout flow (deliberately debt-laden: this is the fixture
+// cli-tools/todo-finder scans when you run it with no arguments).
+
+fn total(items: [int]) -> int {
+    // BUG: overflows for carts over 2^31; needs a widening accumulator
+    var sum = 0
+    for i in items { sum += i }
+    return sum
+}
+
+fn tax(amount: int, region: string) -> int {
+    // FIXME: rate table is hardcoded, should come from config
+    if region == "EU" { return amount * 21 / 100 }
+    return amount * 8 / 100          // XXX: which 8%? nobody remembers
+}
+
+fn apply_coupon(code: string, amount: int) -> int {
+    // HACK: string prefix match instead of a real coupon lookup
+    if code.contains("HALF") { return amount / 2 }
+    // TODO: expiry dates
+    return amount
+}
