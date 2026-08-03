@@ -1748,7 +1748,11 @@ fn arr_hof(id: int, method: string) -> string {
 // === Simple JSON serializer/deserializer ===
 fn json_ser(v: string) -> string {
     var t = vtag(v)
-    if t == "n" { return vdata(v) }
+    // vtostr, not vdata: a whole number produced by ARITHMETIC carries a ".0"
+    // (`[1,2].map(x => x*2)` -> "2.0"), and JS has one number type, so
+    // JSON.stringify must print 2, not 2.0. A literal 2 was already fine, which is
+    // why this only showed up on computed values.
+    if t == "n" { return vtostr(v) }
     if t == "s" { return "\"" + vdata(v).replace("\"", "\\\"") + "\"" }
     if t == "b" { return vdata(v) }
     if t == "N" { return "null" }
