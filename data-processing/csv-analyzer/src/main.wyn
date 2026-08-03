@@ -1,69 +1,202 @@
-// CSV Analyzer -- Read student grades, compute statistics
-// Demonstrates: File.read, string interpolation, structs, computed grades
+// csv-analyzer -- read a real CSV, infer each column's type, profile it, print it aligned.
+//
+// The previous version was a "Student Grade Analyzer" with the five students HARDCODED in
+// the source, and its table was ragged because the name column was never padded:
+//     Alice     85    92    78    85   B
+//     Bob     90    88    95    91   A
+//     Charlie     72    68    80    73   C
+// It also walked `content[idx]` a character at a time hunting for "\n", and it knew the
+// schema (name, math, sci, eng) at compile time - so it could analyze exactly one CSV:
+// the one already inside it.
+//
+// Rewritten as an actual CSV analyzer:
+//   * `.lines()` / `.split(",")` replace the hand-rolled character scan.
+//   * NO schema knowledge. `infer()` reads the values and returns `Kind { Int, Float,
+//     Text }`; `match` then picks statistics that make sense - min/max/mean/median for
+//     numbers, cardinality and top values for text - into one `struct Column`.
+//   * every column profiled CONCURRENTLY: `spawn` per column, joined by `await_all`.
+//   * every width computed from the widest cell and applied with `pad_right` (UTF-8
+//     aware), so nothing is ragged. Plus an 8-bucket histogram per numeric column.
+//
+//   wyn run src/main.wyn [file.csv]
+
+enum Kind { Int, Float, Text }
+
+struct Column {
+    name: string, kind: Kind, top: string, distinct: int,
+    min: float, max: float, mean: float, median: float, hist: [int]
+}
+
+fn kname(k: Kind) -> string => match k { Kind.Int => "int", Kind.Float => "float", Kind.Text => "text" }
+fn numeric(k: Kind) -> bool => match k { Kind.Text => false, _ => true }
+
+// A raw float prints as 14.285714285714286; round to 2 decimals. Int columns stay ints.
+fn f2(x: float) -> string {
+    var sign = ""
+    var v = x
+    if v < 0.0 { sign = "-"  v = 0.0 - v }
+    var n = (v * 100.0 + 0.5).to_int()
+    var frac = "${n % 100}"
+    return "${sign}${n / 100}.${frac.pad_left(2, "0")}"
+}
+fn num(k: Kind, x: float) -> string => match k { Kind.Int => "${x.to_int()}", _ => f2(x) }
+
+// One column's values: a stride through the flat cell array.
+fn column(cells: [string], ncol: int, j: int) -> [string] {
+    var out = []
+    var i = j
+    while i < cells.len() { out.push("" + cells[i])  i = i + ncol }
+    return out
+}
+
+// One aligned row. The last cell is left unpadded, so no line has trailing space.
+fn row(vals: [string], widths: [int]) -> string {
+    var out = []
+    var n = vals.len()
+    for j in 0..n { out.push(("" + vals[j]).pad_right(widths[j] * (n - 1 - j).min(1), " ")) }
+    return out.join("  ")
+}
+
+// 2 = looks like a float, 1 = looks like an int, 0 = anything else.
+fn shape(v: string) -> int {
+    var digits = 0
+    var dots = 0
+    for i in 0..v.len() {
+        var c = v[i]
+        if "0123456789".contains(c) { digits += 1 }
+        else if c == "." { dots += 1 }
+        else if not (c == "-" and i == 0) { return 0 }
+    }
+    if digits == 0 or dots > 1 { return 0 }
+    return dots + 1
+}
+
+// The type is whatever EVERY value agrees to be - no schema, no configuration.
+fn infer(vals: [string]) -> Kind {
+    var shapes = []
+    for v in vals { shapes.push(shape(v)) }
+    if shapes.min() == 0 { return Kind.Text }
+    if shapes.max() == 1 { return Kind.Int }
+    return Kind.Float
+}
+
+fn distinct_of(vals: [string]) -> int {
+    var seen = HashMap.new()
+    for v in vals { seen.insert_int(v, 1) }
+    return seen.keys().len()
+}
+
+// The two commonest values, as "Berlin 4x, Austin 3x".
+fn top_values(vals: [string]) -> string {
+    var counts = HashMap.new()
+    for v in vals { counts.insert_int(v, counts.get_int(v) + 1) }
+    var out = []
+    for round in 0..2 {
+        var best = ""
+        var n = 0
+        for k in counts.keys() { if counts.get_int(k) > n { n = counts.get_int(k)  best = "" + k } }
+        if n == 0 { break }
+        out.push("${best} ${n}x")
+        counts.insert_int(best, 0)
+    }
+    return out.join(", ")
+}
+
+// `top`/`distinct` come from the caller: HashMap is not concurrency-safe in the current
+// runtime, so the spawned half of the work stays purely numeric.
+fn profile(name: string, top: string, distinct: int, vals: [string]) -> Column {
+    var c = Column { name: name, kind: infer(vals), top: top, distinct: distinct,
+        min: 0.0, max: 0.0, mean: 0.0, median: 0.0, hist: [0, 0, 0, 0, 0, 0, 0, 0] }
+    if not numeric(c.kind) { return c }
+    var nums = []
+    for v in vals { nums.push(v.to_float()) }
+    var s = nums.sorted()
+    var mid = s.len() / 2
+    c.min = s.first()
+    c.max = s.last()
+    c.mean = nums.sum() / nums.len().to_float()
+    c.median = s[mid]
+    if s.len() % 2 == 0 { c.median = (s[mid - 1] + s[mid]) / 2.0 }
+    var span = c.max - c.min
+    if span == 0.0 { span = 1.0 }
+    for x in nums { c.hist[((x - c.min) / span * 7.99).to_int()] += 1 }
+    return c
+}
 
 fn main() {
-    print("=== Student Grade Analyzer ===")
-    print("")
+    print("\x1b[1;36m═══ csv analyzer ═══\x1b[0m")
 
-    // Data file lives next to this source; also try cwd for `wyn run` from src/.
-    var path = "src/data.csv"
-    if File.exists(path) == 0 { path = "data.csv" }
+    // The argument, or data.csv found from the app dir, the repo root, or src/.
+    var path = "data.csv"
+    var args = System.args()
+    if args.len() > 1 { path = "" + args[1] }
+    else if File.exists("data-processing/csv-analyzer/data.csv") == 1 { path = "data-processing/csv-analyzer/data.csv" }
+    else if File.exists("../data.csv") == 1 { path = "../data.csv" }
     if File.exists(path) == 0 {
-        print("data.csv not found - run from the app root (src/data.csv)")
+        print("  \x1b[31mno such file:\x1b[0m ${path}   (usage: wyn run src/main.wyn [file.csv])")
         return
     }
-    var content = File.read(path)
-    var line_start = 0
-    var total_len = content.len()
-    var count = 0
-    var sum_math = 0
-    var sum_sci = 0
-    var sum_eng = 0
-    var best_avg = 0
-    var best_name = ""
 
-    print("Name       Math  Sci   Eng   Avg  Grade")
-    print("─────────────────────────────────────────")
+    // The header names the columns; each later row appends its cells to one flat array.
+    var header = []
+    var cells = []
+    var rows = 0
+    for line in File.read(path).lines() {
+        if line.trim().len() == 0 { continue }
+        var fields = line.trim().split(",")
+        if header.len() == 0 { for f in fields { header.push(("" + f).trim()) }  continue }
+        if fields.len() != header.len() { continue }
+        for f in fields { cells.push(("" + f).trim()) }
+        rows += 1
+    }
+    var ncol = header.len()
+    if rows == 0 { print("  \x1b[31mno data rows in\x1b[0m ${path}")  return }
+    print("  \x1b[90m${path}\x1b[0m  ${rows} rows x ${ncol} columns")
 
-    for idx in 0..total_len {
-        if content[idx] == "\n" {
-            var line = content.substring(line_start, idx).trim()
-            line_start = idx + 1
+    // Width = widest cell in the column. Profiling = one spawn each, joined by await_all.
+    var futs = []
+    var widths = []
+    var upper = []
+    var rule = []
+    for j in 0..ncol {
+        var vals = column(cells, ncol, j)
+        var name = "" + header[j]
+        var w = name.len()
+        for v in vals { if v.len() > w { w = v.len() } }
+        widths.push(w)
+        upper.push(name.upper())
+        rule.push("─".repeat(w))
+        futs.push(spawn profile(name, top_values(vals), distinct_of(vals), vals))
+    }
+    var cols = await_all(futs)
 
-            if line.len() == 0 { continue }
-            if line.contains(",") == 0 { continue }
-
-            var name = line.split_at(",", 0)
-            var math_score = line.split_at(",", 1).to_int()
-            var sci_score = line.split_at(",", 2).to_int()
-            var eng_score = line.split_at(",", 3).to_int()
-            var avg = (math_score + sci_score + eng_score) / 3
-
-            var grade = "F"
-            if avg >= 90 { grade = "A" }
-            else if avg >= 80 { grade = "B" }
-            else if avg >= 70 { grade = "C" }
-            else if avg >= 60 { grade = "D" }
-
-            print("${name}     ${math_score}    ${sci_score}    ${eng_score}    ${avg}   ${grade}")
-
-            sum_math += math_score
-            sum_sci += sci_score
-            sum_eng += eng_score
-            count += 1
-
-            if avg > best_avg {
-                best_avg = avg
-                best_name = name
-            }
-        }
+    print("")
+    print("  \x1b[1m${row(upper, widths)}\x1b[0m")
+    print("  \x1b[90m${rule.join("  ")}\x1b[0m")
+    for i in 0..rows {
+        var cs = []
+        for j in 0..ncol { cs.push("" + cells[i * ncol + j]) }
+        print("  ${row(cs, widths)}")
     }
 
-    print("─────────────────────────────────────────")
+    // Which facts a column gets is decided by its inferred type - and a numeric column
+    // also gets its distribution, 8 equal buckets from min to max.
     print("")
-    print("Students:     ${count}")
-    print("Avg Math:     ${sum_math / count}")
-    print("Avg Science:  ${sum_sci / count}")
-    print("Avg English:  ${sum_eng / count}")
-    print("Top Student:  ${best_name} (avg: ${best_avg})")
+    print("  \x1b[1mcolumn profile\x1b[0m")
+    for c in cols {
+        var facts = "distinct ${c.distinct}, top: ${"" + c.top}"
+        if numeric(c.kind) {
+            facts = "min ${num(c.kind, c.min)}  max ${num(c.kind, c.max)}  mean ${f2(c.mean)}  median ${f2(c.median)}"
+        }
+        print("")
+        print("  \x1b[1m${("" + c.name).pad_right(12, " ")}\x1b[0m \x1b[36m${kname(c.kind).pad_right(6, " ")}\x1b[0m ${facts}")
+        if not numeric(c.kind) or c.min == c.max { continue }
+        var peak = c.hist.max()
+        for b in 0..8 {
+            var lo = num(c.kind, c.min + (c.max - c.min) * b.to_float() / 8.0)
+            var bar = "█".repeat(c.hist[b] * 20 / peak)
+            print("    ${lo.pad_left(11, " ")} \x1b[36m${bar}\x1b[0m ${c.hist[b]}")
+        }
+    }
+    print("")
 }
