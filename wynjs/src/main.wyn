@@ -1900,14 +1900,30 @@ fn call_builtin(name: string, args: [string]) -> string {
     if name == "_Object_entries" {
         if vtag(args[0]) == "o" {
             var oid: int = vdata(args[0]).to_int()
-            var aid = anew()
             var ks = okeys(oid)
+            // BUILD EVERY PAIR FIRST, THEN THE OUTER ARRAY.
+            //
+            // astore is a BUMP allocator: anew() pins abases[id] = anext and apush
+            // advances the shared anext. So two arrays being filled at the same time
+            // INTERLEAVE in one region: allocating the outer array up front and then
+            // pushing to a pair, then to the outer, then to the next pair, made the
+            // outer array's slots overlap the pairs. e[0][0] came back as the PAIR
+            // ITSELF (typeof "object", length 2) instead of the key, and any string
+            // USE of it - console.log, concatenation - then recursed until the stack
+            // overflowed. Reading it was fine, which is why this looked like a printing
+            // bug; `k.length` returning 2 for the key "a" is what gave it away.
+            //
+            // Each pair is therefore completed before the next allocation happens, and
+            // the outer array is allocated only once every pair is closed.
+            var pairs: [string] = []
             for k in ks {
                 var pair = anew()
                 apush(pair, vstr(k))
                 apush(pair, oget_own(oid, k))
-                apush(aid, varr(pair))
+                pairs.push(varr(pair))
             }
+            var aid = anew()
+            for pv in pairs { apush(aid, pv) }
             return varr(aid)
         }
         return varr(anew())
