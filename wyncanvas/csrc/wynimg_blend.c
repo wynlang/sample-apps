@@ -124,6 +124,81 @@ double wynimg_blend_px(long long mode, double cb, double cs) {
     return clamp01d(r);
 }
 
+
+// --- non-separable blend modes (W3C Compositing and Blending Level 1, sec. 10) ---
+//
+// Hue/Saturation/Color/Luminosity mix a chosen HSL component from one layer with the
+// rest from the other; they cannot be computed one channel at a time (blend_channel
+// returned Normal for them, so the UI's "Luminosity" produced Normal pixels). These
+// operate on a whole RGB triple.
+static double nb_lum(double r, double g, double b) {
+    return 0.3 * r + 0.59 * g + 0.11 * b;
+}
+static void nb_clip(double* r, double* g, double* b) {
+    double l = nb_lum(*r, *g, *b);
+    double n = (*r < *g ? (*r < *b ? *r : *b) : (*g < *b ? *g : *b));
+    double x = (*r > *g ? (*r > *b ? *r : *b) : (*g > *b ? *g : *b));
+    if (n < 0.0) {
+        if (l - n != 0.0) { *r = l + (*r - l) * l / (l - n);
+                            *g = l + (*g - l) * l / (l - n);
+                            *b = l + (*b - l) * l / (l - n); }
+    }
+    if (x > 1.0) {
+        if (x - l != 0.0) { *r = l + (*r - l) * (1.0 - l) / (x - l);
+                            *g = l + (*g - l) * (1.0 - l) / (x - l);
+                            *b = l + (*b - l) * (1.0 - l) / (x - l); }
+    }
+}
+static void nb_set_lum(double* r, double* g, double* b, double l) {
+    double d = l - nb_lum(*r, *g, *b);
+    *r += d; *g += d; *b += d;
+    nb_clip(r, g, b);
+}
+static double nb_sat(double r, double g, double b) {
+    double mx = (r > g ? (r > b ? r : b) : (g > b ? g : b));
+    double mn = (r < g ? (r < b ? r : b) : (g < b ? g : b));
+    return mx - mn;
+}
+// Scale the mid channel and stretch to [0,s]; the classic SetSat over sorted channels.
+static void nb_set_sat(double* r, double* g, double* b, double s) {
+    double* c[3] = { r, g, b };
+    // sort pointers by value (min, mid, max)
+    for (int a = 0; a < 3; a++) for (int bx = a+1; bx < 3; bx++)
+        if (*c[bx] < *c[a]) { double* t = c[a]; c[a] = c[bx]; c[bx] = t; }
+    double* mn = c[0]; double* md = c[1]; double* mx = c[2];
+    if (*mx > *mn) { *md = (*md - *mn) * s / (*mx - *mn); *mx = s; }
+    else           { *md = 0.0; *mx = 0.0; }
+    *mn = 0.0;
+}
+// Blend one whole pixel for a non-separable mode. cb/cs are backdrop/source RGB.
+static void wynimg_blend_nonsep(long long mode, double cbr, double cbg, double cbb,
+                                double csr, double csg, double csb,
+                                double* or_, double* og_, double* ob_) {
+    double r = csr, g = csg, b = csb;
+    switch (mode) {
+        case 22: // hue: source hue, backdrop sat+lum
+            r = csr; g = csg; b = csb;
+            nb_set_sat(&r, &g, &b, nb_sat(cbr, cbg, cbb));
+            nb_set_lum(&r, &g, &b, nb_lum(cbr, cbg, cbb));
+            break;
+        case 23: // saturation: source sat, backdrop hue+lum
+            r = cbr; g = cbg; b = cbb;
+            nb_set_sat(&r, &g, &b, nb_sat(csr, csg, csb));
+            nb_set_lum(&r, &g, &b, nb_lum(cbr, cbg, cbb));
+            break;
+        case 24: // color: source hue+sat, backdrop lum
+            r = csr; g = csg; b = csb;
+            nb_set_lum(&r, &g, &b, nb_lum(cbr, cbg, cbb));
+            break;
+        case 25: // luminosity: source lum, backdrop hue+sat
+            r = cbr; g = cbg; b = cbb;
+            nb_set_lum(&r, &g, &b, nb_lum(csr, csg, csb));
+            break;
+        default: break;
+    }
+    *or_ = clamp01d(r); *og_ = clamp01d(g); *ob_ = clamp01d(b);
+}
+
 long long wynimg_composite(void* dstp, void* srcp, void* maskp,
                            long long mode, double opacity) {
     // Handles, not pointers: a stale or freed handle resolves to NULL and takes
@@ -195,9 +270,20 @@ long long wynimg_composite(void* dstp, void* srcp, void* maskp,
         // pixels. It happened to agree for normal/overlay/hard-light/lighten on
         // the values the unit tests used, which is why all 31 render tests
         // passed over it.
-        double br = (1.0 - da) * sr + da * wynimg_blend_px(mode, dr, sr);
-        double bg = (1.0 - da) * sg + da * wynimg_blend_px(mode, dg, sg);
-        double bb = (1.0 - da) * sb + da * wynimg_blend_px(mode, db, sb);
+        // Non-separable modes (hue/sat/color/luminosity) mix HSL components across the
+        // whole pixel, so they cannot go through the per-channel wynimg_blend_px. Compute
+        // the blended triple once, then apply the same backdrop-alpha weighting.
+        double blr, blg, blb;
+        if (mode >= 22 && mode <= 25) {
+            wynimg_blend_nonsep(mode, dr, dg, db, sr, sg, sb, &blr, &blg, &blb);
+        } else {
+            blr = wynimg_blend_px(mode, dr, sr);
+            blg = wynimg_blend_px(mode, dg, sg);
+            blb = wynimg_blend_px(mode, db, sb);
+        }
+        double br = (1.0 - da) * sr + da * blr;
+        double bg = (1.0 - da) * sg + da * blg;
+        double bb = (1.0 - da) * sb + da * blb;
 
         // Standard source-over with the blended colour.
         double oa = alpha + da * (1.0 - alpha);

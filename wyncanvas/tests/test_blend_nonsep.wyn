@@ -1,0 +1,104 @@
+import pixel
+
+// The non-separable blend modes: hue (22), saturation (23), color (24), luminosity (25).
+//
+// These mix HSL components across a WHOLE pixel, so they cannot be computed one channel
+// at a time. They were silent no-ops: csrc/wynimg_blend.c fell through to `r = cs`
+// (Normal) for modes 22-26, while the UI's blend-mode button cycled into them and
+// reported "blend luminosity". A user picked Luminosity, the UI confirmed it, and the
+// pixels were Normal - proven by modes 22 and 23 producing byte-identical output.
+//
+// They can only be tested through the whole-pixel compositor, not wynimg_blend_px, so
+// this composites two known 1x1 images and checks the stored premultiplied result. The
+// expected numbers are computed by hand from the W3C SetLum/SetSat definitions (backdrop
+// alpha 1, opacity 1, so the output is just B(cb, cs) premultiplied by 1), NOT recorded
+// from a run.
+//
+// Call convention: extern fns bare, pub Wyn fns qualified (pixel.*).
+
+// Composite a source over a backdrop and return the resulting 1x1 buffer handle.
+// Backdrop b=(br,bg,bb), source s=(sr,sg,sb), both opaque.
+fn comp(mode: int, br: float, bg: float, bb: float, sr: float, sg: float, sb: float) -> int {
+    var dst = wynimg_new(1, 1)
+    var src = wynimg_new(1, 1)
+    wynimg_fill(dst, br, bg, bb, 1.0)
+    wynimg_fill(src, sr, sg, sb, 1.0)
+    wynimg_composite(dst, src, 0, mode, 1.0)
+    wynimg_free(src)
+    return dst
+}
+
+fn chan(h: int, i: int) -> float => wynimg_get(h, i)
+
+test "luminosity keeps the backdrop hue+sat and takes the source lum" {
+    // backdrop blue (0.2,0.2,0.9), source orange (0.9,0.5,0.1).
+    var h = comp(25, 0.2, 0.2, 0.9, 0.9, 0.5, 0.1)
+    // Hand-computed: setlum(backdrop, lum(source)) = (0.5236, 0.5236, 1.0), alpha 1.
+    assert_true(pixel.approx(chan(h, 0), 0.5236, 0.002))
+    assert_true(pixel.approx(chan(h, 1), 0.5236, 0.002))
+    assert_true(pixel.approx(chan(h, 2), 1.0, 0.002))
+    wynimg_free(h)
+}
+
+test "color takes the source hue+sat and the backdrop lum" {
+    var h = comp(24, 0.2, 0.2, 0.9, 0.9, 0.5, 0.1)
+    // Hand-computed: setlum(source, lum(backdrop)) = (0.4655, 0.2328, 0.0).
+    assert_true(pixel.approx(chan(h, 0), 0.4655, 0.002))
+    assert_true(pixel.approx(chan(h, 1), 0.2328, 0.002))
+    assert_true(pixel.approx(chan(h, 2), 0.0, 0.002))
+    wynimg_free(h)
+}
+
+test "the four non-separable modes are DISTINCT, not all Normal" {
+    // The bug's signature: modes 22-25 all fell through to source (Normal), so any two
+    // gave identical pixels. Composite the same pair through each and confirm they differ.
+    var hue = comp(22, 0.2, 0.2, 0.9, 0.9, 0.5, 0.1)
+    var sat = comp(23, 0.2, 0.2, 0.9, 0.9, 0.5, 0.1)
+    var col = comp(24, 0.2, 0.2, 0.9, 0.9, 0.5, 0.1)
+    var lum = comp(25, 0.2, 0.2, 0.9, 0.9, 0.5, 0.1)
+
+    // hue vs saturation must differ (they were byte-identical before the fix).
+    var hue_sat_differ = not pixel.approx(chan(hue, 0), chan(sat, 0), 0.01)
+                          or not pixel.approx(chan(hue, 1), chan(sat, 1), 0.01)
+                          or not pixel.approx(chan(hue, 2), chan(sat, 2), 0.01)
+    assert_true(hue_sat_differ)
+
+    // color vs luminosity must differ.
+    var col_lum_differ = not pixel.approx(chan(col, 0), chan(lum, 0), 0.01)
+                          or not pixel.approx(chan(col, 1), chan(lum, 1), 0.01)
+                          or not pixel.approx(chan(col, 2), chan(lum, 2), 0.01)
+    assert_true(col_lum_differ)
+
+    // And none of them is Normal (which would be the pure source, 0.9/0.5/0.1).
+    var lum_is_normal = pixel.approx(chan(lum, 0), 0.9, 0.01)
+                         and pixel.approx(chan(lum, 1), 0.5, 0.01)
+                         and pixel.approx(chan(lum, 2), 0.1, 0.01)
+    assert_true(not lum_is_normal)
+
+    wynimg_free(hue)
+    wynimg_free(sat)
+    wynimg_free(col)
+    wynimg_free(lum)
+}
+
+test "luminosity of a grey source is a neutral shift, not the source colour" {
+    // A grey source (0.5,0.5,0.5) under Luminosity should recolour the backdrop to that
+    // brightness while keeping its hue - the canonical use of the mode.
+    var h = comp(25, 0.8, 0.1, 0.1, 0.5, 0.5, 0.5)
+    // backdrop lum 0.8*0.3+0.1*0.59+0.1*0.11 = 0.31; source lum 0.5.
+    // setlum(backdrop, 0.5): shift each by (0.5-0.31)=0.19 -> (0.99,0.29,0.29), clipped.
+    assert_true(pixel.approx(chan(h, 0), 0.99, 0.01))
+    assert_true(pixel.approx(chan(h, 1), 0.29, 0.01))
+    assert_true(pixel.approx(chan(h, 2), 0.29, 0.01))
+    wynimg_free(h)
+}
+
+test "a separable mode still composites correctly (control)" {
+    // Multiply (mode 1) of 0.5 over 0.5 backdrop = 0.25 in each channel. Confirms the
+    // non-separable branch did not disturb the normal path.
+    var h = comp(1, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5)
+    assert_true(pixel.approx(chan(h, 0), 0.25, 0.002))
+    assert_true(pixel.approx(chan(h, 1), 0.25, 0.002))
+    assert_true(pixel.approx(chan(h, 2), 0.25, 0.002))
+    wynimg_free(h)
+}
