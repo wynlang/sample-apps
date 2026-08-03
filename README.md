@@ -4,14 +4,15 @@ Real-world programs written in Wyn. Every app compiles and runs.
 
 ## Categories
 
-### 🛠 cli-tools/ (6 apps)
+### 🛠 cli-tools/ (7 apps)
 | App | Description |
 |-----|-------------|
-| **loc** | Count lines of code |
-| **todo-finder** | Scan for TODO/FIXME comments |
+| **loc** | Count lines of code, with per-language comment syntax |
+| **todo-finder** | Scan for TODO/FIXME markers in comments, ranked by severity |
 | **word-counter** | Word frequency analysis |
-| **config-reader** | Parse key=value config files |
-| **md-toc** | Generate Markdown TOC |
+| **config-reader** | Parse a sectioned config and validate it against a schema |
+| **md-toc** | Generate a Markdown TOC with GitHub-compatible anchors |
+| **wyn-grep** | Search files for a pattern |
 | **twux** | Terminal multiplexer *(interactive)* |
 
 ### 🖥 sysadmin/ (13 apps)
@@ -26,7 +27,7 @@ Real-world programs written in Wyn. Every app compiles and runs.
 | **httpcheck** | HTTP health checker with timing |
 | **logwatch** | Log file analyzer with severity highlighting |
 | **servicemon** | Service health monitor |
-| **envdiff** | Environment variable inspector |
+| **envdiff** | Diff the environment against a baseline, redacting secrets |
 | **filebrowser** | File browser TUI *(interactive)* |
 | **dockermon** | Docker container monitor |
 | **gitdash** | Git repository dashboard |
@@ -35,7 +36,7 @@ Real-world programs written in Wyn. Every app compiles and runs.
 | App | Description |
 |-----|-------------|
 | **api-client** | HTTP + JSON + Base64 + Crypto + CSV + SQLite |
-| **csv-analyzer** | Student grade statistics |
+| **csv-analyzer** | Group and aggregate typed CSV columns |
 | **log-parser** | Parse and report log errors |
 
 ### 🧮 algorithms/ (2 apps)
@@ -44,23 +45,31 @@ Real-world programs written in Wyn. Every app compiles and runs.
 | **sorting** | Quicksort, mergesort, bubblesort |
 | **fibonacci** | Recursive vs iterative comparison |
 
-### 🌐 web/ (3 apps)
+### 🌐 web/ (5 apps)
 | App | Description |
 |-----|-------------|
 | **website** | Web server with HTML templating and JSON API |
 | **server** | Full web server with routing, SQLite, JSON API, arena GC |
 | **rest-api** | REST API server with SQLite + JSON |
+| **template-demo** | HTML templating on its own |
+| **wyn-web-demo** | Minimal web app |
 
-### 🎨 gui/ (4 apps, require SDL3)
+### 📱 mobile/ (1 app)
+| App | Description |
+|-----|-------------|
+| **counter** | Counter with undo — state transitions kept separate from the UI, so they are testable without a device (the SDK entry points are stubs) |
+
+### 🎨 gui/ (5 apps, require SDL3)
 | App | Description |
 |-----|-------------|
 | **hello_gui** | Colored rectangles and text |
 | **dashboard** | System monitor with widgets |
 | **pong** | Classic Pong game |
+| **snake** | Classic Snake game |
 | **notepad** | Text editor with input widget |
 
 ### 🖼 wyncanvas/ (1 app, requires a C toolchain)
-The largest program here, and the only one with its own test suite. A layered
+The largest program here. A layered
 image editor: float32 linear premultiplied imaging core, 27 blend modes, masks,
 adjustment layers, PNG I/O, and undo/redo. Wyn for all logic, a thin C shim for
 per-pixel work.
