@@ -15,22 +15,19 @@ Real-world programs written in Wyn. Every app compiles and runs.
 | **wyn-grep** | Search files for a pattern |
 | **twux** | Terminal multiplexer *(interactive)* |
 
-### 🖥 sysadmin/ (13 apps)
+### 🖥 sysadmin/ (10 apps)
 | App | Description |
 |-----|-------------|
-| **sysmon** | System monitor - htop-lite *(interactive)* |
-| **sysinfo** | System dashboard (CPU, memory, disk, network) |
-| **procwatch** | Process monitor with CPU/memory sorting |
-| **diskmon** | Disk usage with color-coded progress bars |
-| **netstat-lite** | Network interfaces, ports, connections |
-| **portscanner** | Scan common ports |
-| **httpcheck** | HTTP health checker with timing |
+| **sysmon** | Terminal monitor — CPU/memory plus processes, disks or ports *(interactive)* |
+| **sysinfo** | One system report: host, CPU, memory, disks, processes, network — and it says so when a metric is unavailable |
+| **diskmon** | Disk usage with colour-coded bars, parsing POSIX `df -P` |
+| **portscanner** | Concurrent port scan, closed vs filtered |
+| **httpcheck** | Concurrent HTTP health checker with timing |
 | **logwatch** | Log file analyzer with severity highlighting |
-| **servicemon** | Service health monitor |
+| **servicemon** | Service health monitor (`await_all`, not a sleep) |
 | **envdiff** | Diff the environment against a baseline, redacting secrets |
-| **filebrowser** | File browser TUI *(interactive)* |
-| **dockermon** | Docker container monitor |
-| **gitdash** | Git repository dashboard |
+| **dockermon** | Docker container monitor, tab-split so statuses survive |
+| **gitdash** | Git dashboard — branch, divergence, conflicts, commits |
 
 ### 📊 data-processing/ (3 apps)
 | App | Description |
