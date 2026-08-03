@@ -93,7 +93,8 @@ fn main() {
         "try_catch_runtime",
         "object_getters",
         "object_entries",
-        "class_fields"
+        "class_fields",
+        "for_of_destructure"
     ]
 
     pass = 0

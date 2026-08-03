@@ -2780,6 +2780,107 @@ fn new_class(cls_name: string) -> string {
     return vobj(oid)
 }
 
+// === Destructuring patterns ===
+// A pattern is parsed ONCE into a comma-joined name list, then bound per value.
+// for-of needs exactly that split: the pattern text appears once in the source but
+// binds on every iteration, so parsing it per iteration would mean re-lexing the
+// header inside the loop.
+//
+// Array form: names in order; "" is a hole (`[, n]`); "...r" is a rest element.
+// Object form: "key:local" when renamed, else just the name.
+
+// Parse an array pattern, positioned ON the "[". Leaves the token after "]".
+fn p_arr_pattern() -> string {
+    var names = ""
+    var first = 1
+    next()
+    while tt != 35 and tt != 0 {
+        // One element per position. A bare "," means this position is a HOLE, which
+        // still consumes an index - `[, n]` binds n to element 1, not element 0.
+        if first == 0 { names = names + "," }
+        first = 0
+        if tt == 98 { next(); names = names + "..." + tv; next() }
+        else if tt != 36 { names = names + tv; next() }
+        if tt == 36 { next() }
+    }
+    if tt == 35 { next() }
+    return names
+}
+
+// Parse an object pattern, positioned ON the "{". Leaves the token after "}".
+fn p_obj_pattern() -> string {
+    var names = ""
+    next()
+    while tt != 33 and tt != 0 {
+        var key = tv; next()
+        var local = sdup(key)
+        if tt == 39 { next(); local = sdup(tv); next() }
+        if names.len() > 0 { names = names + "," }
+        names = names + key + ":" + local
+        if tt == 36 { next() }
+    }
+    if tt == 33 { next() }
+    return names
+}
+
+// Bind an array pattern's names against one value.
+fn bind_arr_pattern(names: string, val: string) {
+    if names.len() == 0 { return }
+    var ns = names.split(",")
+    var aid = -1
+    if vtag(val) == "a" { aid = vdata(val).to_int() }
+    var i = 0
+    for n in ns {
+        var nm = n.trim()
+        if nm.starts_with("...") {
+            var rest_name = nm.substring(3, nm.len())
+            var rid = anew()
+            if aid >= 0 { while i < alens[aid] { apush(rid, aget(aid, i)); i = i + 1 } }
+            edef(rest_name, varr(rid))
+        } else if nm.len() > 0 {
+            if aid >= 0 and i < alens[aid] { edef(nm, aget(aid, i)) } else { edef(nm, vundef()) }
+        }
+        i = i + 1
+    }
+}
+
+// Bind an object pattern's "key:local" pairs against one value.
+fn bind_obj_pattern(names: string, val: string) {
+    if names.len() == 0 { return }
+    var ns = names.split(",")
+    var oid = -1
+    if vtag(val) == "o" { oid = vdata(val).to_int() }
+    for n in ns {
+        var pair = n.trim()
+        if pair.len() == 0 { continue }
+        var ci2 = pair.index_of(":")
+        var key = sdup(pair)
+        var local = sdup(pair)
+        if ci2 > 0 { key = pair.substring(0, ci2); local = pair.substring(ci2 + 1, pair.len()) }
+        if oid >= 0 { edef(local, oget(oid, key)) } else { edef(local, vundef()) }
+    }
+}
+
+// Capture a loop body as source, positioned on its first token. A braced block runs
+// to its matching "}"; a braceless body (`for (v of a) s += v;`) is a single
+// statement ending at ";". Leaves the token after the body.
+fn capture_loop_body() -> string {
+    if tt == 32 {
+        var bstart = pos
+        next()
+        var depth = 1
+        while depth > 0 and tt != 0 { if tt == 32 { depth = depth + 1 } if tt == 33 { depth = depth - 1; if depth == 0 { break } } next() }
+        var b = sdup(src.substring(bstart, pos - 1))
+        next()
+        return b
+    }
+    var bstart2 = tstart
+    while tt != 37 and tt != 0 and tt != 33 { next() }
+    var b2 = sdup(src.substring(bstart2, pos - 1))
+    if tt == 37 { next() }
+    return b2
+}
+
 // === Statements ===
 fn p_stmt() {
     if overflow == 1 { return }
@@ -3209,6 +3310,42 @@ fn p_stmt() {
         // Check for for...in / for...of
         var decl_type = 0
         if tt == 50 or tt == 51 or tt == 52 { decl_type = tt; next() }
+        // `for (const [a,b] of pairs)` / `for (const {k} of objs)`. The two branches
+        // below are gated on the loop variable being a plain identifier (tt == 3), so
+        // a "[" or "{" PATTERN used to fall through to the C-style for(;;) path -
+        // whose captured condition source is empty, reads as truthy, and spins to the
+        // million-iteration cap. It presented as a hang.
+        if tt == 34 or tt == 32 {
+            var is_arr_pat = 0
+            if tt == 34 { is_arr_pat = 1 }
+            var pat = ""
+            if is_arr_pat == 1 { pat = p_arr_pattern() } else { pat = p_obj_pattern() }
+            // Only for-of destructures; `for (const [a] in o)` is not valid JS.
+            if tt == 94 {
+                next()
+                var dobj = p_expr()
+                if tt == 31 { next() }
+                var dbsrc = capture_loop_body()
+                var ds1 = sdup(src); var dp1 = pos; var dt1 = tt; var dv1 = sdup(tv)
+                epush()
+                if vtag(dobj) == "a" {
+                    var daid = vdata(dobj).to_int()
+                    var di = 0
+                    while di < alens[daid] {
+                        var elem = aget(daid, di)
+                        if is_arr_pat == 1 { bind_arr_pattern(pat, elem) } else { bind_obj_pattern(pat, elem) }
+                        src = sdup(dbsrc); pos = 0; next(); p_block_body()
+                        if retflag == 1 or throwflag == 1 { break }
+                        if brkflag == 1 { brkflag = 0; break }
+                        contflag = 0
+                        di = di + 1
+                    }
+                }
+                epop()
+                src = sdup(ds1); pos = dp1; tt = dt1; tv = sdup(dv1)
+                return
+            }
+        }
         if tt == 3 {
             var vname = tv; var sp = pos; next()
             // for (x in obj)
