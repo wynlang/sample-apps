@@ -1,0 +1,94 @@
+import pixel
+import xform
+
+// The transform operations are now reachable from the editor (ui.wyn run_transform,
+// bound to R / J / K). xform itself has a 1074-line suite; this file pins the specific
+// PROPERTIES the UI wiring depends on:
+//
+//   * flip/rotate are dimension-preserving, so they can go through the OP_PIXELS undo
+//     (which restores with wynimg_copy_into and REQUIRES the size to be unchanged);
+//   * they are exact involutions, so the undo/redo pair a user sees is bit-accurate.
+//
+// Before this, xform.wyn was dead code - imported only by its own test, never by the
+// editor - so rotate/flip/crop/resize could not be reached at all despite being written
+// and tested. This is the check that they stay wired and stay size-preserving.
+
+fn px(h: int, i: int) -> float => wynimg_get(h, i)
+
+test "flip and 180-rotate preserve the buffer's dimensions" {
+    // The property the OP_PIXELS undo relies on: a texture cannot be resized under its
+    // handle, so a transform used with that undo MUST keep w and h.
+    var src = wynimg_new(7, 3)
+    wynimg_fill(src, 0.4, 0.5, 0.6, 1.0)
+
+    var fh = xform.flip_h(src)
+    assert_true(wynimg_width(fh) == 7 and wynimg_height(fh) == 3)
+    var fv = xform.flip_v(src)
+    assert_true(wynimg_width(fv) == 7 and wynimg_height(fv) == 3)
+    var r = xform.rot_180(src)
+    assert_true(wynimg_width(r) == 7 and wynimg_height(r) == 3)
+
+    wynimg_free(src)  wynimg_free(fh)  wynimg_free(fv)  wynimg_free(r)
+}
+
+test "flip-h twice is the identity, pixel for pixel" {
+    // A distinctive gradient so a mirror is detectable and a double-mirror is verifiable.
+    var src = wynimg_new(4, 1)
+    var i = 0
+    while i < 4 {
+        wynimg_set(src, i * 4 + 0, 0.1 + i.to_float() * 0.2)   // R ramps across x
+        wynimg_set(src, i * 4 + 1, 0.5)
+        wynimg_set(src, i * 4 + 2, 0.5)
+        wynimg_set(src, i * 4 + 3, 1.0)
+        i = i + 1
+    }
+    var once = xform.flip_h(src)
+    // The leftmost source R (0.1) must now be on the right.
+    assert_true(pixel.approx(px(once, 3 * 4 + 0), 0.1, 0.0001))
+    assert_true(pixel.approx(px(once, 0), 0.7, 0.0001))
+
+    var twice = xform.flip_h(once)
+    var j = 0
+    while j < 4 {
+        assert_true(pixel.approx(px(twice, j * 4 + 0), px(src, j * 4 + 0), 0.0001))
+        j = j + 1
+    }
+    wynimg_free(src)  wynimg_free(once)  wynimg_free(twice)
+}
+
+test "rotate 180 twice is the identity" {
+    var src = wynimg_new(3, 2)
+    var i = 0
+    while i < 6 {
+        wynimg_set(src, i * 4 + 0, i.to_float() * 0.15)
+        wynimg_set(src, i * 4 + 1, 0.2)
+        wynimg_set(src, i * 4 + 2, 0.3)
+        wynimg_set(src, i * 4 + 3, 1.0)
+        i = i + 1
+    }
+    var r1 = xform.rot_180(src)
+    // First pixel of a 180-rotate is the last pixel of the source.
+    assert_true(pixel.approx(px(r1, 0), px(src, 5 * 4 + 0), 0.0001))
+    var r2 = xform.rot_180(r1)
+    var j = 0
+    while j < 6 {
+        assert_true(pixel.approx(px(r2, j * 4 + 0), px(src, j * 4 + 0), 0.0001))
+        j = j + 1
+    }
+    wynimg_free(src)  wynimg_free(r1)  wynimg_free(r2)
+}
+
+test "flip-v moves the top row to the bottom" {
+    var src = wynimg_new(1, 3)
+    wynimg_set(src, 0, 0.9)   // top pixel R
+    wynimg_set(src, 3, 1.0)
+    wynimg_set(src, 1 * 4 + 0, 0.5)
+    wynimg_set(src, 1 * 4 + 3, 1.0)
+    wynimg_set(src, 2 * 4 + 0, 0.1)   // bottom pixel R
+    wynimg_set(src, 2 * 4 + 3, 1.0)
+    var f = xform.flip_v(src)
+    // top and bottom swap
+    assert_true(pixel.approx(px(f, 0), 0.1, 0.0001))
+    assert_true(pixel.approx(px(f, 2 * 4 + 0), 0.9, 0.0001))
+    wynimg_free(src)  wynimg_free(f)
+}

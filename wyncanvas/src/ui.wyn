@@ -101,6 +101,7 @@ import view
 import project
 import filter
 import text
+import xform
 
 // Bridge from a wynimg buffer handle to a GPU texture. Implemented in
 // csrc/wynimg_tex.c, because resolving a handle to its `float*` requires
@@ -965,6 +966,41 @@ fn run_filter(what: string) {
     g_dirty = 1
 }
 
+// A dimension-PRESERVING transform (flip H/V, rotate 180). These slot into the same
+// OP_PIXELS undo the filters use, because the result is the same size as the source and
+// so wynimg_copy_into can restore it. Size-CHANGING transforms (rot90, crop, scale) need
+// a whole-document op and are a separate, larger change - not faked here.
+fn run_transform(what: string) {
+    if g_active < 0 { g_msg = "no active layer"  return }
+    var buf = layer.buffer(g_active)
+    if buf == 0 { g_msg = "cannot transform that layer"  return }
+
+    var result = 0
+    if what == "flip-h"   { result = xform.flip_h(buf) }
+    if what == "flip-v"   { result = xform.flip_v(buf) }
+    if what == "rotate180" { result = xform.rot_180(buf) }
+    if result == 0 { g_msg = what + " refused"  return }
+
+    // The transform returns a NEW buffer; record before/after and copy the result into
+    // the live buffer in place (its dimensions are unchanged, so the texture handle
+    // stays valid - the same invariant run_filter relies on).
+    var before = wynimg_clone(buf)
+    if before == 0 { wynimg_free(result)  g_msg = "out of memory"  return }
+    wynimg_copy_into(buf, result)
+    wynimg_free(result)
+
+    var after = wynimg_clone(buf)
+    if after == 0 {
+        wynimg_copy_into(buf, before)
+        wynimg_free(before)
+        g_msg = "out of memory"
+        return
+    }
+    history.record_pixels_as(g_active, before, after, what)
+    g_msg = what + " on " + scope_word()
+    g_dirty = 1
+}
+
 // ---- text ------------------------------------------------------------------
 //
 // ONE UNDO ENTRY, THE SAME WAY A FILTER GETS ONE: a before/after pixel pair.
@@ -1199,6 +1235,14 @@ fn handle_shortcut(key: int, mod: int) {
     if key == gui.SCANCODE_M { on_tool_mrect(0) return }
     if key == gui.SCANCODE_L { on_tool_lasso(0) return }
     if key == gui.SCANCODE_T { on_tool_text(0) return }
+
+    // Transforms on bare letters (R/J/K were unbound). Rotate 180 and the two flips are
+    // the dimension-preserving transforms that fit the OP_PIXELS undo; 90-degree rotate,
+    // crop and scale change the document size and need a whole-document op, so they are
+    // not bound yet rather than bound to something that would corrupt the texture handle.
+    if key == gui.SCANCODE_R { run_transform("rotate180") return }
+    if key == gui.SCANCODE_J { run_transform("flip-h") return }
+    if key == gui.SCANCODE_K { run_transform("flip-v") return }
 
     // Bracket keys size the brush - the one binding that is muscle memory rather
     // than a menu equivalent, which is why it earns a key of its own.
