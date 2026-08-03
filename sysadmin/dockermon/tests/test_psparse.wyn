@@ -1,0 +1,178 @@
+// Tests for dockermon's `docker ps` parsing, driven by CAPTURED output. No Docker
+// daemon is started and no container is created, so this suite gives the same answer on
+// a CI runner with no Docker as on a laptop with twenty containers -- which is the whole
+// reason the parse was split out of main.wyn.
+//
+// The fixture is real output from
+//     docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Status}}'
+// with the awkward rows kept in: a status containing spaces AND parentheses, an image
+// with a registry path and a tag, a paused container, an exited one, and a name long
+// enough to truncate.
+
+import psparse
+
+fn fixture() -> string {
+    return "web-1\tnginx:1.27\trunning\tUp 3 hours"
+        + "\ncache\tredis:7-alpine\tpaused\tUp 2 days (Paused)"
+        + "\nbatch-job\tbusybox:latest\texited\tExited (0) 5 minutes ago"
+        + "\nstaged\talpine:3.20\tcreated\tCreated"
+        + "\nterraform-mcp-server-primary\thashicorp/terraform-mcp-server:0.14.1\trunning\tUp 3 hours (healthy)"
+}
+
+test "four tab-separated fields, split on tabs only" {
+    var line = "web-1\tnginx:1.27\trunning\tUp 3 hours"
+    assert_true(psparse.is_row(line))
+    assert_eq(psparse.field(line, 0), "web-1")
+    assert_eq(psparse.field(line, 1), "nginx:1.27")
+    assert_eq(psparse.field(line, 2), "running")
+    assert_eq(psparse.field(line, 3), "Up 3 hours")
+}
+
+test "a status containing spaces stays one field" {
+    // THE ROW THAT BREAKS A SPLIT-ON-WHITESPACE PARSER. "Exited (0) 5 minutes ago" is
+    // five words; a words()-based parse yields "Exited" and drops the rest, which still
+    // prints something plausible.
+    var line = "batch-job\tbusybox:latest\texited\tExited (0) 5 minutes ago"
+    assert_eq(psparse.field(line, 3), "Exited (0) 5 minutes ago")
+    assert_eq(psparse.field(line, 2), "exited")
+}
+
+test "an image with a registry path and tag is not split on : or /" {
+    var line = "x\thashicorp/terraform-mcp-server:0.14.1\trunning\tUp"
+    assert_eq(psparse.field(line, 1), "hashicorp/terraform-mcp-server:0.14.1")
+}
+
+test "a row with too few fields is skipped, not half-read" {
+    // docker prints warnings and errors to the same stream in some configurations. A
+    // 3-field row must yield "" everywhere rather than a shifted read where the STATUS
+    // column shows the STATE.
+    var truncated = "web-1\tnginx:1.27\trunning"
+    assert_false(psparse.is_row(truncated))
+    assert_eq(psparse.field(truncated, 2), "")
+    assert_eq(psparse.field(truncated, 3), "")
+    assert_false(psparse.is_row(""))
+    assert_false(psparse.is_row("Cannot connect to the Docker daemon"))
+}
+
+test "an empty field is kept as empty, not treated as a missing field" {
+    // An unnamed container yields an empty Names field. That row is still four fields
+    // and still a container -- it must be counted, with an empty name.
+    var line = "\tnginx:1.27\trunning\tUp 3 hours"
+    assert_true(psparse.is_row(line))
+    assert_eq(psparse.field(line, 0), "")
+    assert_eq(psparse.field(line, 2), "running")
+    assert_eq(psparse.row_count(line), 1)
+}
+
+test "every row is counted -- last row included, blank lines excluded" {
+    assert_eq(psparse.row_count(fixture()), 5)
+    assert_eq(psparse.row_count(fixture() + "\n"), 5)
+    assert_eq(psparse.row_count(""), 0)
+    assert_eq(psparse.row_count("\n\n"), 0)
+}
+
+test "paused counts as up; created and exited do not" {
+    // The judgement call this app makes, stated once. A paused container exists and
+    // holds its resources; a created one has never run. Collapsing either into the
+    // other is a wrong answer, not a formatting choice.
+    assert_true(psparse.is_up("running"))
+    assert_true(psparse.is_up("paused"))
+    assert_false(psparse.is_up("exited"))
+    assert_false(psparse.is_up("created"))
+    assert_false(psparse.is_up("other"))
+}
+
+test "the up tally over the fixture" {
+    // 5 containers: running, paused, exited, created, running -> 3 up, 2 down.
+    assert_eq(psparse.up_count(fixture()), 3)
+    assert_eq(psparse.row_count(fixture()) - psparse.up_count(fixture()), 2)
+}
+
+test "an unknown docker state becomes 'other' rather than being taken literally" {
+    // `restarting`, `dead` and `removing` are all real docker states this app does not
+    // enumerate. They must land in "other" -- and NOT be reported as up.
+    assert_eq(psparse.canon_state("restarting"), "other")
+    assert_eq(psparse.canon_state("dead"), "other")
+    assert_eq(psparse.canon_state("removing"), "other")
+    assert_eq(psparse.canon_state(""), "other")
+    // Case matters: docker emits lowercase, and silently upper-casing would hide a
+    // format change.
+    assert_eq(psparse.canon_state("Running"), "other")
+    assert_false(psparse.is_up(psparse.canon_state("dead")))
+}
+
+test "empty command output counts as zero, not one" {
+    // `docker volume ls -q` on a host with no volumes prints NOTHING. `"".lines()` and
+    // `"\n".lines()` must both be 0 -- reporting "1 volumes" on an empty host is the
+    // classic off-by-one here.
+    assert_eq(psparse.count_lines(""), 0)
+    assert_eq(psparse.count_lines("\n"), 0)
+    assert_eq(psparse.count_lines("   \n  \n"), 0)
+    assert_eq(psparse.count_lines("abc123"), 1)
+    assert_eq(psparse.count_lines("abc123\n"), 1)
+    assert_eq(psparse.count_lines("a\nb\nc"), 3)
+    assert_eq(psparse.count_lines("a\nb\nc\n"), 3)
+}
+
+test "a restart count that is not a number is 0, not a crash" {
+    // `.to_int()` ABORTS THE PROCESS on unparseable input. `docker inspect` prints
+    // nothing to stdout when the container vanished between `ps` and `inspect`, which is
+    // a normal race on a busy host -- and used to take the entire report down with it.
+    assert_eq(psparse.restarts_of("0"), 0)
+    assert_eq(psparse.restarts_of("7\n"), 7)
+    assert_eq(psparse.restarts_of("  3  "), 3)
+    assert_eq(psparse.restarts_of(""), 0)
+    assert_eq(psparse.restarts_of("\n"), 0)
+    assert_eq(psparse.restarts_of("<no value>"), 0)
+    assert_eq(psparse.restarts_of("Error: No such object"), 0)
+}
+
+test "the ellipsis is one CELL wide but three BYTES long" {
+    // The measurement the column padding depends on.
+    assert_eq("…".len(), 3)
+    assert_eq(psparse.cells("…"), 1)
+    assert_eq(psparse.cells("abc"), 3)
+    assert_eq(psparse.cells(""), 0)
+}
+
+test "columns line up whether or not the cell was truncated" {
+    // The table's layout rests on a non-obvious pairing: `short()` bounds a cell by
+    // CELLS, `.len()` reports BYTES, and `pad_right` pads by CELLS. If pad_right were
+    // byte-based, a truncated 34-cell image would report .len() == 36, receive no
+    // padding, and that row's STATE column would sit 2 characters left of every other
+    // row's -- invisible until one image name is long and another is short, i.e. exactly
+    // the fixture above. This test is the guard on that pairing.
+    var shortish = psparse.short("nginx:1.27", 34).pad_right(36, " ")
+    var truncated = psparse.short("hashicorp/terraform-mcp-server:0.14.1", 34).pad_right(36, " ")
+    assert_eq(psparse.cells(shortish), 36)
+    assert_eq(psparse.cells(truncated), 36)
+    // And the byte counts DISAGREE, which is what makes the above worth asserting.
+    assert_eq(shortish.len(), 36)
+    assert_eq(truncated.len(), 38)
+}
+
+test "truncation marks itself and does not exceed the requested width" {
+    assert_eq(psparse.short("web-1", 18), "web-1")
+    // Exactly at the limit: not truncated.
+    assert_eq(psparse.short("123456789012345678", 18), "123456789012345678")
+    // One over: truncated to 17 chars plus the marker = 18 cells.
+    var t = psparse.short("1234567890123456789", 18)
+    assert_eq(psparse.cells(t), 18)
+    assert_eq(t, "12345678901234567…")
+    assert_eq(psparse.short("anything", 0), "")
+}
+
+test "the whole fixture parses field-for-field" {
+    // Reading the fixture the way main() does, so the walk under test is the walk that
+    // builds the table. Names and states are joined into one string, which fails loudly
+    // and legibly if any row shifts.
+    var names = ""
+    var states = ""
+    for line in fixture().lines() {
+        if not psparse.is_row(line) { continue }
+        names = names + psparse.field(line, 0) + "|"
+        states = states + psparse.canon_state(psparse.field(line, 2)) + "|"
+    }
+    assert_eq(names, "web-1|cache|batch-job|staged|terraform-mcp-server-primary|")
+    assert_eq(states, "running|paused|exited|created|running|")
+}

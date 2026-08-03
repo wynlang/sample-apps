@@ -21,6 +21,13 @@
 //
 //   wyn run sysadmin/dockermon/src/main.wyn          # running containers
 //   wyn run sysadmin/dockermon/src/main.wyn --all    # include stopped ones
+//
+// The `docker ps` row parsing, the state classification and the column arithmetic live
+// in src/psparse.wyn so they can be tested against captured output with no daemon
+// running -- see tests/test_psparse.wyn. This file keeps the shell-outs, the
+// spawn/await_all timing demo, and the drawing.
+
+import psparse
 
 enum State { Running, Paused, Exited, Created, Other }
 
@@ -69,17 +76,6 @@ fn up(s: State) -> bool => match s {
 // The unit of work: one shell-out. Spawned, so every caller's wait overlaps every other's.
 fn probe(cmd: string) -> string => System.exec(cmd)
 
-fn short(s: string, n: int) -> string {
-    if s.len() <= n { return s }
-    return s.substring(0, n - 1) + "…"
-}
-
-fn count_lines(s: string) -> int {
-    var t = s.trim()
-    if t.len() == 0 { return 0 }
-    return t.lines().len()
-}
-
 fn main() {
     print("\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m")
     print("\x1b[1;36m║\x1b[0m       \x1b[1mdockermon\x1b[0m -- every docker call in flight at once       \x1b[1;36m║\x1b[0m")
@@ -117,10 +113,14 @@ fn main() {
     // Parse once into structs. The state string becomes an enum here and stays one.
     var rows = []
     for line in got[0].lines() {
-        var f = line.split("\t")
-        if f.len() < 4 { continue }
-        rows.push(Container { name: f[0], image: f[1], state: classify(f[2]),
-                              status: f[3], restarts: 0 })
+        if not psparse.is_row(line) { continue }
+        rows.push(Container {
+            name: psparse.field(line, 0),
+            image: psparse.field(line, 1),
+            state: classify(psparse.canon_state(psparse.field(line, 2))),
+            status: psparse.field(line, 3),
+            restarts: 0
+        })
     }
 
     // ROUND 2 -- one `docker inspect` per container. Again both ways, again all at once.
@@ -137,10 +137,13 @@ fn main() {
         var counts = await_all(f2)
         par_ms += Time.now_millis() - t
         calls += round2.len()
-        for i in 0..rows.len() { rows[i].restarts = counts[i].trim().to_int() }
+        // `.to_int()` directly would ABORT the process on an inspect that printed
+        // nothing -- which happens whenever a container is removed between `ps` and
+        // `inspect`. restarts_of() returns 0 instead.
+        for i in 0..rows.len() { rows[i].restarts = psparse.restarts_of(counts[i]) }
     }
 
-    print("  \x1b[1m${rows.len()}\x1b[0m containers   \x1b[1m${count_lines(got[1])}\x1b[0m images   \x1b[1m${count_lines(got[2])}\x1b[0m volumes   \x1b[1m${count_lines(got[3])}\x1b[0m networks")
+    print("  \x1b[1m${rows.len()}\x1b[0m containers   \x1b[1m${psparse.count_lines(got[1])}\x1b[0m images   \x1b[1m${psparse.count_lines(got[2])}\x1b[0m volumes   \x1b[1m${psparse.count_lines(got[3])}\x1b[0m networks")
     print("")
     print("    ${"CONTAINER".pad_right(18, " ")}${"IMAGE".pad_right(36, " ")}${"STATE".pad_right(9, " ")}RE  STATUS")
     print("    ${"─────────".pad_right(18, " ")}${"─────".pad_right(36, " ")}${"─────".pad_right(9, " ")}──  ──────")
@@ -151,7 +154,10 @@ fn main() {
         if up(c.state) { live += 1 }
         if not up(c.state) and not show_all { continue }
         shown += 1
-        print("  ${colour(c.state)}●\x1b[0m ${short(c.name, 18).pad_right(18, " ")}${short(c.image, 34).pad_right(36, " ")}${colour(c.state)}${word(c.state).pad_right(9, " ")}\x1b[0m${c.restarts.to_string().pad_left(2, " ")}  \x1b[90m${c.status}\x1b[0m")
+        // short() bounds these cells by CELLS and pad_right pads by CELLS, so a
+        // truncated name lines up with an untruncated one. That is not obvious -- "…" is
+        // 3 bytes and `.len()` counts bytes -- so tests/test_psparse.wyn pins it.
+        print("  ${colour(c.state)}●\x1b[0m ${psparse.short(c.name, 18).pad_right(18, " ")}${psparse.short(c.image, 34).pad_right(36, " ")}${colour(c.state)}${word(c.state).pad_right(9, " ")}\x1b[0m${c.restarts.to_string().pad_left(2, " ")}  \x1b[90m${c.status}\x1b[0m")
     }
     if shown == 0 { print("    \x1b[90m(no running containers -- pass --all to include stopped ones)\x1b[0m") }
 

@@ -1,0 +1,116 @@
+// The parse core of dockermon, split out so it can be tested against captured
+// `docker ps` output -- no Docker daemon, no containers, no network.
+//
+// Nothing here shells out. main.wyn keeps the `System.exec` calls and the
+// spawn/await_all timing demo; the decisions that can be silently wrong live here.
+//
+// The format being parsed is main.wyn's own --format string:
+//
+//     docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Status}}'
+//     web-1<TAB>nginx:1.27<TAB>running<TAB>Up 3 hours
+//
+// Tab-delimited and FOUR fields, which is what makes it worth testing: a container
+// status legitimately contains spaces ("Up 3 hours (healthy)") and an image name
+// contains colons and slashes, so nothing but the tab may be treated as a separator.
+//
+// Signatures are primitives only. On the compiler in this repo, returning a struct, an
+// enum or a list across a module boundary miscompiles (see
+// wyncanvas/tests/test_crossmodule.wyn), so the enum State stays in main.wyn and this
+// module speaks in canonical strings and per-field accessors.
+
+// A row is parseable when it splits into at least 4 tab-separated fields. Fewer means
+// docker printed something else (an error, a warning, a blank line) and the row must be
+// skipped rather than half-read.
+export fn is_row(line: string) -> bool => line.split("\t").len() >= 4
+
+// Field n of a row, or "" if the row is not parseable. Indices match the --format order:
+// 0 = Names, 1 = Image, 2 = State, 3 = Status.
+export fn field(line: string, n: int) -> string {
+    var f = line.split("\t")
+    if f.len() < 4 { return "" }
+    if n < 0 or n >= f.len() { return "" }
+    return "" + f[n]
+}
+
+// The canonical state. main.wyn's `enum State` is a 1:1 relabelling of these five
+// strings, so this function is the whole classification rule -- and "up" below is the
+// whole liveness rule.
+export fn canon_state(s: string) -> string => match s {
+    "running" => "running",
+    "paused" => "paused",
+    "exited" => "exited",
+    "created" => "created",
+    _ => "other"
+}
+
+// Whether a state counts as up. `paused` is UP: the container exists and holds its
+// resources, it is just not scheduled. `created` is not: it has never run.
+export fn is_up(canon: string) -> bool => match canon {
+    "running" => true,
+    "paused" => true,
+    _ => false
+}
+
+export fn row_count(text: string) -> int {
+    var n = 0
+    for line in text.lines() { if is_row(line) { n += 1 } }
+    return n
+}
+
+export fn up_count(text: string) -> int {
+    var n = 0
+    for line in text.lines() {
+        if not is_row(line) { continue }
+        if is_up(canon_state(field(line, 2))) { n += 1 }
+    }
+    return n
+}
+
+// `docker images -q` / `volume ls -q` / `network ls -q` each print one id per line.
+// Empty output means ZERO, not one: `"".lines()` and a blank line must not count.
+export fn count_lines(s: string) -> int {
+    var t = s.trim()
+    if t.len() == 0 { return 0 }
+    var n = 0
+    for line in t.lines() { if ("" + line).trim().len() > 0 { n += 1 } }
+    return n
+}
+
+// A restart count from `docker inspect -f '{{.RestartCount}}'`. Not every inspect
+// succeeds -- a container removed between `ps` and `inspect` yields an error on stderr
+// and nothing on stdout -- so a non-numeric answer is 0 rather than a panic. `to_int()`
+// aborts the process on unparseable input, which would take the whole report with it.
+export fn restarts_of(out: string) -> int {
+    var t = out.trim()
+    if t.len() == 0 { return 0 }
+    for i in 0..t.len() {
+        var c = t.substring(i, i + 1)
+        if c < "0" or c > "9" { return 0 }
+    }
+    return t.to_int()
+}
+
+// Truncate to at most n VISIBLE cells, marking that it happened. The ellipsis is one
+// cell wide but THREE BYTES long, which is the trap `cells()` below exists to avoid.
+export fn short(s: string, n: int) -> string {
+    if n <= 0 { return "" }
+    if s.len() <= n { return s }
+    return s.substring(0, n - 1) + "…"
+}
+
+// The visible width of a string in terminal cells, given that `.len()` counts BYTES.
+// A UTF-8 continuation byte is 0x80..0xBF, so counting non-continuation bytes counts
+// characters. Used only by the tests, to state the distinction the column layout rests
+// on: `short()` bounds a cell by CELLS while `.len()` reports BYTES, and the two differ
+// by 2 for every truncated cell. `pad_right` turns out to pad by cells, so the two
+// cancel -- tests/test_psparse.wyn pins that, because if `pad_right` ever became
+// byte-based the table would silently shear on exactly the truncated rows.
+export fn cells(s: string) -> int {
+    var n = 0
+    for i in 0..s.len() {
+        var c = s.substring(i, i + 1)
+        if c >= "\x80" and c < "\xc0" { continue }
+        n += 1
+    }
+    return n
+}
