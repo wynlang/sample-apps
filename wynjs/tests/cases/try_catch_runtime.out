@@ -1,0 +1,22 @@
+caught 1
+after
+TypeError: Cannot read properties of null (reading 'x')
+TypeError
+Cannot read properties of null (reading 'foo')
+Cannot read properties of null (reading 'bar')
+unwound: TypeError
+c x
+f1
+body
+f2
+undefined
+undefined
+fin
+ret
+end
+true undefined 2 false
+false number
+3
+b
+10
+2584

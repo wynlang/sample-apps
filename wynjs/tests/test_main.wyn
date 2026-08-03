@@ -89,7 +89,9 @@ fn main() {
         "promises_math",
         "limits",
         "limits_overflow",
-        "uncaught_throw"
+        "uncaught_throw",
+        "try_catch_runtime",
+        "object_getters"
     ]
 
     pass = 0

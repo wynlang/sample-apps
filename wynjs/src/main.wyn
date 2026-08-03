@@ -468,6 +468,12 @@ fn oget(id: int, k: string) -> string {
     return vundef()
 }
 
+fn odel(id: int, k: string) {
+    if noeval > 0 { return }
+    var m = omaps[id]
+    m.remove(k)
+}
+
 fn ohas(id: int, k: string) -> int {
     var m = omaps[id]
     if m.has(k) { return 1 }
@@ -498,7 +504,16 @@ fn okeys_arr(id: int) -> int {
     var m = omaps[id]
     var ks = m.keys()
     for k in ks {
-        if not k.starts_with("__") { apush(aid, vstr(k)) }
+        // A getter/setter IS an enumerable own property in JS, so it must appear in
+        // Object.keys - under its real name, not the mangled storage key.
+        if k.starts_with("__get_") { apush(aid, vstr(k.substring(6, k.len()))) }
+        else if k.starts_with("__set_") {
+            // A get/set PAIR is one property: only the getter emits it, or the name
+            // would appear twice.
+            var sname = k.substring(6, k.len())
+            if ohas(id, "__get_" + sname) == 0 { apush(aid, vstr(sname)) }
+        }
+        else if not k.starts_with("__") { apush(aid, vstr(k)) }
     }
     return aid
 }
@@ -1043,7 +1058,31 @@ fn p_unary() -> string {
     if tt == 95 { next(); p_unary(); return vundef() }
     if tt == 92 {
         next()
-        if tt == 3 { var name = tv; next(); eset(name, vundef()); return vbool(1) }
+        if tt == 3 {
+            var name = tv; next()
+            // `delete o.a` must remove the KEY from o, leaving o itself intact. It
+            // used to run eset(name, undefined), which erased the whole object -
+            // masked until property-access-on-undefined started throwing.
+            if tt == 38 or tt == 34 {
+                var base = eget(name)
+                var pend = ""
+                while tt == 38 or tt == 34 {
+                    if pend.len() > 0 {
+                        // resolve the previously-seen segment before descending
+                        if vtag(base) == "o" { base = oget(vdata(base).to_int(), pend) }
+                        else if vtag(base) == "a" { base = aget(vdata(base).to_int(), pend.to_int()) }
+                        else { base = vundef() }
+                    }
+                    if tt == 38 { next(); pend = tv; next() }
+                    else { next(); pend = vtostr(p_expr()); if tt == 35 { next() } }
+                }
+                if pend.len() > 0 and vtag(base) == "o" { odel(vdata(base).to_int(), pend) }
+                return vbool(1)
+            }
+            // `delete someVar` on a plain binding is a no-op in sloppy mode and
+            // evaluates to false; it does NOT unset the variable.
+            return vbool(0)
+        }
         return vbool(1)
     }
     if tt == 90 { next(); return p_unary() }
@@ -1082,10 +1121,27 @@ fn p_post() -> string {
         // dot access
         if tt == 38 {
             next(); var prop = tv; next()
+            // Reading/writing a property of null or undefined is a TypeError in JS,
+            // not undefined. Raise it and stop walking the chain.
+            if vtag(left) == "N" or vtag(left) == "u" {
+                throw_null_prop(left, prop)
+                if tt == 30 or tt == 34 or tt == 38 { skip_chain() }
+                return vundef()
+            }
             // Property assignment: obj.prop = expr
             if tt == 15 {
                 next(); var val = p_expr()
-                if vtag(left) == "o" { oset(vdata(left).to_int(), prop, val) }
+                if vtag(left) == "o" {
+                    var soid = vdata(left).to_int()
+                    var setter = oget(soid, "__set_" + prop)
+                    if vtag(setter) == "f" {
+                        this_push(left)
+                        var sargs = [""]
+                        sargs = []
+                        sargs.push(val)
+                        callfn(setter, sargs)
+                    } else { oset(soid, prop, val) }
+                }
                 else if vtag(left) == "s" { static_set(vdata(left), prop, val) }
                 left = val; continue
             }
@@ -1112,6 +1168,11 @@ fn p_post() -> string {
         // bracket access
         if tt == 34 {
             next(); var idx = p_expr(); if tt == 35 { next() }
+            if vtag(left) == "N" or vtag(left) == "u" {
+                throw_null_prop(left, vtostr(idx))
+                if tt == 30 or tt == 34 or tt == 38 { skip_chain() }
+                return vundef()
+            }
             // Bracket assignment: obj[key] = expr
             if tt == 15 {
                 next(); var val = p_expr()
@@ -1321,6 +1382,16 @@ fn do_member(left: string, prop: string) -> string {
                 if prop == "name" { return oget(oid, "name") }
                 if prop == "stack" { return vstr("") }
             }
+        }
+        // A getter is stored under a mangled key by p_object_literal; reading the
+        // plain name must CALL it and yield the result, with `this` bound to the
+        // object. Checked before the ordinary lookup so a getter always wins.
+        var getter = oget(oid, "__get_" + prop)
+        if vtag(getter) == "f" {
+            this_push(left)
+            var noargs = [""]
+            noargs = []
+            return callfn(getter, noargs)
         }
         var val = oget(oid, prop)
         // Object prototype methods
@@ -1638,8 +1709,24 @@ fn json_ser(v: string) -> string {
         var ks = okeys(id)
         var first = 1
         for k in ks {
+            // Getters are stored mangled ("__get_b"). Serialize them under their real
+            // name with the COMPUTED value, as node does; setters have no readable
+            // value and are omitted.
+            if k.starts_with("__set_") { continue }
+            var kname = sdup(k)
+            var kval = oget_own(id, k)
+            if k.starts_with("__get_") {
+                kname = k.substring(6, k.len())
+                if vtag(kval) == "f" {
+                    var gargs: [string] = []
+                    // `this` must be the object being serialized, or a getter reading
+                    // this._n faults.
+                    this_push(v)
+                    kval = callfn(kval, gargs)
+                }
+            }
             if first == 0 { r = r + "," }
-            r = r + "\"" + k + "\":" + json_ser(oget_own(id, k))
+            r = r + "\"" + kname + "\":" + json_ser(kval)
             first = 0
         }
         return r + "}"
@@ -1935,8 +2022,19 @@ fn callfn(callee: string, args: [string]) -> string {
             }
         }
     }
-    // Bind arguments object (only if needed - avoid array allocation overhead)
-    edef("arguments", vundef())
+    // Bind `arguments` to the actual argument list. It used to be bound to
+    // undefined, so `arguments.length` read as undefined; once property access on
+    // undefined started throwing, that silent wrong answer became a loud TypeError,
+    // so bind the real thing.
+    // Only materialise it when the body actually mentions `arguments`: allocating an
+    // array on EVERY call exhausts the fixed array pool under deep recursion (fib(20)
+    // turned into a spurious RangeError).
+    if bsrc.contains("arguments") {
+        var argid = anew()
+        var ai = 0
+        while ai < args.len() { apush(argid, args[ai]); ai = ai + 1 }
+        edef("arguments", varr(argid))
+    } else { edef("arguments", vundef()) }
     // Restore closure captures BEFORE param binding so params take precedence
     restore_captures(fid)
     // Re-bind params to override any captured values with same name
@@ -2324,7 +2422,23 @@ fn p_object_literal() -> string {
             continue
         }
         if tt == 34 { next(); var key = vtostr(p_expr()); if tt == 35 { next() } if tt == 39 { next() } oset(oid, key, p_expr()); if tt == 36 { next() } continue }
+        // Accessor: `get x() {...}` / `set x(v) {...}`. A property may itself be
+        // NAMED get/set (`{ get() {} }`, `{ get: 1 }`), so only treat the word as an
+        // accessor keyword when an identifier follows it. Without this, `get` was
+        // stored as an ordinary key and `x()` was then parsed as a method, so
+        // `{ get x(){return 7} }.x` read back as the function, not 7.
+        var acc = ""
+        if tv == "get" or tv == "set" {
+            var sv_pos = pos
+            var sv_tt = tt
+            var sv_tv = sdup(tv)
+            var kw = sdup(tv)
+            next()
+            if tt == 3 { acc = kw }
+            else { pos = sv_pos; tt = sv_tt; tv = sdup(sv_tv) }
+        }
         var key = tv; next()
+        if acc.len() > 0 { key = "__" + acc + "_" + key }
         if tt == 30 {
             var fid = fcnt; next()
             var params = ""
@@ -2501,6 +2615,28 @@ fn new_error() -> string {
     oset(oid, "message", vstr(msg))
     oset(oid, "name", vstr("Error"))
     return vobj(oid)
+}
+
+// Raise a JS-visible error from the INTERPRETER (not from a `throw` statement),
+// so a runtime fault like reading a property of null is an ordinary catchable
+// TypeError rather than a silent undefined.
+fn throw_error(ename: string, msg: string) -> string {
+    if noeval > 0 or overflow == 1 { return vundef() }
+    var oid = onew()
+    oset(oid, "__type__", vstr("Error"))
+    oset(oid, "name", vstr(ename))
+    oset(oid, "message", vstr(msg))
+    oset(oid, "stack", vstr(""))
+    throwval = vobj(oid)
+    throwflag = 1
+    return vundef()
+}
+
+// node: "Cannot read properties of null (reading 'x')"
+fn throw_null_prop(base: string, prop: string) -> string {
+    var what = "null"
+    if vtag(base) == "u" { what = "undefined" }
+    return throw_error("TypeError", "Cannot read properties of " + what + " (reading '" + prop + "')")
 }
 
 fn new_regexp() -> string {
@@ -2704,17 +2840,22 @@ fn p_stmt() {
             // be named get/set - e.g. `get() { return this.v; }`. Only treat the
             // word as an accessor keyword when another identifier follows it;
             // if the next token is "(" it is an ordinary method name.
+            var cacc = ""
             if tv == "get" or tv == "set" {
                 var save_pos = pos
                 var save_tt = tt
                 var save_tv = sdup(tv)
+                var ckw = sdup(tv)
                 next()
                 if tt == 30 {
                     // it was a method called get/set - rewind
                     pos = save_pos; tt = save_tt; tv = sdup(save_tv)
-                }
+                } else { cacc = ckw }
             }
             var mname = tv; next()
+            // Store an accessor under the same mangled key an object literal uses, so
+            // do_member invokes it on read instead of handing back the function.
+            if cacc.len() > 0 { mname = "__" + cacc + "_" + mname }
             if is_st == 1 and tt == 15 { next(); oset(proto_oid, "__static_" + mname, p_expr()); if tt == 37 { next() }; continue }
             if tt == 30 { next() }
             var params = ""
@@ -2778,12 +2919,38 @@ fn p_stmt() {
             } else {
                 skip_block_raw()
             }
+        } else if had_throw == 1 {
+            // `try { throw x } finally { ... }` with NO catch clause: there is nothing
+            // to handle the throw here, so it must keep propagating. It used to be
+            // cleared above and silently dropped.
+            throwflag = 1
+            throwval = sdup(thrown)
         }
         // finally
         if tt == 85 {
             next()
             if tt == 32 { next() }
+            // `finally` must run even when the try/catch exited via return, break or
+            // continue. Those flags are still set here, and p_block_body bails out
+            // the moment it sees one - so the block would be skipped entirely. Park
+            // the pending exit, run the block, then restore it. A return/throw raised
+            // by `finally` itself wins, which is what JS does.
+            var pend_ret = retflag
+            var pend_retval = sdup(retval)
+            var pend_brk = brkflag
+            var pend_cont = contflag
+            var pend_throw = throwflag
+            var pend_thrown = sdup(throwval)
+            retflag = 0; brkflag = 0; contflag = 0; throwflag = 0
             epush(); p_block_body(); epop()
+            if retflag == 0 and throwflag == 0 {
+                retflag = pend_ret
+                retval = sdup(pend_retval)
+                brkflag = pend_brk
+                contflag = pend_cont
+                throwflag = pend_throw
+                throwval = sdup(pend_thrown)
+            }
         }
         return
     }
@@ -3169,6 +3336,24 @@ fn p_block_body() {
         if overflow == 1 { break }
         if retflag == 1 or brkflag == 1 or contflag == 1 or throwflag == 1 { break }
         p_stmt()
+    }
+    // An early exit (throw/return/break/continue) leaves the REST of this block's
+    // tokens unread. This is a single-pass parse-and-evaluate interpreter, so those
+    // tokens do not just sit there - they become the next thing executed. That is
+    // why `try { throw 1; console.log("x") } catch (e) {}` printed "x" and then
+    // reached `catch` with the token stream one statement out of step, so the
+    // handler saw no throw and bound `e` to undefined. Skip to this block's own
+    // closing brace instead of leaving the stream mid-block.
+    if tt != 33 and tt != 0 {
+        var bdepth = 0
+        while tt != 0 {
+            if tt == 32 { bdepth = bdepth + 1 }
+            else if tt == 33 {
+                if bdepth == 0 { break }
+                bdepth = bdepth - 1
+            }
+            next()
+        }
     }
     if tt == 33 { next() }
 }
