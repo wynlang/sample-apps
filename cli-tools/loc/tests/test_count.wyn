@@ -1,7 +1,11 @@
 // Tests for the one thing loc can get silently wrong: line classification. The old
 // version reported "Code: 0  Blank: 1  Comment: 0" for every file and nobody noticed,
 // so these pin the classifier against counts that are checkable by hand.
-// The three functions below mirror src/main.wyn exactly.
+// The functions below mirror src/main.wyn. That duplication is a known hazard - a
+// hand-mirrored copy can drift from the real implementation, and it DID: the copy and the
+// original both treated /* */ as universal, and because every call site here passed
+// lang="C" or "Python", the Shell / Markdown / TOML paths - the ones that were wrong -
+// were never executed. The has_block cases below exist specifically to close that hole.
 
 enum LineKind { Code, Comment, Blank }
 
@@ -9,10 +13,29 @@ fn line_tok(lang: string) -> string => match lang {
     "Python" => "#",  "Shell" => "#",  "TOML" => "#",  "Markdown" => "",  _ => "//"
 }
 
+fn has_block(lang: string) -> bool => match lang {
+    "Python" => false,  "Shell" => false,  "TOML" => false,  "Markdown" => false,
+    _ => true
+}
+
 fn begins(s: string, p: string) -> bool {
     if p.len() == 0 or s.len() < p.len() { return false }
     return s.substring(0, p.len()) == p
 }
+
+fn ext_of(name: string) -> string {
+    var parts = name.split(".")
+    if parts.len() < 2 { return "" }
+    return "" + parts[parts.len() - 1]
+}
+
+fn lang_of(ext: string) -> string => match ext {
+    "wyn" => "Wyn",  "c" => "C",  "py" => "Python",  "js" => "JavaScript",  _ => ""
+}
+
+// Whether collect() would count this file: a known extension, and not generated C.
+fn counted(name: string) -> bool =>
+    lang_of(ext_of(name)) != "" and not name.contains(".wyn.c")
 
 // [code, comment, blank] for a source text. Same walk as count_file().
 fn classify(text: string, lang: string) -> [int] {
@@ -21,21 +44,22 @@ fn classify(text: string, lang: string) -> [int] {
     var comment = 0
     var blank = 0
     var in_block = false
+    var blk = has_block(lang)
     var rows = text.split("\n")
     var n = rows.len()
     if n > 0 and rows[n - 1] == "" { n -= 1 }
     for i in 0..n {
         var t = ("" + rows[i]).trim()
         var kind = LineKind.Code
-        if in_block {
+        if blk and in_block {
             kind = LineKind.Comment
             if t.contains("*/") { in_block = false }
         } else if t.len() == 0 {
             kind = LineKind.Blank
-        } else if begins(t, tok) or begins(t, "/*") or begins(t, "*") {
+        } else if begins(t, tok) or (blk and begins(t, "/*")) {
             kind = LineKind.Comment
-            if begins(t, "/*") and not t.contains("*/") { in_block = true }
-        } else if t.contains("/*") and not t.contains("*/") {
+            if blk and begins(t, "/*") and not t.contains("*/") { in_block = true }
+        } else if blk and t.contains("/*") and not t.contains("*/") {
             in_block = true
         }
         match kind {
@@ -94,6 +118,15 @@ test "a trailing newline is not an extra line" {
     assert_eq(without[0], 2)
 }
 
+test "generated .wyn.c is not counted" {
+    // Without this, running the program once left a src/main.wyn.c behind and the NEXT
+    // run reported 9 files / 369 lines of C instead of 8 files / 23 -- the tool's answer
+    // depended on whether it had been run before. Mirrors collect()'s filter.
+    assert_eq(counted("src/main.wyn"), true)
+    assert_eq(counted("samples/queue.c"), true)
+    assert_eq(counted("src/main.wyn.c"), false)
+}
+
 test "the sample files match wc -l" {
     // queue.c is 31 lines: verified with `wc -l samples/queue.c`.
     var path = "samples/queue.c"
@@ -102,4 +135,54 @@ test "the sample files match wc -l" {
         assert_eq(r[0] + r[1] + r[2], 31)
         assert_eq(r[2], 4)     // `grep -c '^[[:space:]]*$'` agrees
     }
+}
+
+// ---- languages WITHOUT /* */ ------------------------------------------------
+// These are the cases the old tests could not reach, because every call site passed
+// lang="C" or "Python". Each one is a real miscount that shipped.
+
+test "a shell glob does not open a block comment" {
+    // `ls src/*` contains `/*`. Treated as a block opener it never closed, so the rest
+    // of the file was booked as comments: measured over the compiler repo's 116 .sh
+    // files, a true 9654 code / 2779 comment came out as 6003 / 7030.
+    var r = classify("#!/bin/sh\nls src/*\necho a\necho b\necho c\necho d\n", "Shell")
+    assert_eq(r[0], 5)   // code: the shebang is a comment, five commands are code
+    assert_eq(r[1], 1)   // comment: just the shebang line
+    assert_eq(r[2], 0)
+}
+
+test "a markdown bullet is content, not a comment" {
+    // `* bullet` was matched by the bare `begins(t, "*")` continuation rule.
+    var r = classify("# Title\n\n* bullet one\n* bullet two\n", "Markdown")
+    assert_eq(r[0], 3)   // Markdown has no comment syntax: heading + two bullets are code
+    assert_eq(r[1], 0)
+    assert_eq(r[2], 1)
+}
+
+test "a python string containing slash-star is code" {
+    var r = classify("x = 1\nz = \"a/*b\"\ny = 2\n# a comment\nw = 3\n", "Python")
+    assert_eq(r[0], 4)
+    assert_eq(r[1], 1)
+    assert_eq(r[2], 0)
+}
+
+test "TOML has no block comments either" {
+    var r = classify("[project]\nglob = \"src/*\"\nname = \"x\"\n", "TOML")
+    assert_eq(r[0], 3)
+    assert_eq(r[1], 0)
+    assert_eq(r[2], 0)
+}
+
+test "C still gets its block comments" {
+    // The control: narrowing the rule must not disable it where it belongs.
+    var r = classify("/* one\n   two */\nint x;\nint y = 2 * 3;\n", "C")
+    assert_eq(r[0], 2)
+    assert_eq(r[1], 2)
+    assert_eq(r[2], 0)
+}
+
+test "a C multiplication is not a comment" {
+    var r = classify("int a = 2 * 3;\nint b = 4 * 5;\n", "C")
+    assert_eq(r[0], 2)
+    assert_eq(r[1], 0)
 }

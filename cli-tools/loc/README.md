@@ -24,7 +24,7 @@ Real output, run from this directory:
   ──────────────────────────────────────────   ────────────────────────
   TOTAL            4      55       10     14   79 lines, 18 comments per 100 code
 
-  388us wall-clock; the files total 545us of reading and classifying
+  434us wall-clock; the files total 715us of reading and classifying
 ```
 
 That last line is the point of the program: the summed per-file cost is the work a
@@ -32,11 +32,14 @@ sequential loop would have done, and the wall-clock is what `spawn` + `await_all
 actually took.
 
 `samples/` holds four small files (C, Python, JavaScript, Wyn) so the table has something
-to rank the first time you run it. The totals above match `wc -l` exactly.
+to rank the first time you run it. `79` matches `wc -l samples/*` exactly, and each
+language's blank count matches `grep -c '^[[:space:]]*$'`.
 
 ## What it does
 
-- Recursive walk, skipping `.git`, `node_modules`, `build`, `target`, `dist`.
+- Recursive walk, skipping `.git`, `node_modules`, `build`, `target`, `dist`, and the
+  `.wyn.c` files the compiler leaves beside a source file - so a second run of this tool
+  reports the same numbers as the first.
 - Language from the file extension; 11 extensions mapped, unknown ones ignored.
 - Comments counted for real, including `/* ... */` blocks that span lines. A trailing
   comment on a code line counts as code, as every loc tool does it.
@@ -44,24 +47,24 @@ to rank the first time you run it. The totals above match `wc -l` exactly.
 
 ## Wyn features on show
 
-- `enum LineKind { Code, Comment, Blank }` + `match` - a line has one kind, and every
-  tally is an exhaustive match rather than a chain of `if`s that can disagree.
+- `enum LineKind { Code, Comment, Blank }` + `match` - a line has one kind, and the tally
+  is an exhaustive match rather than a chain of `if`s that can disagree.
 - `match` on the extension to name the language *and* pick its comment token.
 - `spawn` + `await_all` with a **struct returned through a future**, so a file hands back
   its language and all three counts together.
-- `HashMap` aggregation keyed by language, so adding a language needs no new variable.
-- Array pipelines: `.map()`, `.sum()`, `.sort_by()`.
+- Array pipelines: `.filter()`, `.map()`, `.sum()`, `.sort_by()`, `.contains()` - each
+  per-language figure is derived from the same results, so no row can drift from the total.
 - `File::list_dir` / `File.is_dir` for the walk; `System.args()` for the argument.
 
 ## Tests
 
 ```bash
-./wyn test tests/test_count.wyn      # 7 tests
+./wyn test tests/test_count.wyn      # 8 tests
 ```
 
 They pin the classifier - blank lines, per-language comment tokens, multi-line blocks,
-one-line blocks, trailing comments, trailing newlines - and cross-check `samples/queue.c`
-against `wc -l`.
+one-line blocks, trailing comments, trailing newlines, the generated-file exclusion - and
+cross-check `samples/queue.c` against `wc -l`.
 
 ## What was wrong before
 

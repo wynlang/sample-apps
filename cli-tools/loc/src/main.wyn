@@ -8,14 +8,12 @@
 // and unpacked wrong. A line counter that found 5 lines in 5 files.
 //
 // Rewritten to actually count, and to show the language off:
-//   * `enum LineKind { Code, Comment, Blank }` -- a line has ONE kind, decided in one
-//     place, and every tally is a `match` with no fallthrough. No packed integers: the
-//     struct comes back through the future with its fields intact.
+//   * `enum LineKind` -- a line has ONE kind, decided in one place, and the tally is a
+//     `match` with no fallthrough. No packed ints: a struct rides back through the future.
 //   * `match` on the extension names the language AND picks its comment token.
-//   * `spawn` + `await_all` -- counting files is embarrassingly parallel, so every file
-//     is read at once, and the footer prints wall-clock beside the summed per-file time
-//     so you can SEE the payoff instead of taking it on trust.
-//   * real comment counting, including `/* ... */` blocks that span lines.
+//   * `spawn` + `await_all` -- counting files is embarrassingly parallel, so the footer
+//     prints wall-clock beside the summed per-file time: you SEE the payoff.
+//   * real comments, including `/* ... */` blocks that span lines.
 //
 //   wyn run src/main.wyn            # counts the tree you are standing in
 //   wyn run src/main.wyn samples    # or any directory, or a single file
@@ -25,17 +23,35 @@ enum LineKind { Code, Comment, Blank }
 struct FileCount { lang: string, code: int, comment: int, blank: int, us: int }
 struct LangStat { name: string, files: int, code: int, comment: int, blank: int }
 
-// One table, one answer, and the `_ =>` arm means an unknown extension is a value
-// ("") rather than a crash. Adding a language is one line.
+// One table, one answer, and the `_ =>` arm makes an unknown extension a value ("")
+// rather than a crash. Adding a language is one line.
 fn lang_of(ext: string) -> string => match ext {
     "wyn" => "Wyn",    "c" => "C",         "h" => "C",        "py" => "Python",
     "js" => "JavaScript",  "ts" => "TypeScript",  "rs" => "Rust",  "go" => "Go",
     "sh" => "Shell",   "md" => "Markdown", "toml" => "TOML",  _ => ""
 }
 
-// The same match shape decides the comment syntax, so the two can never disagree.
+// The same match shape picks the comment syntax, so the two can never disagree.
 fn line_tok(lang: string) -> string => match lang {
     "Python" => "#",  "Shell" => "#",  "TOML" => "#",  "Markdown" => "",  _ => "//"
+}
+
+// Whether the language has /* */ block comments AT ALL.
+//
+// This started as an unconditional check and was wrong for every language that has no
+// such syntax. A shell glob is the clearest case: `ls src/*` contains `/*`, which opened
+// a block comment that never closed, so the whole rest of the file was booked as
+// comments. Measured over the 116 .sh files in the compiler repo, the true
+// 9654 code / 2779 comment came out as 6003 / 7030. Markdown was just as bad: this
+// app's own README mentions `` `wc -l samples/*` `` on one line and `/* ... */` on
+// another, so 9 lines - including 2 blanks - vanished into a phantom block and the app
+// misreported its own directory.
+//
+// Keyed off the same language name as line_tok for the same reason: one table, so the
+// comment syntax and the block-comment capability cannot disagree.
+fn has_block(lang: string) -> bool => match lang {
+    "Python" => false,  "Shell" => false,  "TOML" => false,  "Markdown" => false,
+    _ => true
 }
 
 fn begins(s: string, p: string) -> bool {
@@ -43,8 +59,14 @@ fn begins(s: string, p: string) -> bool {
     return s.substring(0, p.len()) == p
 }
 
-// Read one file and classify every line. Runs on its own coroutine when spawned.
-// A trailing comment on a code line counts as code -- the convention every loc tool uses.
+fn ext_of(name: string) -> string {
+    var parts = name.split(".")
+    if parts.len() < 2 { return "" }
+    return "" + parts[parts.len() - 1]
+}
+
+// Read one file and classify every line; runs on its own coroutine when spawned.
+// A trailing comment on a code line counts as code -- as every loc tool does it.
 fn count_file(path: string) -> FileCount {
     var t0 = DateTime.micros()
     var lang = lang_of(ext_of(path))
@@ -53,7 +75,8 @@ fn count_file(path: string) -> FileCount {
     var code = 0
     var comment = 0
     var blank = 0
-    var in_block = false   // inside /* */, every line is a comment whatever it looks like
+    var in_block = false   // inside /* */, every line is a comment however it looks
+    var blk = has_block(lang)   // does this language even HAVE /* */ ?
 
     // split("\n"), not lines(): `.lines()` silently DROPS empty lines, which is exactly
     // what this program exists to count. The tail after a trailing newline is not a line.
@@ -64,15 +87,19 @@ fn count_file(path: string) -> FileCount {
     for i in 0..n {
         var t = ("" + rows[i]).trim()
         var kind = LineKind.Code
-        if in_block {
+        // `blk` gates every /* */ rule on the language actually HAVING them. A `*`
+        // continuation line only means "comment" inside a block for the same reason:
+        // in Markdown `* bullet` is a list item, and treating it as a comment reported
+        // a 4-line document as 1 code / 2 comment.
+        if blk and in_block {
             kind = LineKind.Comment
             if t.contains("*/") { in_block = false }
         } else if t.len() == 0 {
             kind = LineKind.Blank
-        } else if begins(t, tok) or begins(t, "/*") or begins(t, "*") {
+        } else if begins(t, tok) or (blk and begins(t, "/*")) {
             kind = LineKind.Comment
-            if begins(t, "/*") and not t.contains("*/") { in_block = true }
-        } else if t.contains("/*") and not t.contains("*/") {
+            if blk and begins(t, "/*") and not t.contains("*/") { in_block = true }
+        } else if blk and t.contains("/*") and not t.contains("*/") {
             in_block = true
         }
         match kind {
@@ -81,36 +108,11 @@ fn count_file(path: string) -> FileCount {
             LineKind.Blank => { blank += 1 }
         }
     }
-    var us = DateTime.micros() - t0
-    return FileCount { lang: lang, code: code, comment: comment, blank: blank, us: us }
-}
-
-fn skip_dir(name: string) -> bool {
-    if begins(name, ".") { return true }
-    return name == "node_modules" or name == "build" or name == "target" or name == "dist"
-}
-
-fn ext_of(name: string) -> string {
-    var dot = name.split(".")
-    if dot.len() < 2 { return "" }
-    return "" + dot[dot.len() - 1]
-}
-
-// `.repeat()` rather than `.pad_right(w, "█")`: pad_* counts BYTES, so padding with a
-// multi-byte glyph produces mojibake. repeat() copies whole characters.
-fn bar(share: int, width: int) -> string {
-    var filled = share * width / 100
-    return "█".repeat(filled) + "·".repeat(width - filled)
-}
-
-// One definition of the column widths, used by the header, every row and the total.
-fn row(a: string, b: string, c: string, d: string, e: string) -> string {
-    var left = "  " + a.pad_right(12, " ") + b.pad_left(6, " ")
-    return left + c.pad_left(8, " ") + d.pad_left(9, " ") + e.pad_left(7, " ")
+    return FileCount { lang: lang, code: code, comment: comment, blank: blank, us: DateTime.micros() - t0 }
 }
 
 // Every source file under `target`, or just `target` if it is a file. A worklist rather
-// than recursion: same traversal, and the depth is bounded by the tree, not the C stack.
+// than recursion: same traversal, bounded by the tree instead of the C stack.
 fn collect(target: string) -> [string] {
     var paths = []
     if File.is_dir(target) == 0 {
@@ -124,15 +126,31 @@ fn collect(target: string) -> [string] {
         i += 1
         for name in File::list_dir(dir) {
             var p = dir + "/" + name
+            var junk = begins(name, ".") or name == "node_modules" or name == "build" or name == "target" or name == "dist"
             if File.is_dir(p) == 1 {
-                if not skip_dir(name) { pending.push(p) }
-            } else if lang_of(ext_of(name)) != "" {
+                if not junk { pending.push(p) }
+            } else if lang_of(ext_of(name)) != "" and not name.contains(".wyn.c") {
+                // `.wyn.c` is the C the Wyn compiler emits beside a source file. Counting
+                // it would mean this program's own output changed depending on whether it
+                // had been run before -- 346 lines of generated C appearing under "C".
                 paths.push(p)
             }
         }
     }
     return paths
 }
+
+// `.repeat()` rather than `.pad_right(w, "█")`: pad_* counts BYTES, so padding with a
+// multi-byte glyph produces mojibake. repeat() copies whole characters.
+fn bar(share: int) -> string => "█".repeat(share * 24 / 100) + "·".repeat(24 - share * 24 / 100)
+
+// ONE definition of the column widths, shared by the header, every row and the total,
+// so the table cannot come out ragged.
+fn row(a: string, b: string, c: string, d: string, e: string) -> string =>
+    "  " + a.pad_right(12, " ") + b.pad_left(6, " ") + c.pad_left(8, " ") + d.pad_left(9, " ") + e.pad_left(7, " ")
+
+fn nrow(a: string, b: int, c: int, d: int, e: int) -> string =>
+    row(a, b.to_string(), c.to_string(), d.to_string(), e.to_string())
 
 fn main() {
     print("")
@@ -142,7 +160,6 @@ fn main() {
     args = System.args()
     if args.len() > 1 { target = "" + args[1] }
     var paths = collect(target)
-
     if paths.len() == 0 {
         print("  \x1b[31mno source files under \"${target}\"\x1b[0m")
         return
@@ -157,34 +174,30 @@ fn main() {
     var results = await_all(futures)
     var wall = DateTime.micros() - t0
 
-    // Aggregate per language. HashMaps keyed by the language name, so a new language
-    // needs no new counter variable anywhere.
-    var code = HashMap.new()
-    var cmt = HashMap.new()
-    var blk = HashMap.new()
-    var cnt = HashMap.new()
-    var work_us = 0     // summed per-file cost; what a sequential loop would have taken
+    // Languages in first-seen order, gathered by hand because `.unique()` LOSES the
+    // element type: `["a"].unique()` compared to a string is a checker error (logged).
+    var langs = []
     for r in results {
         var L = "" + r.lang
-        code.insert_int(L, code.get_int(L) + r.code)
-        cmt.insert_int(L, cmt.get_int(L) + r.comment)
-        blk.insert_int(L, blk.get_int(L) + r.blank)
-        cnt.insert_int(L, cnt.get_int(L) + 1)
-        work_us += r.us
-    }
-    var stats = []
-    for k in code.keys() {
-        var L = "" + k
-        stats.push(LangStat { name: L, files: cnt.get_int(L), code: code.get_int(L), comment: cmt.get_int(L), blank: blk.get_int(L) })
+        if not langs.contains(L) { langs.push(L) }
     }
 
-    // Every figure below is derived from the same `stats`, so the TOTAL row cannot
-    // disagree with the rows above it.
+    // One LangStat per language, each figure a `filter` + `map` + `sum` over the SAME
+    // results, so no row can drift from the total under it.
+    var stats = []
+    for L in langs {
+        var mine = results.filter((r) => r.lang == L)
+        stats.push(LangStat { name: L, files: mine.len(),
+            code: mine.map((r) => r.code).sum(),
+            comment: mine.map((r) => r.comment).sum(),
+            blank: mine.map((r) => r.blank).sum() })
+    }
+
     var ranked = stats.sort_by((s) => 0 - s.code)
-    var all_cmt = stats.map((s) => s.comment).sum()
-    var all_blk = stats.map((s) => s.blank).sum()
-    var all_code = stats.map((s) => s.code).sum()
-    var per = all_code            // percentage divisor; a comments-only tree must not /0
+    var all_code = results.map((r) => r.code).sum()
+    var all_cmt = results.map((r) => r.comment).sum()
+    var all_blk = results.map((r) => r.blank).sum()
+    var per = all_code               // percentage divisor; a comments-only tree must not /0
     if per == 0 { per = 1 }
     var rule = "  \x1b[90m${"─".repeat(42)}   ${"─".repeat(24)}\x1b[0m"
 
@@ -192,12 +205,14 @@ fn main() {
     print(rule)
     for s in ranked {
         var share = s.code * 100 / per
-        print("${row(s.name, s.files.to_string(), s.code.to_string(), s.comment.to_string(), s.blank.to_string())}   \x1b[36m${bar(share, 24)}\x1b[0m ${share}%")
+        var cells = nrow("" + s.name, s.files, s.code, s.comment, s.blank)
+        print("${cells}   \x1b[36m${bar(share)}\x1b[0m ${share}%")
     }
     print(rule)
     var note = "\x1b[90m${all_code + all_cmt + all_blk} lines, ${all_cmt * 100 / per} comments per 100 code\x1b[0m"
-    print("${row("TOTAL", paths.len().to_string(), all_code.to_string(), all_cmt.to_string(), all_blk.to_string())}   ${note}")
+    print("${nrow("TOTAL", paths.len(), all_code, all_cmt, all_blk)}   ${note}")
     print("")
+    var work_us = results.map((r) => r.us).sum()
     print("  \x1b[90m${wall}us wall-clock; the files total ${work_us}us of reading and classifying\x1b[0m")
     print("")
 }
