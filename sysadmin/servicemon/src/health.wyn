@@ -1,0 +1,72 @@
+// The reporting core of servicemon, split out so it can be tested without any service
+// running. Nothing here shells out: every function takes an exit code or an index.
+//
+// servicemon's whole output is derived from twelve exit codes, so the things it can get
+// silently wrong are: which exit codes mean "up", which section a service belongs to, and
+// whether the tally matches the rows. All three are decided here.
+//
+// Signatures are primitives only. On the compiler in this repo, returning a struct, an
+// enum or a list across a module boundary miscompiles (see
+// wyncanvas/tests/test_crossmodule.wyn).
+
+// How many services are checked. The three section bounds below must partition exactly
+// this many, and test_health.wyn asserts that they do.
+export fn count() -> int => 12
+
+// Exit code -> up. ONLY 0 is success; every other code, INCLUDING a negative one from a
+// probe that never ran, is down.
+//
+// This is the bug that used to be here in a subtler form: the results array was
+// pre-filled with `ServiceCheck { name: "", desc: "", up: 0 }` and the spawned writes
+// were waited for with `Time.sleep(3000)` -- a guess. When a probe had not landed yet the
+// row printed as "● DOWN" WITH AN EMPTY NAME, so a check that had not finished was
+// indistinguishable from a service that was down. Reading an exit code that was never
+// produced must be impossible, not merely unlikely; main.wyn now uses await_all, and -1
+// is the sentinel for "no answer" so a missing one is still not "up".
+export fn is_up(exit_code: int) -> bool => exit_code == 0
+
+// The section a service index belongs to: "system" (0..2), "dev" (3..10), "runtime" (11).
+// Derived from the index once, so the three print loops and the headings cannot disagree
+// about where a service belongs -- the old code hardcoded 0..3, 3..11 and [11] at three
+// separate call sites.
+export fn section_of(i: int) -> string {
+    if i < 0 or i >= count() { return "" }
+    if i < 3 { return "system" }
+    if i < 11 { return "dev" }
+    return "runtime"
+}
+
+export fn section_title(section: string) -> string => match section {
+    "system" => "═══ System Services ═══",
+    "dev" => "═══ Development Services ═══",
+    "runtime" => "═══ Container Runtime ═══",
+    _ => ""
+}
+
+// The status badge. Padded so the service name after it starts in the same column
+// whichever way the badge reads -- "UP" is two characters and "DOWN" is four.
+export fn badge(up: bool) -> string {
+    if up { return "● UP  " }
+    return "● DOWN"
+}
+
+// `docker ps --format '{{.Names}}\t{{.Status}}'` -- one container per line. Blank lines
+// are dropped, so an empty result is zero containers rather than one empty row. The old
+// code scanned for "\n" character by character and only emitted a line when it FOUND one,
+// so a final container with no trailing newline was silently dropped.
+export fn container_count(out: string) -> int {
+    var n = 0
+    for line in out.lines() { if ("" + line).trim().len() > 0 { n += 1 } }
+    return n
+}
+
+export fn container_line(out: string, want: int) -> string {
+    var n = 0
+    for line in out.lines() {
+        var t = ("" + line).trim()
+        if t.len() == 0 { continue }
+        if n == want { return t }
+        n += 1
+    }
+    return ""
+}
