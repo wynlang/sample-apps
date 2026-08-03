@@ -1,0 +1,12 @@
+// A sample Wyn file, here so the language table has more than one Wyn entry.
+
+fn label(n: int) -> string {
+    if n % 15 == 0 { return "fizzbuzz" }
+    if n % 3 == 0 { return "fizz" }
+    if n % 5 == 0 { return "buzz" }
+    return "${n}"
+}
+
+fn main() {
+    for n in 1..16 { print(label(n)) }
+}

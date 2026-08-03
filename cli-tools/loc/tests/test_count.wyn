@@ -1,0 +1,105 @@
+// Tests for the one thing loc can get silently wrong: line classification. The old
+// version reported "Code: 0  Blank: 1  Comment: 0" for every file and nobody noticed,
+// so these pin the classifier against counts that are checkable by hand.
+// The three functions below mirror src/main.wyn exactly.
+
+enum LineKind { Code, Comment, Blank }
+
+fn line_tok(lang: string) -> string => match lang {
+    "Python" => "#",  "Shell" => "#",  "TOML" => "#",  "Markdown" => "",  _ => "//"
+}
+
+fn begins(s: string, p: string) -> bool {
+    if p.len() == 0 or s.len() < p.len() { return false }
+    return s.substring(0, p.len()) == p
+}
+
+// [code, comment, blank] for a source text. Same walk as count_file().
+fn classify(text: string, lang: string) -> [int] {
+    var tok = line_tok(lang)
+    var code = 0
+    var comment = 0
+    var blank = 0
+    var in_block = false
+    var rows = text.split("\n")
+    var n = rows.len()
+    if n > 0 and rows[n - 1] == "" { n -= 1 }
+    for i in 0..n {
+        var t = ("" + rows[i]).trim()
+        var kind = LineKind.Code
+        if in_block {
+            kind = LineKind.Comment
+            if t.contains("*/") { in_block = false }
+        } else if t.len() == 0 {
+            kind = LineKind.Blank
+        } else if begins(t, tok) or begins(t, "/*") or begins(t, "*") {
+            kind = LineKind.Comment
+            if begins(t, "/*") and not t.contains("*/") { in_block = true }
+        } else if t.contains("/*") and not t.contains("*/") {
+            in_block = true
+        }
+        match kind {
+            LineKind.Code => { code += 1 }
+            LineKind.Comment => { comment += 1 }
+            LineKind.Blank => { blank += 1 }
+        }
+    }
+    return [code, comment, blank]
+}
+
+test "blank lines are counted, not swallowed" {
+    // THE ORIGINAL BUG. Every file used to come back with exactly 1 blank line.
+    var r = classify("a\n\nb\n\n\nc\n", "C")
+    assert_eq(r[0], 3)   // a, b, c
+    assert_eq(r[1], 0)
+    assert_eq(r[2], 3)   // the three empty lines, all of them
+}
+
+test "line comments, and only for the right language" {
+    var c = classify("int x;\n// note\n", "C")
+    assert_eq(c[0], 1)
+    assert_eq(c[1], 1)
+    // In Python "//" is not a comment and "#" is -- the same text splits differently.
+    var p = classify("x = 1\n# note\n", "Python")
+    assert_eq(p[0], 1)
+    assert_eq(p[1], 1)
+    var q = classify("# note\n", "C")
+    assert_eq(q[0], 1)   // "#include"-ish: a directive is code in C, not a comment
+    assert_eq(q[1], 0)
+}
+
+test "block comments span lines" {
+    var r = classify("/* one\n   two\n   three */\nint x;\n", "C")
+    assert_eq(r[1], 3)
+    assert_eq(r[0], 1)
+}
+
+test "a one-line block comment does not open a block" {
+    // If /* */ on one line left in_block set, every following line would be a comment.
+    var r = classify("/* hi */\nint x;\nint y;\n", "C")
+    assert_eq(r[1], 1)
+    assert_eq(r[0], 2)
+}
+
+test "a trailing comment is code" {
+    var r = classify("int x; // why\n", "C")
+    assert_eq(r[0], 1)
+    assert_eq(r[1], 0)
+}
+
+test "a trailing newline is not an extra line" {
+    var with = classify("a\nb\n", "C")
+    var without = classify("a\nb", "C")
+    assert_eq(with[0], 2)
+    assert_eq(without[0], 2)
+}
+
+test "the sample files match wc -l" {
+    // queue.c is 31 lines: verified with `wc -l samples/queue.c`.
+    var path = "samples/queue.c"
+    if File.exists(path) == 1 {
+        var r = classify(File.read(path), "C")
+        assert_eq(r[0] + r[1] + r[2], 31)
+        assert_eq(r[2], 4)     // `grep -c '^[[:space:]]*$'` agrees
+    }
+}

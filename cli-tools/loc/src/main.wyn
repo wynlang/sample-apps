@@ -1,72 +1,203 @@
-// loc -- Concurrent Lines of Code Counter
-// Demonstrates: spawn, await_all, structs, string interpolation
+// loc -- walk a source tree and count code, comments and blank lines, concurrently.
+//
+// The previous version was broken twice over, and its own output proved it. The file list
+// was a HARDCODED array of "../sample-apps/cli-tools/..." paths that resolve from exactly
+// one cwd, and the counting was wrong on top of that: every file reported
+// "Code: 0  Blank: 1  Comment: 0" and the summary read "Files: 5 / Code: 0 / Blank: 5",
+// because the three counts were packed into ONE int (code*1000000 + blank*1000 + comment)
+// and unpacked wrong. A line counter that found 5 lines in 5 files.
+//
+// Rewritten to actually count, and to show the language off:
+//   * `enum LineKind { Code, Comment, Blank }` -- a line has ONE kind, decided in one
+//     place, and every tally is a `match` with no fallthrough. No packed integers: the
+//     struct comes back through the future with its fields intact.
+//   * `match` on the extension names the language AND picks its comment token.
+//   * `spawn` + `await_all` -- counting files is embarrassingly parallel, so every file
+//     is read at once, and the footer prints wall-clock beside the summed per-file time
+//     so you can SEE the payoff instead of taking it on trust.
+//   * real comment counting, including `/* ... */` blocks that span lines.
+//
+//   wyn run src/main.wyn            # counts the tree you are standing in
+//   wyn run src/main.wyn samples    # or any directory, or a single file
 
-struct FileStats { name: string, code: int, blank: int, comment: int }
+enum LineKind { Code, Comment, Blank }
 
-fn count_file(filename: string) -> int {
-    var content = File.read(filename)
+struct FileCount { lang: string, code: int, comment: int, blank: int, us: int }
+struct LangStat { name: string, files: int, code: int, comment: int, blank: int }
+
+// One table, one answer, and the `_ =>` arm means an unknown extension is a value
+// ("") rather than a crash. Adding a language is one line.
+fn lang_of(ext: string) -> string => match ext {
+    "wyn" => "Wyn",    "c" => "C",         "h" => "C",        "py" => "Python",
+    "js" => "JavaScript",  "ts" => "TypeScript",  "rs" => "Rust",  "go" => "Go",
+    "sh" => "Shell",   "md" => "Markdown", "toml" => "TOML",  _ => ""
+}
+
+// The same match shape decides the comment syntax, so the two can never disagree.
+fn line_tok(lang: string) -> string => match lang {
+    "Python" => "#",  "Shell" => "#",  "TOML" => "#",  "Markdown" => "",  _ => "//"
+}
+
+fn begins(s: string, p: string) -> bool {
+    if p.len() == 0 or s.len() < p.len() { return false }
+    return s.substring(0, p.len()) == p
+}
+
+// Read one file and classify every line. Runs on its own coroutine when spawned.
+// A trailing comment on a code line counts as code -- the convention every loc tool uses.
+fn count_file(path: string) -> FileCount {
+    var t0 = DateTime.micros()
+    var lang = lang_of(ext_of(path))
+    if lang == "" { lang = "Other" }
+    var tok = line_tok(lang)
     var code = 0
-    var blank = 0
     var comment = 0
-    var lines = content.split("\n")
-    for line in lines {
-        var trimmed = line.trim()
-        if trimmed.len() == 0 { blank = blank + 1 }
-        else if trimmed.starts_with("//") { comment = comment + 1 }
-        else { code = code + 1 }
+    var blank = 0
+    var in_block = false   // inside /* */, every line is a comment whatever it looks like
+
+    // split("\n"), not lines(): `.lines()` silently DROPS empty lines, which is exactly
+    // what this program exists to count. The tail after a trailing newline is not a line.
+    var rows = File.read(path).split("\n")
+    var n = rows.len()
+    if n > 0 and rows[n - 1] == "" { n -= 1 }
+
+    for i in 0..n {
+        var t = ("" + rows[i]).trim()
+        var kind = LineKind.Code
+        if in_block {
+            kind = LineKind.Comment
+            if t.contains("*/") { in_block = false }
+        } else if t.len() == 0 {
+            kind = LineKind.Blank
+        } else if begins(t, tok) or begins(t, "/*") or begins(t, "*") {
+            kind = LineKind.Comment
+            if begins(t, "/*") and not t.contains("*/") { in_block = true }
+        } else if t.contains("/*") and not t.contains("*/") {
+            in_block = true
+        }
+        match kind {
+            LineKind.Code => { code += 1 }
+            LineKind.Comment => { comment += 1 }
+            LineKind.Blank => { blank += 1 }
+        }
     }
-    // Encode as code * 1000000 + blank * 1000 + comment
-    return code * 1000000 + blank * 1000 + comment
+    var us = DateTime.micros() - t0
+    return FileCount { lang: lang, code: code, comment: comment, blank: blank, us: us }
+}
+
+fn skip_dir(name: string) -> bool {
+    if begins(name, ".") { return true }
+    return name == "node_modules" or name == "build" or name == "target" or name == "dist"
+}
+
+fn ext_of(name: string) -> string {
+    var dot = name.split(".")
+    if dot.len() < 2 { return "" }
+    return "" + dot[dot.len() - 1]
+}
+
+// `.repeat()` rather than `.pad_right(w, "█")`: pad_* counts BYTES, so padding with a
+// multi-byte glyph produces mojibake. repeat() copies whole characters.
+fn bar(share: int, width: int) -> string {
+    var filled = share * width / 100
+    return "█".repeat(filled) + "·".repeat(width - filled)
+}
+
+// One definition of the column widths, used by the header, every row and the total.
+fn row(a: string, b: string, c: string, d: string, e: string) -> string {
+    var left = "  " + a.pad_right(12, " ") + b.pad_left(6, " ")
+    return left + c.pad_left(8, " ") + d.pad_left(9, " ") + e.pad_left(7, " ")
+}
+
+// Every source file under `target`, or just `target` if it is a file. A worklist rather
+// than recursion: same traversal, and the depth is bounded by the tree, not the C stack.
+fn collect(target: string) -> [string] {
+    var paths = []
+    if File.is_dir(target) == 0 {
+        if File.exists(target) == 1 { paths.push(target) }
+        return paths
+    }
+    var pending = ["" + target]
+    var i = 0
+    while i < pending.len() {
+        var dir = "" + pending[i]
+        i += 1
+        for name in File::list_dir(dir) {
+            var p = dir + "/" + name
+            if File.is_dir(p) == 1 {
+                if not skip_dir(name) { pending.push(p) }
+            } else if lang_of(ext_of(name)) != "" {
+                paths.push(p)
+            }
+        }
+    }
+    return paths
 }
 
 fn main() {
-    print("=== Lines of Code Counter ===")
-
-    var files = [
-    "../sample-apps/cli-tools/loc/src/main.wyn",
-    "../sample-apps/cli-tools/todo-finder/src/main.wyn",
-    "../sample-apps/cli-tools/word-counter/src/main.wyn",
-    "../sample-apps/cli-tools/config-reader/src/main.wyn",
-    "../sample-apps/cli-tools/md-toc/src/main.wyn"
-    ]
-    var count = files.len()
-
-    // Count lines concurrently using spawn + await_all
-    var futures = []
-    for i in 0..count {
-        if File.exists(files[i]) {
-            futures.push(spawn count_file(files[i]))
-        } else {
-            futures.push(spawn count_file(""))
-        }
-    }
-    var results = await_all(futures)
-
-    var total_code = 0
-    var total_blank = 0
-    var total_comment = 0
-
-    for i in 0..count {
-        var packed = results[i]
-        var code = packed / 1000000
-        var blank = (packed / 1000) % 1000
-        var comment = packed % 1000
-        if code > 0 or blank > 0 {
-            var total = code + blank + comment
-            print("  ${files[i]}")
-            print("    Code: ${code}  Blank: ${blank}  Comment: ${comment}  Total: ${total}")
-            total_code += code
-            total_blank += blank
-            total_comment += comment
-        }
-    }
-
-    var grand_total = total_code + total_blank + total_comment
     print("")
-    print("=== Summary ===")
-    print("  Files:   ${count}")
-    print("  Code:    ${total_code}")
-    print("  Blank:   ${total_blank}")
-    print("  Comment: ${total_comment}")
-    print("  Total:   ${grand_total}")
+    print("  \x1b[1;36mloc\x1b[0m \x1b[90m-- concurrent lines-of-code counter\x1b[0m")
+
+    var target = "."
+    args = System.args()
+    if args.len() > 1 { target = "" + args[1] }
+    var paths = collect(target)
+
+    if paths.len() == 0 {
+        print("  \x1b[31mno source files under \"${target}\"\x1b[0m")
+        return
+    }
+    print("  \x1b[90m${paths.len()} files under \"${target}\", counted concurrently\x1b[0m")
+    print("")
+
+    // THE POINT OF THIS FILE. Every read is in flight before any result is examined.
+    var t0 = DateTime.micros()
+    var futures = []
+    for p in paths { futures.push(spawn count_file(p)) }
+    var results = await_all(futures)
+    var wall = DateTime.micros() - t0
+
+    // Aggregate per language. HashMaps keyed by the language name, so a new language
+    // needs no new counter variable anywhere.
+    var code = HashMap.new()
+    var cmt = HashMap.new()
+    var blk = HashMap.new()
+    var cnt = HashMap.new()
+    var work_us = 0     // summed per-file cost; what a sequential loop would have taken
+    for r in results {
+        var L = "" + r.lang
+        code.insert_int(L, code.get_int(L) + r.code)
+        cmt.insert_int(L, cmt.get_int(L) + r.comment)
+        blk.insert_int(L, blk.get_int(L) + r.blank)
+        cnt.insert_int(L, cnt.get_int(L) + 1)
+        work_us += r.us
+    }
+    var stats = []
+    for k in code.keys() {
+        var L = "" + k
+        stats.push(LangStat { name: L, files: cnt.get_int(L), code: code.get_int(L), comment: cmt.get_int(L), blank: blk.get_int(L) })
+    }
+
+    // Every figure below is derived from the same `stats`, so the TOTAL row cannot
+    // disagree with the rows above it.
+    var ranked = stats.sort_by((s) => 0 - s.code)
+    var all_cmt = stats.map((s) => s.comment).sum()
+    var all_blk = stats.map((s) => s.blank).sum()
+    var all_code = stats.map((s) => s.code).sum()
+    var per = all_code            // percentage divisor; a comments-only tree must not /0
+    if per == 0 { per = 1 }
+    var rule = "  \x1b[90m${"─".repeat(42)}   ${"─".repeat(24)}\x1b[0m"
+
+    print(row("LANGUAGE", "FILES", "CODE", "COMMENT", "BLANK") + "   \x1b[1mSHARE OF CODE\x1b[0m")
+    print(rule)
+    for s in ranked {
+        var share = s.code * 100 / per
+        print("${row(s.name, s.files.to_string(), s.code.to_string(), s.comment.to_string(), s.blank.to_string())}   \x1b[36m${bar(share, 24)}\x1b[0m ${share}%")
+    }
+    print(rule)
+    var note = "\x1b[90m${all_code + all_cmt + all_blk} lines, ${all_cmt * 100 / per} comments per 100 code\x1b[0m"
+    print("${row("TOTAL", paths.len().to_string(), all_code.to_string(), all_cmt.to_string(), all_blk.to_string())}   ${note}")
+    print("")
+    print("  \x1b[90m${wall}us wall-clock; the files total ${work_us}us of reading and classifying\x1b[0m")
+    print("")
 }
