@@ -65,6 +65,7 @@ src = ""
 pos = 0
 tt = 0
 tv = ""
+tstart = 0
 // === Lazy-evaluation depth ===
 // JS `? :`, `&&`, `||`, `??` must NOT evaluate the untaken branch. This is a
 // single-pass parse-and-evaluate interpreter, so the untaken branch still has to
@@ -513,7 +514,9 @@ fn okeys_arr(id: int) -> int {
             var sname = k.substring(6, k.len())
             if ohas(id, "__get_" + sname) == 0 { apush(aid, vstr(sname)) }
         }
-        else if not k.starts_with("__") { apush(aid, vstr(k)) }
+        // A "#name" key is a PRIVATE field: not an own enumerable property in JS,
+        // so it must not appear here (nor in JSON.stringify).
+        else if not k.starts_with("__") and not k.starts_with("#") { apush(aid, vstr(k)) }
     }
     return aid
 }
@@ -524,6 +527,10 @@ cprotos = [0]
 cconstructors = [-1]
 cparents = [-1]
 ccnt = 0
+// Instance field declarations (`class A { n = 0 }`), stored as SOURCE per class
+// and re-evaluated on every `new`. They cannot live on the prototype: each
+// instance needs its own copy, and an initializer may read `this`.
+cfields = [""]
 
 // === this stack ===
 this_stack = [""]
@@ -562,8 +569,8 @@ fn init_env() {
     for i in 0..(MAX_ARRAYS) { alens.push(0); abases.push(0) }
     omaps = [HashMap.new()]; oprotos = []
     for i in 0..1024 { oprotos.push(-1) }
-    cnames = []; cprotos = []; cconstructors = []; cparents = []
-    for i in 0..128 { cnames.push(""); cprotos.push(0); cconstructors.push(-1); cparents.push(-1) }
+    cnames = []; cprotos = []; cconstructors = []; cparents = []; cfields = []
+    for i in 0..128 { cnames.push(""); cprotos.push(0); cconstructors.push(-1); cparents.push(-1); cfields.push("") }
     this_stack = []
     for i in 0..128 { this_stack.push("") }
     mod_paths = []; mod_exports = []
@@ -626,6 +633,10 @@ fn expand_exp(mant: string, sign: string, digits: string) -> string {
 
 fn next() {
     skipws()
+    // Where the token about to be lexed BEGINS. After next() returns, `pos` sits
+    // past the token, so `pos` cannot delimit a source slice; tstart can. It is how
+    // a class field initializer's source is cut out exactly (see the class parser).
+    tstart = pos
     if pos >= src.len() { tt = 0; tv = ""; return }
     var c = ch()
     // Numbers
@@ -721,6 +732,15 @@ fn next() {
     if c == "," { tt = 36; tv = ","; return }
     if c == ";" { tt = 37; tv = ";"; return }
     if c == "." { if ch() == "." { pos = pos + 1; if ch() == "." { pos = pos + 1; tt = 98; tv = "..."; return } } tt = 38; tv = "."; return }
+    // `#name` - a private class member. It lexes as one identifier token whose
+    // text KEEPS the "#", so `this.#p` reaches the ordinary property path and the
+    // name can never collide with a public property called "p". Privacy is then
+    // just the "#" prefix being hidden from Object.keys/JSON, like "__" keys.
+    if c == "#" {
+        var pid = "#"
+        while pos < src.len() { c = ch(); if ALPHA.contains(c) or DIGITS.contains(c) { pid = pid + c; pos = pos + 1 } else { break } }
+        tt = 3; tv = pid; return
+    }
     if c == ":" { tt = 39; tv = ":"; return }
     if c == "~" { tt = 99; tv = "~"; return }
     tt = 0; tv = ""
@@ -1713,6 +1733,10 @@ fn json_ser(v: string) -> string {
             // name with the COMPUTED value, as node does; setters have no readable
             // value and are omitted.
             if k.starts_with("__set_") { continue }
+            // Private fields are not serialized, and neither is the interpreter's own
+            // "__class__" bookkeeping - node prints {"p":1}, not {"p":1,"__class__":"A"}.
+            if k.starts_with("#") { continue }
+            if k.starts_with("__") and not k.starts_with("__get_") { continue }
             var kname = sdup(k)
             var kval = oget_own(id, k)
             if k.starts_with("__get_") {
@@ -2696,6 +2720,22 @@ fn new_promise() -> string {
     return vobj(oid)
 }
 
+// Run a class's field initializers against a fresh instance. The statements are
+// re-parsed in a scope where `this` is that instance; lexer state is saved and
+// restored because the caller is mid-parse at the `new` expression.
+fn run_field_inits(ci: int, inst: string) {
+    if noeval > 0 or overflow == 1 { return }
+    var fsrc = sdup(cfields[ci])
+    if fsrc.len() == 0 { return }
+    var s1 = sdup(src); var p1 = pos; var t1 = tt; var v1 = sdup(tv); var ts1 = tstart
+    epush()
+    edef("this", inst)
+    src = sdup(fsrc); pos = 0; next()
+    while tt != 0 and overflow == 0 { p_stmt() }
+    epop()
+    src = sdup(s1); pos = p1; tt = t1; tv = sdup(v1); tstart = ts1
+}
+
 fn new_class(cls_name: string) -> string {
     // Find class
     var ci = 0
@@ -2722,6 +2762,9 @@ fn new_class(cls_name: string) -> string {
     var oid = onew()
     oprotos[oid] = cprotos[ci]
     oset(oid, "__class__", vstr(cls_name))
+    // Field initializers run BEFORE the constructor body, as in JS, so a
+    // constructor may read and overwrite a declared field.
+    run_field_inits(ci, vobj(oid))
     // Call constructor
     if tt == 30 {
         next()
@@ -2847,6 +2890,10 @@ fn p_stmt() {
         cprotos[ci] = proto_oid
         cconstructors[ci] = -1
         cparents[ci] = parent_id
+        // Inherit the parent's field initializers, so a subclass instance also gets
+        // the fields declared on the base. Parent first: a subclass redeclaring a
+        // name must win, and these are applied in order.
+        if parent_id >= 0 { cfields[ci] = sdup(cfields[parent_id]) } else { cfields[ci] = "" }
         ccnt = ccnt + 1
         // Parse class body
         while tt != 33 and tt != 0 {
@@ -2873,6 +2920,36 @@ fn p_stmt() {
             // do_member invokes it on read instead of handing back the function.
             if cacc.len() > 0 { mname = "__" + cacc + "_" + mname }
             if is_st == 1 and tt == 15 { next(); oset(proto_oid, "__static_" + mname, p_expr()); if tt == 37 { next() }; continue }
+            // An INSTANCE field declaration: `n = 0` or `n` (no initializer), and
+            // not followed by "(". Its initializer is recorded as source and
+            // re-evaluated per `new`, because every instance needs its own value and
+            // the initializer may read `this`. Without this case the parser fell
+            // straight into the parameter loop below, which scans for ")" - so a
+            // field as the LAST class member consumed the rest of the program and
+            // everything after the class silently vanished at exit 0.
+            if tt != 30 {
+                var init_src = "undefined"
+                if tt == 15 {
+                    next()
+                    var istart = tstart
+                    // Skip the initializer expression WITHOUT evaluating it here: it
+                    // must run per-instantiation, not once at declaration time.
+                    noeval = noeval + 1
+                    p_expr()
+                    noeval = noeval - 1
+                    init_src = sdup(src.substring(istart, tstart).trim())
+                    while init_src.ends_with(";") { init_src = sdup(init_src.substring(0, init_src.len() - 1).trim()) }
+                    if init_src.len() == 0 { init_src = "undefined" }
+                }
+                // Stored as runnable JS - `this.n = 0;` - rather than a name/value
+                // table. An initializer is arbitrary source that may itself contain
+                // any separator character, so no delimiter is safe; re-running the
+                // statements through the ordinary parser sidesteps the question and
+                // gives `this` and field-reads-field semantics for free.
+                cfields[ci] = cfields[ci] + "this." + mname + " = " + init_src + ";\n"
+                if tt == 37 { next() }
+                continue
+            }
             if tt == 30 { next() }
             var params = ""
             while tt != 31 and tt != 0 { if params.len() > 0 { params = params + "," } params = params + tv; next(); if tt == 36 { next() } }

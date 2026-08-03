@@ -91,7 +91,9 @@ fn main() {
         "limits_overflow",
         "uncaught_throw",
         "try_catch_runtime",
-        "object_getters"
+        "object_getters",
+        "object_entries",
+        "class_fields"
     ]
 
     pass = 0
