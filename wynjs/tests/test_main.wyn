@@ -94,7 +94,8 @@ fn main() {
         "object_getters",
         "object_entries",
         "class_fields",
-        "for_of_destructure"
+        "for_of_destructure",
+        "key_order"
     ]
 
     pass = 0

@@ -1,0 +1,13 @@
+alice,bob,carol
+3,5,7
+{"alice":3,"bob":5,"carol":7}
+[["alice",3],["bob",5],["carol",7]]
+alice bob carol
+k0,k1,k2,k3,k4,k5,k6,k7,k8,k9,k10,k11
+{"a":1,"b":99,"c":3}
+{"b":99,"c":3,"a":42}
+x,mid,z
+{"x":1,"mid":2,"z":3}
+{"outer":{"z":1,"y":2},"after":3}
+first,second,third
+{"first":1,"second":2,"third":3}

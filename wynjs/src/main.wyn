@@ -440,12 +440,20 @@ fn vtostr_full(v: string) -> string {
 omaps = [HashMap.new()]
 oprotos = [-1]
 ocnt = 0
+// Insertion order of each object's keys, "\n"-joined. A HashMap iterates in BUCKET
+// order, but JS *guarantees* string keys enumerate in insertion order - so
+// Object.keys / for-in / JSON.stringify cannot read the map's order. This is the
+// order; the map stays the value store. "\n" is safe as a separator because it
+// cannot appear in an identifier, and a computed key containing one would only
+// mis-order, never corrupt, the value.
+okeyorder = [""]
 
 fn onew() -> int {
     var id = ocnt
     var m = HashMap.new()
     omaps.push(m)
     oprotos.push(-1)
+    okeyorder.push("")
     ocnt = ocnt + 1
     return id
 }
@@ -453,6 +461,11 @@ fn onew() -> int {
 fn oset(id: int, k: string, v: string) {
     if noeval > 0 { return }
     var m = omaps[id]
+    // First write of a key appends it to the order; a REwrite must not move it, as
+    // JS keeps a key at its original position when its value is replaced.
+    if not m.has(k) {
+        if okeyorder[id].len() > 0 { okeyorder[id] = okeyorder[id] + "\n" + k } else { okeyorder[id] = sdup(k) }
+    }
     m.set(sdup(k), sdup(v))
 }
 
@@ -473,6 +486,18 @@ fn odel(id: int, k: string) {
     if noeval > 0 { return }
     var m = omaps[id]
     m.remove(k)
+    // Drop it from the order too, or a delete-then-re-add would reuse the ORIGINAL
+    // position; JS puts a re-added key at the end.
+    if okeyorder[id].len() > 0 {
+        var kept = ""
+        var parts = okeyorder[id].split("\n")
+        for ok in parts {
+            if ok != k and ok.len() > 0 {
+                if kept.len() > 0 { kept = kept + "\n" + ok } else { kept = sdup(ok) }
+            }
+        }
+        okeyorder[id] = sdup(kept)
+    }
 }
 
 fn ohas(id: int, k: string) -> int {
@@ -484,9 +509,17 @@ fn ohas(id: int, k: string) -> int {
 // Safe accessors: a `var m = omaps[i]` binding inside a NESTED block (if/loop
 // body) gets a spurious hashmap_free at block end. Binding at function-top
 // scope, as these do, does not. Every nested-block map use calls these instead.
+//
+// okeys returns keys in INSERTION order (see okeyorder). Everything user-visible -
+// Object.keys, for-in, JSON.stringify - goes through here, so the map's bucket order
+// never leaks. A key that okeyorder lists but the map no longer has was deleted, so
+// the `has` filter also keeps delete/re-add correct: it re-appends at the end.
 fn okeys(id: int) -> [string] {
-    var m = omaps[id]
-    return m.keys()
+    if okeyorder[id].len() == 0 { return [] }
+    var ordered: [string] = []
+    var parts = okeyorder[id].split("\n")
+    for k in parts { if omaps[id].has(k) { ordered.push(sdup(k)) } }
+    return ordered
 }
 
 fn oget_own(id: int, k: string) -> string {
@@ -501,9 +534,13 @@ fn olen(id: int) -> int {
 }
 
 fn okeys_arr(id: int) -> int {
+    // okeys() (insertion order), NOT m.keys() (bucket order) - Object.keys is
+    // user-visible and JS guarantees insertion order for string keys.
+    // It is called BEFORE anew() on purpose: astore is a bump allocator, so
+    // allocating the result array first and then building a second collection would
+    // interleave the two regions. That is OPEN-A exactly.
+    var ks = okeys(id)
     var aid = anew()
-    var m = omaps[id]
-    var ks = m.keys()
     for k in ks {
         // A getter/setter IS an enumerable own property in JS, so it must appear in
         // Object.keys - under its real name, not the mangled storage key.
@@ -567,8 +604,8 @@ fn init_env() {
     for i in 0..(MAX_ASTORE) { astore.push("") }
     alens = []; abases = []
     for i in 0..(MAX_ARRAYS) { alens.push(0); abases.push(0) }
-    omaps = [HashMap.new()]; oprotos = []
-    for i in 0..1024 { oprotos.push(-1) }
+    omaps = [HashMap.new()]; oprotos = []; okeyorder = []
+    for i in 0..1024 { oprotos.push(-1); okeyorder.push("") }
     cnames = []; cprotos = []; cconstructors = []; cparents = []; cfields = []
     for i in 0..128 { cnames.push(""); cprotos.push(0); cconstructors.push(-1); cparents.push(-1); cfields.push("") }
     this_stack = []
