@@ -1,12 +1,75 @@
-test "detect headings" {
-    assert("# Title".starts_with("# "))
-    assert("## Section".starts_with("## "))
-    assert("### Sub".starts_with("### "))
-    assert("Normal text".starts_with("# ") == 0)
+// Tests for md-toc's two rules that can actually be wrong: which lines count as
+// headings (the old app counted "#" comments inside fenced code blocks, which is what
+// corrupted its nesting) and what anchor a title slugifies to.
+// These mirror src/main.wyn exactly.
+
+fn slugify(title: string) -> string {
+    var out = ""
+    for ch in title.lower().chars() {
+        if "abcdefghijklmnopqrstuvwxyz0123456789_-".contains(ch) { out = out + ch }
+        else if ch == " " { out = out + "-" }
+    }
+    return out
 }
 
-test "extract heading text" {
-    var line = "## My Section"
-    var title = line.substring(3, line.len())
-    assert_eq(title, "My Section")
+fn heading_depth(line: string) -> int {
+    var d = 0
+    while d < line.len() and line.substring(d, d + 1) == "#" { d += 1 }
+    if d == 0 or d > 6 { return 0 }
+    if d >= line.len() or line.substring(d, d + 1) != " " { return 0 }
+    return d
+}
+
+// Depths of the real headings, code blocks excluded -- the parser's core.
+fn depths_outside_code(md: string) -> [int] {
+    var out = []
+    var fenced = false
+    for raw in md.split("\n") {
+        var line = raw.trim()
+        if line.substring(0, 3) == "```" or line.substring(0, 3) == "~~~" {
+            fenced = not fenced
+            continue
+        }
+        if fenced { continue }
+        var d = heading_depth(line)
+        if d > 0 { out.push(d) }
+    }
+    return out
+}
+
+test "heading depth" {
+    assert_eq(heading_depth("# Title"), 1)
+    assert_eq(heading_depth("### Sub"), 3)
+    assert_eq(heading_depth("###### Deep"), 6)
+    assert_eq(heading_depth("Normal text"), 0)
+    assert_eq(heading_depth("#hashtag"), 0)         // no space -> not a heading
+    assert_eq(heading_depth("####### Seven"), 0)    // markdown stops at 6
+}
+
+test "fenced code blocks are not headings" {
+    var md = "# Real\n\n```bash\n# a shell comment\n## another\n```\n\n## Also real"
+    var ds: [int] = depths_outside_code(md)
+    assert_eq(ds.len(), 2)
+    assert_eq(ds[0], 1)
+    assert_eq(ds[1], 2)
+}
+
+test "tilde fences too" {
+    var ds: [int] = depths_outside_code("~~~\n# hidden\n~~~\n# shown")
+    assert_eq(ds.len(), 1)
+}
+
+test "github anchor slugs" {
+    assert_eq(slugify("Getting Started"), "getting-started")
+    assert_eq(slugify("FAQ / Troubleshooting"), "faq--troubleshooting")  // GitHub keeps both dashes
+    assert_eq(slugify("Install & Run 🚀"), "install--run-")
+    assert_eq(slugify("snake_case_name"), "snake_case_name")             // underscores survive
+    assert_eq(slugify("v1.2.0 Release"), "v120-release")
+}
+
+test "depth normalisation" {
+    // A doc starting at ## must not be indented pointlessly.
+    var ds: [int] = depths_outside_code("## One\n### Two")
+    assert_eq(ds.min(), 2)
+    assert_eq(ds.max() - ds.min(), 1)
 }
