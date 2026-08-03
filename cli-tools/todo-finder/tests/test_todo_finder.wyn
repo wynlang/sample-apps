@@ -1,56 +1,76 @@
 // Tests for the classification and comment-detection rules in src/main.wyn.
 // The old app had no tests, which is how it shipped finding zero markers.
 
-enum Marker { Bug, Fixme, Hack, Xxx, Todo }
-
+// Same ladder as src/main.wyn: worst first, so a marker's INDEX is its severity.
 var marks = ["BUG", "FIXME", "HACK", "XXX", "TODO"]
-var openers = ["//", "#", "/*", "*", "--"]
-
-fn of_tag(s: string) -> Marker => match s {
-    "BUG" => Marker.Bug,
-    "FIXME" => Marker.Fixme,
-    "HACK" => Marker.Hack,
-    "XXX" => Marker.Xxx,
-    _ => Marker.Todo
-}
-fn sev(m: Marker) -> int => match m {
-    Marker.Bug => 0, Marker.Fixme => 1, Marker.Hack => 2, Marker.Xxx => 3, Marker.Todo => 4
-}
+// `*` deliberately absent - see src/main.wyn. As an "opener" it made every
+// multiplication and markdown bold span into debt.
+var openers = ["//", "#", "/*", "--"]
 
 // Same rule as scan(): the marker must be a whole word after a comment opener.
-// Returns the marker tag, or "" for no hit.
-fn hit_tag(line: string) -> string {
+// Returns the marker's severity index, or -1 for no hit.
+fn hit_sev(line: string) -> int {
     var word = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_\""
     var cmt = -1
     for o in openers {
         var i = line.index_of(o)
         if i >= 0 and (cmt < 0 or i < cmt) { cmt = i }
     }
-    if cmt < 0 { return "" }
-    for m in marks {
-        var at = line.index_of(m)
-        var end = at + m.len()
-        var whole = end >= line.len() or not word.contains(line.substring(end, end + 1))
-        if at > cmt and whole { return m }
+    // A `*` counts as a comment opener ONLY at the start of the line (a javadoc/block
+    // continuation: `  * @TODO ...`). As a bare substring it matched every
+    // multiplication and every markdown bold span; anchoring it to the line start keeps
+    // the real case and loses the false positives.
+    var lead = line.trim()
+    if cmt < 0 and lead.len() > 0 and lead.substring(0, 1) == "*" {
+        cmt = line.index_of("*")
     }
-    return ""
+    if cmt < 0 { return -1 }
+    var s = 0
+    for m in marks {
+        // Mirrors scan(): EVERY occurrence, and a whole word on BOTH sides. This helper
+        // used to check only the first occurrence and only the character AFTER the
+        // marker - the same two bugs the app had, which is why these tests passed while
+        // `// the DEBUG line` was booked as a BUG and a real marker after a code
+        // occurrence was dropped.
+        var pos = 0
+        while true {
+            var rest = line.substring(pos, line.len())
+            var rel = rest.index_of(m)
+            if rel < 0 { break }
+            var at = pos + rel
+            var end = at + m.len()
+            var after_ok = end >= line.len() or not word.contains(line.substring(end, end + 1))
+            var before_ok = at == 0 or not word.contains(line.substring(at - 1, at))
+            if at > cmt and after_ok and before_ok { return s }
+            pos = end
+            if pos >= line.len() { break }
+        }
+        s += 1
+    }
+    return -1
 }
 
-test "severity orders bug worst and todo least" {
-    assert(sev(Marker.Bug) == 0)
-    assert(sev(Marker.Bug) < sev(Marker.Fixme))
-    assert(sev(Marker.Fixme) < sev(Marker.Hack))
-    assert(sev(Marker.Hack) < sev(Marker.Xxx))
-    assert(sev(Marker.Xxx) < sev(Marker.Todo))
+// The tag a hit is reported under, straight off the same array the scan matched with.
+fn hit_tag(line: string) -> string {
+    var s = hit_sev(line)
+    if s < 0 { return "" }
+    return "" + marks[s]
 }
 
-test "unknown tags classify as todo" {
-    assert(sev(of_tag("BUG")) == 0)
-    assert(sev(of_tag("FIXME")) == 1)
-    assert(sev(of_tag("HACK")) == 2)
-    assert(sev(of_tag("XXX")) == 3)
-    assert(sev(of_tag("TODO")) == 4)
-    assert(sev(of_tag("nonsense")) == 4)
+test "severity is the ladder index, worst first" {
+    assert(marks.len() == 5)
+    assert(marks[0] == "BUG")
+    assert(marks[4] == "TODO")
+    // A BUG outranks a TODO on the same line, because BUG comes first in the ladder.
+    assert(hit_tag("// BUG and TODO on one line") == "BUG")
+}
+
+test "each marker maps to its own rank" {
+    assert(hit_sev("// BUG x") == 0)
+    assert(hit_sev("// FIXME x") == 1)
+    assert(hit_sev("// HACK x") == 2)
+    assert(hit_sev("// XXX x") == 3)
+    assert(hit_sev("// TODO x") == 4)
 }
 
 test "markers in comments are hits" {
@@ -61,7 +81,7 @@ test "markers in comments are hits" {
 }
 
 test "markers outside a comment are not hits" {
-    // THE BUG THIS CATCHES: the old version used bare line.contains("TODO"), so a
+    // THE DEFECT THIS CATCHES: the old version used bare line.contains("TODO"), so a
     // string literal or an identifier counted as debt. These must all be misses.
     assert(hit_tag("var marks = [\"BUG\", \"TODO\"]") == "")
     assert(hit_tag("TODO written in prose, no comment opener") == "")
@@ -75,11 +95,55 @@ test "partial words are not markers" {
 }
 
 test "the sample tree really carries debt" {
-    // Guards the failure mode that broke the old app: a default target that
-    // matches nothing. Paths are relative to the app directory.
+    // Guards the failure mode that broke the old app: a default target that matches
+    // nothing. Paths are relative to the app directory.
     var text = File.read("sample/checkout.wyn")
     assert(text.len() > 0)
     var n = 0
-    for line in text.split("\n") { if hit_tag(line).len() > 0 { n += 1 } }
+    for line in text.split("\n") { if hit_sev(line) >= 0 { n += 1 } }
     assert(n == 5)
+}
+
+// ---- the three false-positive / false-negative bugs -------------------------
+// Each of these SHIPPED. The old helper mirrored the app's bugs exactly, so the
+// existing tests could not see any of them.
+
+test "arithmetic is not a comment" {
+    // `*` was an opener, so any multiplication opened a phantom comment and the marker
+    // name in the expression counted as debt.
+    assert_eq(hit_sev("var n = 2 * len(TODO)"), -1)
+    assert_eq(hit_sev("var area = w * h  "), -1)
+}
+
+test "a markdown bold span is not a comment" {
+    // The repo's own README row was counted as two real markers this way.
+    assert_eq(hit_sev("| **todo-finder** | Scan for TODO/FIXME markers |"), -1)
+}
+
+test "a word ENDING in a marker is not a marker" {
+    // Only the character AFTER the marker was checked, so DEBUG matched BUG.
+    assert_eq(hit_sev("// the DEBUG line here"), -1)
+    assert_eq(hit_sev("// see NOTODO"), -1)
+    assert_eq(hit_tag("// a real BUG here"), "BUG")
+}
+
+test "a marker after a code occurrence is still found" {
+    // A single index_of() found the code occurrence first, failed the after-opener
+    // test, and never rescanned - so this line produced NO hits at all.
+    assert_eq(hit_tag("var BUGS = 1  // BUG: a REAL one"), "BUG")
+    assert_eq(hit_tag("var TODOS = 2  // TODO: also real"), "TODO")
+}
+
+test "and the existing whole-word rule still holds both ways" {
+    assert_eq(hit_sev("// TODOS are not markers"), -1)
+    assert_eq(hit_tag("// TODO: this one is"), "TODO")
+}
+
+test "a star opens a comment only at the start of the line" {
+    // The distinction that keeps the javadoc case without the false positives:
+    // leading `*` = block-comment continuation; `*` mid-line = arithmetic or markdown.
+    assert_eq(hit_tag("      * @TODO don't expose this"), "TODO")
+    assert_eq(hit_tag(" * FIXME: in a javadoc block"), "FIXME")
+    assert_eq(hit_sev("var n = 2 * len(TODO)"), -1)
+    assert_eq(hit_sev("total = w * h  // no marker here"), -1)
 }
