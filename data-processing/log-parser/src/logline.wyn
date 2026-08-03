@@ -1,0 +1,87 @@
+// The parse core of log-parser, split out so it can be tested without a log file.
+//
+// Everything here is a pure function of one string: no File, no System, no clock. The
+// I/O (finding and reading the log) stays in main.wyn; the decisions that can be
+// silently WRONG -- where the timestamp ends, which token is the level, whether a
+// short line is an entry at all -- live here, under tests/test_logline.wyn.
+//
+// The shape being parsed is fixed-offset, not delimiter-counted:
+//
+//     2026-02-11 08:00:01 INFO  Server started on port 8080
+//     |<-- 19 chars --->| |    |
+//     0                 19 20  |
+//                              level, then one space, then the message
+//
+// Signatures are deliberately primitives only (string/int/bool). On the compiler in
+// this repo, a function that RETURNS an enum, a struct or a list across a module
+// boundary miscompiles -- see the note in wyncanvas/tests/test_crossmodule.wyn -- so
+// the enum Level stays in main.wyn and this module speaks in canonical strings.
+
+// Where the level token starts: after the 19-char timestamp and its separator.
+fn body(line: string) -> string {
+    var t = line.trim()
+    if t.len() < 21 { return "" }
+    return t.substring(20, t.len()).trim()
+}
+
+// True when the line can be sliced as `TIMESTAMP LEVEL message` without mis-slicing.
+// Two ways to fail: too short to hold a timestamp, or no space after the level (so
+// there is no level/message boundary to find).
+export fn is_entry(line: string) -> bool {
+    var rest = body(line)
+    if rest.len() == 0 { return false }
+    return rest.index_of(" ") >= 0
+}
+
+export fn ts_of(line: string) -> string {
+    if not is_entry(line) { return "" }
+    return line.trim().substring(0, 19)
+}
+
+// The raw level token, exactly as written -- NOT normalised. canon_level() decides
+// what it means; keeping the two apart is what lets a test show that "info" and
+// "INFO" are different tokens and only one of them is a known level.
+export fn level_word(line: string) -> string {
+    var rest = body(line)
+    if rest.len() == 0 { return "" }
+    var sp = rest.index_of(" ")
+    if sp < 0 { return "" }
+    return rest.substring(0, sp)
+}
+
+// The message: everything after the level token, trimmed. `INFO  Server` has two
+// spaces (the level column is padded), so the trim is load-bearing.
+export fn msg_of(line: string) -> string {
+    var rest = body(line)
+    if rest.len() == 0 { return "" }
+    var sp = rest.index_of(" ")
+    if sp < 0 { return "" }
+    return rest.substring(sp + 1, rest.len()).trim()
+}
+
+// The one place a level token becomes a level. main.wyn's `enum Level` is a 1:1
+// relabelling of these four strings, and its match is exhaustive, so this function is
+// the whole classification rule.
+export fn canon_level(word: string) -> string => match word {
+    "INFO" => "INFO",
+    "WARN" => "WARN",
+    "ERROR" => "ERROR",
+    _ => "----"
+}
+
+// How many lines of a log parse as entries -- the count main.wyn reports.
+export fn entry_count(text: string) -> int {
+    var n = 0
+    for line in text.lines() { if is_entry(line) { n += 1 } }
+    return n
+}
+
+// How many entries carry a given canonical level. Same walk as the tally in main.wyn.
+export fn level_count(text: string, want: string) -> int {
+    var n = 0
+    for line in text.lines() {
+        if not is_entry(line) { continue }
+        if canon_level(level_word(line)) == want { n += 1 }
+    }
+    return n
+}

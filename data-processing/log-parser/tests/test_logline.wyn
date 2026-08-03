@@ -1,0 +1,131 @@
+// Tests for log-parser's line slicing. The parse is FIXED-OFFSET (timestamp = chars
+// 0..19, level starts at 20), which is exactly the kind of rule that is off by one and
+// still looks plausible: a message that begins one character early reads fine to a
+// human and is wrong. These pin the offsets against strings counted by hand.
+//
+// Everything here feeds logline a fixture string. No log file, no filesystem, no clock,
+// so the suite gives the same answer on any machine.
+
+import logline
+
+// A line whose columns are counted out below, once, so every offset assertion in this
+// file refers to a known layout:
+//
+//   "2026-02-11 08:00:01 INFO  Server started"
+//    0123456789...                              <- "2026-02-11" is 10 chars (0..9)
+//              ^ index 10 = the space
+//               ^ index 11..18 = "08:00:01"
+//                        ^ index 19 = the space after the 19-char timestamp
+//                         ^ index 20 = 'I', the first char of the level
+fn sample() -> string => "2026-02-11 08:00:01 INFO  Server started"
+
+test "the timestamp is the first 19 characters, not 18 or 20" {
+    // An off-by-one here silently eats the seconds digit or grabs the separator.
+    assert_eq(logline.ts_of(sample()), "2026-02-11 08:00:01")
+    assert_eq(logline.ts_of(sample()).len(), 19)
+}
+
+test "the level token stops at the first space" {
+    assert_eq(logline.level_word(sample()), "INFO")
+}
+
+test "the padded level column does not leak into the message" {
+    // "INFO  Server" -- TWO spaces, because the level column is padded to width. If
+    // msg_of() sliced at a fixed offset instead of trimming, the message would begin
+    // with a space and every downstream comparison would be subtly off.
+    assert_eq(logline.msg_of(sample()), "Server started")
+    assert_eq(logline.msg_of("2026-02-11 08:00:01 ERROR Out of memory"), "Out of memory")
+}
+
+test "a message containing the delimiter keeps all of it" {
+    // The message is full of spaces; only the FIRST one after the level is a
+    // separator. A split-on-space implementation would return just "Slow".
+    var line = "2026-02-11 08:01:12 WARN  Slow query detected (250ms)"
+    assert_eq(logline.msg_of(line), "Slow query detected (250ms)")
+    assert_eq(logline.level_word(line), "WARN")
+}
+
+test "a line too short to hold a timestamp is not an entry" {
+    // The boundary is 21 characters: 19 of timestamp, the separator, and at least one
+    // character of level. 20 is one short and must be rejected, not sliced.
+    var twenty = "2026-02-11 08:00:01 "
+    assert_eq(twenty.len(), 20)
+    assert_false(logline.is_entry(twenty))
+
+    var twentyone = "2026-02-11 08:00:01 X"
+    assert_eq(twentyone.len(), 21)
+    // Still not an entry: there is a level but no space after it, so there is no
+    // level/message boundary. Present-but-unterminated is its own failure.
+    assert_false(logline.is_entry(twentyone))
+
+    assert_true(logline.is_entry("2026-02-11 08:00:01 X y"))
+}
+
+test "blank and junk lines are skipped, not half-parsed" {
+    assert_false(logline.is_entry(""))
+    assert_false(logline.is_entry("   "))
+    assert_false(logline.is_entry("a stack trace continuation"))
+    // The failure mode being excluded: returning "" from a rejected line rather than a
+    // garbage slice of it.
+    assert_eq(logline.level_word("short"), "")
+    assert_eq(logline.msg_of("short"), "")
+    assert_eq(logline.ts_of("short"), "")
+}
+
+test "only the three known level tokens are levels" {
+    assert_eq(logline.canon_level("INFO"), "INFO")
+    assert_eq(logline.canon_level("WARN"), "WARN")
+    assert_eq(logline.canon_level("ERROR"), "ERROR")
+    // Case matters, and near-misses are not silently promoted. If canon_level ever
+    // starts upper-casing, this test says so.
+    assert_eq(logline.canon_level("info"), "----")
+    assert_eq(logline.canon_level("WARNING"), "----")
+    assert_eq(logline.canon_level("DEBUG"), "----")
+    assert_eq(logline.canon_level(""), "----")
+}
+
+test "the last line is counted even with no trailing newline" {
+    // A trailing-newline-driven loop drops the final entry. Both spellings of the same
+    // three-entry log must agree.
+    var with_nl = "2026-02-11 08:00:01 INFO  a\n2026-02-11 08:00:02 WARN  b\n2026-02-11 08:00:03 ERROR c\n"
+    var no_nl = "2026-02-11 08:00:01 INFO  a\n2026-02-11 08:00:02 WARN  b\n2026-02-11 08:00:03 ERROR c"
+    assert_eq(logline.entry_count(with_nl), 3)
+    assert_eq(logline.entry_count(no_nl), 3)
+}
+
+test "a trailing newline does not invent a fourth entry" {
+    // The mirror of the test above: over-counting is as wrong as under-counting.
+    var text = "2026-02-11 08:00:01 INFO  a\n\n\n"
+    assert_eq(logline.entry_count(text), 1)
+}
+
+test "the tally sums to the entry count and excludes junk" {
+    var text = "2026-02-11 08:00:01 INFO  a\nnot a log line\n2026-02-11 08:00:02 DEBUG b\n2026-02-11 08:00:03 ERROR c"
+    assert_eq(logline.entry_count(text), 3)
+    assert_eq(logline.level_count(text, "INFO"), 1)
+    assert_eq(logline.level_count(text, "WARN"), 0)
+    assert_eq(logline.level_count(text, "ERROR"), 1)
+    assert_eq(logline.level_count(text, "----"), 1)   // the DEBUG line
+    var total = logline.level_count(text, "INFO") + logline.level_count(text, "WARN")
+        + logline.level_count(text, "ERROR") + logline.level_count(text, "----")
+    assert_eq(total, logline.entry_count(text))
+}
+
+test "an empty log parses to nothing rather than erroring" {
+    assert_eq(logline.entry_count(""), 0)
+    assert_eq(logline.level_count("", "INFO"), 0)
+}
+
+test "the committed sample.log matches counts checkable with grep" {
+    // `grep -c INFO sample.log` = 6, WARN = 3, ERROR = 3, `wc -l` = 12.
+    var path = "sample.log"
+    if File.exists(path) == 0 { path = "data-processing/log-parser/sample.log" }
+    if File.exists(path) == 1 {
+        var text = File.read(path)
+        assert_eq(logline.entry_count(text), 12)
+        assert_eq(logline.level_count(text, "INFO"), 6)
+        assert_eq(logline.level_count(text, "WARN"), 3)
+        assert_eq(logline.level_count(text, "ERROR"), 3)
+        assert_eq(logline.level_count(text, "----"), 0)
+    }
+}

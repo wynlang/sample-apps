@@ -15,6 +15,12 @@
 //     entries that were printed.
 //
 //   wyn run data-processing/log-parser/src/main.wyn [logfile]
+//
+// The line-slicing rules live in src/logline.wyn so they can be tested against fixture
+// strings with no log file on disk -- see tests/test_logline.wyn. This file keeps the
+// I/O (finding and reading the file) and the presentation.
+
+import logline
 
 enum Level { Info, Warn, Error, Other }
 
@@ -24,11 +30,26 @@ struct Entry {
     msg: string
 }
 
+// Takes a CANONICAL level (logline.canon_level's output), so the `_` arm is reached
+// only by logline's own "----" -- the two enumerations cannot drift apart.
 fn classify(word: string) -> Level => match word {
     "INFO" => Level.Info,
     "WARN" => Level.Warn,
     "ERROR" => Level.Error,
     _ => Level.Other
+}
+
+// The report order. Written as an index rather than `for lvl in [Level.Info, ...]`
+// because iterating a LITERAL LIST OF ENUM VARIANTS segfaults on the compiler in this
+// repo -- that crash is what used to truncate this program's output right after the
+// "12 lines" header. Reduced repro:
+//     enum L { A, B }
+//     fn main() { for x in [L.A, L.B] { print("hi") } }   // -> Segmentation fault
+fn nth_level(i: int) -> Level {
+    if i == 0 { return Level.Info }
+    if i == 1 { return Level.Warn }
+    if i == 2 { return Level.Error }
+    return Level.Other
 }
 
 fn colour(l: Level) -> string => match l {
@@ -60,19 +81,17 @@ fn main() {
         return
     }
 
-    // Parse: `TIMESTAMP(19 chars) LEVEL rest`. A line too short to hold a timestamp is
-    // skipped rather than mis-sliced.
+    // Parse: `TIMESTAMP(19 chars) LEVEL rest`, per the rules in logline. A line too
+    // short to hold a timestamp, or with no space after the level, is skipped rather
+    // than mis-sliced -- logline.is_entry() is the single gate, and the tests pin it.
     var entries = []
     for line in File.read(path).lines() {
-        var t = line.trim()
-        if t.len() < 21 { continue }
-        var ts = t.substring(0, 19)
-        var rest = t.substring(20, t.len()).trim()
-        var sp = rest.index_of(" ")
-        if sp < 0 { continue }
-        var level = classify(rest.substring(0, sp))
-        var msg = rest.substring(sp + 1, rest.len()).trim()
-        entries.push(Entry { ts: ts, level: level, msg: msg })
+        if not logline.is_entry(line) { continue }
+        entries.push(Entry {
+            ts: logline.ts_of(line),
+            level: classify(logline.canon_level(logline.level_word(line))),
+            msg: logline.msg_of(line)
+        })
     }
 
     // Tally by level. A HashMap keyed by the tag, so adding a level needs no new
@@ -102,7 +121,8 @@ fn main() {
     // Summary as a bar chart, one row per level that occurred.
     print("")
     print("  \x1b[1m${entries.len()}\x1b[0m lines")
-    for lvl in [Level.Info, Level.Warn, Level.Error, Level.Other] {
+    for i in 0..4 {
+        var lvl = nth_level(i)
         var n = counts.get_int(tag(lvl))
         if n == 0 { continue }
         var bar = ""
