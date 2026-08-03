@@ -1,0 +1,154 @@
+// Tests for httpcheck's reading of curl's answer and its status bands. NO NETWORK: every
+// case feeds checklogic a captured `-w '%{http_code} %{time_total}'` line, so the suite
+// gives the same answer offline, behind a proxy, and on a CI runner with no egress --
+// which is the whole reason the logic was split out of main.wyn. The app itself can only
+// tell you about the network it ran on.
+
+import checklogic
+
+test "a normal curl answer yields both numbers" {
+    // The shape being parsed: `200 0.253`.
+    assert_eq(checklogic.status_of("200 0.253"), 200)
+    assert_eq(checklogic.millis_of("200 0.253"), 253)
+    assert_eq(checklogic.status_of("  404 1.5  \n"), 404)
+    assert_eq(checklogic.millis_of("  404 1.5  \n"), 1500)
+}
+
+test "curl's '000' for a failed connection is the unreachable sentinel" {
+    // curl prints `000 0.000` on DNS failure, refused connection or timeout. This works
+    // because "000".to_int() is 0 and classify() reads 0 as unreachable -- a coincidence
+    // worth a test, since a parser that treated "000" as a valid 3-digit status would
+    // report a dead host as up.
+    assert_eq(checklogic.status_of("000 0.000"), 0)
+    assert_eq(checklogic.classify(checklogic.status_of("000 0.000")), "unreachable")
+    assert_eq(checklogic.millis_of("000 0.000"), 0)
+}
+
+test "empty curl output is unreachable, not a crash" {
+    // THE CRASH THIS PREVENTS. `parts[0].to_int()` on an empty string ABORTS THE
+    // PROCESS, and curl prints nothing at all when it is not installed -- so on a machine
+    // without curl the whole report used to die rather than reporting six unreachable
+    // endpoints.
+    assert_eq(checklogic.status_of(""), 0)
+    assert_eq(checklogic.status_of("   "), 0)
+    assert_eq(checklogic.status_of("\n"), 0)
+    assert_eq(checklogic.millis_of(""), 0)
+    assert_eq(checklogic.classify(checklogic.status_of("")), "unreachable")
+}
+
+test "non-numeric curl output is unreachable, not a crash" {
+    assert_eq(checklogic.status_of("curl: command not found"), 0)
+    assert_eq(checklogic.status_of("curl: (6) Could not resolve host"), 0)
+    assert_eq(checklogic.millis_of("curl: (6) Could not resolve host"), 0)
+    // A status field that is numeric but absurd is rejected on length, so the conversion
+    // never sees it.
+    assert_eq(checklogic.status_of("9999999 1.0"), 0)
+}
+
+test "a missing timing field does not corrupt the status" {
+    // curl truncated after the code: the status is still readable, the timing is 0.
+    assert_eq(checklogic.status_of("200"), 200)
+    assert_eq(checklogic.millis_of("200"), 0)
+}
+
+test "a malformed timing is 0, not a crash" {
+    assert_eq(checklogic.millis_of("200 abc"), 0)
+    assert_eq(checklogic.millis_of("200 1.2.3"), 0)
+    assert_eq(checklogic.millis_of("200 -1.0"), 0)
+    // ...while the status survives, so one bad field does not lose both.
+    assert_eq(checklogic.status_of("200 abc"), 200)
+}
+
+test "a sub-millisecond request is not reported as 0ms" {
+    // `(0.0006 * 1000).to_int()` TRUNCATES to 0. A localhost request that took 600
+    // microseconds took SOME time, and rounding to nearest says 1ms rather than none.
+    assert_eq(checklogic.millis_of("200 0.0006"), 1)
+    assert_eq(checklogic.millis_of("200 0.0004"), 0)
+    // And the rounding does not inflate a whole number.
+    assert_eq(checklogic.millis_of("200 1.000"), 1000)
+    assert_eq(checklogic.millis_of("200 0.5"), 500)
+    // 0.2535s is 253.5ms -> 254, not 253.
+    assert_eq(checklogic.millis_of("200 0.2535"), 254)
+}
+
+test "the status band boundaries are exact" {
+    // Each of these is one side of an inequality that is invisible from the output. 299
+    // is still up and 300 is a redirect; 399 is a redirect and 400 is a client error.
+    assert_eq(checklogic.classify(200), "up")
+    assert_eq(checklogic.classify(204), "up")
+    assert_eq(checklogic.classify(299), "up")
+    assert_eq(checklogic.classify(300), "redirect")
+    assert_eq(checklogic.classify(301), "redirect")
+    assert_eq(checklogic.classify(399), "redirect")
+    assert_eq(checklogic.classify(400), "client-error")
+    assert_eq(checklogic.classify(404), "client-error")
+    assert_eq(checklogic.classify(499), "client-error")
+    assert_eq(checklogic.classify(500), "server-error")
+    assert_eq(checklogic.classify(503), "server-error")
+}
+
+test "a 1xx informational response is up, not unreachable" {
+    // 100 and 101 are real answers from a real server.
+    assert_eq(checklogic.classify(101), "up")
+    assert_eq(checklogic.classify(100), "up")
+}
+
+test "a nonsense sub-100 code is unreachable, not up" {
+    // If the >= 100 floor were missing, code 1 would fall through to "up" and a garbage
+    // answer would be reported as a healthy endpoint.
+    assert_eq(checklogic.classify(1), "unreachable")
+    assert_eq(checklogic.classify(99), "unreachable")
+    assert_eq(checklogic.classify(0), "unreachable")
+}
+
+test "a code above 599 is still a server error, not silently up" {
+    // Cloudflare and friends emit 520-530. The >= 500 test must be open-ended.
+    assert_eq(checklogic.classify(520), "server-error")
+    assert_eq(checklogic.classify(599), "server-error")
+}
+
+test "a redirect counts as reachable; an error does not" {
+    // The summary line's rule, stated once. Something answered and told you where to go.
+    assert_true(checklogic.is_reachable("up"))
+    assert_true(checklogic.is_reachable("redirect"))
+    assert_false(checklogic.is_reachable("client-error"))
+    assert_false(checklogic.is_reachable("server-error"))
+    assert_false(checklogic.is_reachable("unreachable"))
+}
+
+test "the reachable tally over a captured multi-endpoint run" {
+    // The app's own default list of six, as curl actually answers it: 200, 200, 301, 404,
+    // 500, and a refused localhost. 3 reachable, 3 not.
+    var outs = ["200 0.253", "200 0.612", "301 0.404", "404 0.388", "500 0.501", "000 0.000"]
+    var reachable = 0
+    var total_ms = 0
+    for o in outs {
+        var line = "" + o
+        if checklogic.is_reachable(checklogic.classify(checklogic.status_of(line))) { reachable += 1 }
+        total_ms += checklogic.millis_of(line)
+    }
+    assert_eq(reachable, 3)
+    // 253 + 612 + 404 + 388 + 501 + 0, checkable by hand.
+    assert_eq(total_ms, 2158)
+}
+
+test "shortening a URL drops the scheme but keeps the host" {
+    assert_eq(checklogic.short("https://example.com"), "example.com")
+    assert_eq(checklogic.short("http://localhost:8080"), "localhost:8080")
+    // Exactly 30 characters after the scheme: not truncated.
+    var thirty = "abcdefghij.example.com/1234567"
+    assert_eq(thirty.len(), 30)
+    assert_eq(checklogic.short("https://" + thirty), thirty)
+    // 31: truncated to 29 plus a marker, so the column cannot overflow.
+    var t = checklogic.short("https://abcdefghij.example.com/12345678")
+    assert_eq(t.len(), 32)      // 29 chars + a 3-byte "…"
+    assert_true(t.contains("…"))
+    assert_true(t.starts_with("abcdefghij.example.com"))
+}
+
+test "an https URL containing 'http://' in its query is not mangled beyond the scheme" {
+    // `.replace()` is global, so a URL whose query embeds another URL loses that too.
+    // Documented as the accepted behaviour of a display-only shortener -- the row is a
+    // label, and r.url (untouched) is what was actually fetched.
+    assert_eq(checklogic.short("https://x.com/?u=http://y.com"), "x.com/?u=y.com")
+}

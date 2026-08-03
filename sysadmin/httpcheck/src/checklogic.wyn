@@ -1,0 +1,95 @@
+// The decision core of httpcheck, split out so it can be tested with no network.
+// Nothing here calls curl or the clock: every function takes a string or an int.
+//
+// What httpcheck can get silently wrong, and therefore what is tested here:
+//
+//   1. READING CURL'S ANSWER. The check runs
+//          curl -s -o /dev/null -w '%{http_code} %{time_total}'
+//      which prints e.g. `200 0.253`. On a connection failure curl prints `000 0.000`
+//      and exits non-zero -- and `"000".to_int()` is 0, which is exactly the sentinel
+//      classify() reads as unreachable, so that path works by coincidence and deserves a
+//      test. When curl is missing entirely the output is EMPTY, and `"".to_int()` ABORTS
+//      THE PROCESS.
+//
+//   2. THE STATUS BANDS. 200/301/404/500/000 are five different answers, and the
+//      boundaries (299/300, 399/400, 499/500) are inequalities invisible from the output.
+//
+// Signatures are primitives only. On the compiler in this repo, returning an enum, a
+// struct or a list across a module boundary miscompiles (see
+// wyncanvas/tests/test_crossmodule.wyn), so the enum Health stays in main.wyn.
+
+// Field n of curl's `-w` output, or "". Space-separated, so an empty or truncated line
+// yields "" rather than a partial read.
+fn field(out: string, n: int) -> string {
+    var t = out.trim()
+    if t.len() == 0 { return "" }
+    var f = t.split(" ")
+    if n < 0 or n >= f.len() { return "" }
+    return ("" + f[n]).trim()
+}
+
+// The HTTP status code, or 0 for "no answer at all".
+//
+// 0 is the sentinel for unreachable, and there are three ways to get there: curl printed
+// `000` (DNS failure, refused connection, timeout), curl printed nothing (not installed,
+// killed), or the field is not numeric. All three mean the same thing to a reader, and
+// none of them may abort the process -- `.to_int()` on "" or "abc" does.
+export fn status_of(out: string) -> int {
+    var s = field(out, 0)
+    if s.len() == 0 { return 0 }
+    if s.len() > 3 { return 0 }
+    for i in 0..s.len() {
+        var c = s.substring(i, i + 1)
+        if c < "0" or c > "9" { return 0 }
+    }
+    return s.to_int()
+}
+
+// The elapsed time in MILLISECONDS, from curl's `%{time_total}` in seconds.
+//
+// Rounded to nearest rather than truncated: `(0.0006 * 1000).to_int()` truncates to 0ms
+// and a request that took some time is reported as taking none. Guards the conversion
+// because `.to_float()` on a non-numeric string is not safe either.
+export fn millis_of(out: string) -> int {
+    var s = field(out, 1)
+    if s.len() == 0 { return 0 }
+    var seen_dot = false
+    for i in 0..s.len() {
+        var c = s.substring(i, i + 1)
+        if c == "." {
+            if seen_dot { return 0 }
+            seen_dot = true
+            continue
+        }
+        if c < "0" or c > "9" { return 0 }
+    }
+    var ms = s.to_float() * 1000.0 + 0.5
+    return ms.to_int()
+}
+
+// The verdict. Five outcomes, not a boolean: a 404 is a working server saying the path is
+// wrong, and a 0 is no server at all -- both are "not 200" and they mean opposite things.
+export fn classify(code: int) -> string {
+    if code == 0 { return "unreachable" }
+    if code >= 500 { return "server-error" }
+    if code >= 400 { return "client-error" }
+    if code >= 300 { return "redirect" }
+    if code >= 100 { return "up" }
+    return "unreachable"   // 1..99 is not a status code
+}
+
+// Whether a verdict counts as reachable for the summary tally. A redirect IS reachable:
+// something answered and told you where to go.
+export fn is_reachable(verdict: string) -> bool => match verdict {
+    "up" => true,
+    "redirect" => true,
+    _ => false
+}
+
+// Shorten a URL for the table without hiding which host it is. The scheme is dropped
+// because it is noise in a column; the host must survive.
+export fn short(url: string) -> string {
+    var s = url.replace("https://", "").replace("http://", "")
+    if s.len() <= 30 { return s }
+    return s.substring(0, 29) + "…"
+}

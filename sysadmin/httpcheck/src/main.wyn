@@ -16,6 +16,12 @@
 //
 //   wyn run sysadmin/httpcheck/src/main.wyn
 //   wyn run sysadmin/httpcheck/src/main.wyn https://example.com https://wynlang.com
+//
+// The parsing of curl's answer and the status-band classification live in
+// src/checklogic.wyn so they can be tested with no network -- see
+// tests/test_checklogic.wyn. This file keeps the curl call, the concurrency and the table.
+
+import checklogic
 
 // Five outcomes, not a boolean. A 404 and a connection failure are both "not 200" and
 // mean completely different things: one is a working server telling you the path is
@@ -45,20 +51,15 @@ fn verdict(h: Health) -> string => match h {
     Health.Unreachable => "\x1b[90munreachable\x1b[0m"
 }
 
-// Classify once, here, so no call site repeats a range comparison.
-fn classify(code: int) -> Health {
-    if code == 0 { return Health.Unreachable }
-    if code >= 500 { return Health.ServerError }
-    if code >= 400 { return Health.ClientError }
-    if code >= 300 { return Health.Redirect }
-    return Health.Up
-}
-
-// Shorten a URL for the table without hiding which host it is.
-fn short(url: string) -> string {
-    var s = url.replace("https://", "").replace("http://", "")
-    if s.len() <= 30 { return s }
-    return s.substring(0, 29) + "…"
+// checklogic answers in strings (a module cannot return an enum on this compiler without
+// miscompiling); this is the 1:1 relabelling back into the enum the rest of the file uses.
+// The band boundaries themselves are checklogic.classify's, tested at 299/300/399/400/499/500.
+fn classify(code: int) -> Health => match checklogic.classify(code) {
+    "up" => Health.Up,
+    "redirect" => Health.Redirect,
+    "client-error" => Health.ClientError,
+    "server-error" => Health.ServerError,
+    _ => Health.Unreachable
 }
 
 // Fetch one endpoint. Runs on its own coroutine when spawned.
@@ -69,15 +70,24 @@ fn short(url: string) -> string {
 // still bounds the worst case.
 fn check(url: string) -> Result {
     var out = System.exec("curl -s -o /dev/null -w '%{http_code} %{time_total}' --connect-timeout 2 --max-time 4 '${url}' 2>/dev/null").trim()
-    var parts = out.split(" ")
-    var code = 0
-    var secs = 0.0
-    if parts.len() >= 1 { code = parts[0].to_int() }
-    if parts.len() >= 2 { secs = parts[1].to_float() }
+    // `parts[0].to_int()` directly would ABORT THE PROCESS when curl is not installed
+    // and prints nothing. status_of()/millis_of() validate before converting, and both
+    // report 0 -- which classify() already reads as unreachable.
+    //
+    // Both are bound to VARS first, deliberately. Computing an int struct field INLINE
+    // from a `System.exec` result silently yields 0 on the compiler in this repo:
+    //     struct R { a: int }
+    //     fn f() -> R { var s = System.exec("printf abc").trim()
+    //                   return R { a: s.len() } }        // -> a == 0
+    //     fn g() -> R { var s = System.exec("printf abc").trim()
+    //                   var n = s.len() return R { a: n } }  // -> a == 3
+    // With `ms:` computed inline, every latency in the table printed as 0ms.
+    var code = checklogic.status_of(out)
+    var ms = checklogic.millis_of(out)
     return Result {
         url: url,
         code: code,
-        ms: (secs * 1000.0).to_int(),
+        ms: ms,
         health: classify(code)
     }
 }
@@ -133,7 +143,7 @@ fn main() {
         if r.ms > slowest { slowest = r.ms }
         var code_col = "---"
         if r.code > 0 { code_col = r.code.to_string() }
-        print("  ${short(r.url).pad_right(32, " ")} ${icon(r.health)} ${code_col.pad_right(7, " ")}${verdict(r.health).pad_right(23, " ")}\x1b[90m${r.ms}ms\x1b[0m")
+        print("  ${checklogic.short(r.url).pad_right(32, " ")} ${icon(r.health)} ${code_col.pad_right(7, " ")}${verdict(r.health).pad_right(23, " ")}\x1b[90m${r.ms}ms\x1b[0m")
     }
 
     print("")
