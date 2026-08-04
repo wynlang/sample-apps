@@ -2950,12 +2950,7 @@ fn p_obj_pattern() -> string {
 // bind_obj_pattern expects. Used for a pattern that arrives as SOURCE rather than
 // through p_obj_pattern - i.e. a destructuring function parameter.
 fn obj_pattern_names(inner: string) -> string {
-    // COMPILER WORKAROUND: this accumulator is `acc`, not `out`, because `out` is
-    // declared as an ARRAY in another function in this file (eat_args2) and
-    // the checker leaks an inferred type across functions BY NAME - a string `out`
-    // here then emits array_len() for out.len() and the C compile fails. Filed
-    // against the compiler; do not rename this back to `out`.
-    var acc = ""
+    var out = ""
     var parts = inner.split(",")
     for p in parts {
         var e = p.trim()
@@ -2964,10 +2959,10 @@ fn obj_pattern_names(inner: string) -> string {
         var key = sdup(e)
         var local = sdup(e)
         if ci3 > 0 { key = e.substring(0, ci3).trim(); local = e.substring(ci3 + 1, e.len()).trim() }
-        if acc.len() > 0 { acc = acc + "," }
-        acc = acc + key + ":" + local
+        if out.len() > 0 { out = out + "," }
+        out = out + key + ":" + local
     }
-    return acc
+    return out
 }
 
 // Bind an array pattern's names against one value.
