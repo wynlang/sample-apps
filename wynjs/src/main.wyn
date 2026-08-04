@@ -651,18 +651,55 @@ srcb: [int] = []
 srclen = 0
 CHARS: [string] = []
 
+// A second mirror slot, so the ALTERNATION that dominates real programs is free.
+//
+// Every nested parse looks like: setsrc(body) ... setsrc(enclosing). A one-slot
+// mirror therefore misses on both halves and rebuilds twice per call - and the
+// enclosing half is the whole program, making each call O(program size). That is
+// a real cliff, not a micro-cost: padding tests/bench/array_hof.js with a 20KB
+// comment took a one-slot mirror from 0.68s to 3.98s.
+//
+// Two slots turn A->B->A->B into a swap. `prevsrc` is the text slot `prevb`
+// mirrors; they are only ever assigned together, so they cannot drift.
+prevsrc = ""
+prevb: [int] = []
+prevlen = 0
+
 // The ONLY way to change `src`. Keeps srcb/srclen in step with it, so the lexer
 // can index bytes instead of slicing strings. sdup() is kept for the reason it
 // has always been here: a bare `src = someLocal` stores a pointer the caller
 // then releases.
-// Re-deriving the byte array costs ~146ns, which a loop or a map() callback pays
-// on EVERY iteration even though it re-lexes the identical text each time. So
-// skip the rebuild when the incoming text equals what srcb already holds: a
-// string compare is far cheaper than a rebuild, and the overwhelmingly common
-// case (same body, next iteration) hits it. Measured on tests/bench/array_hof.js,
-// which re-lexes a callback body once per element: 0.522s -> 0.417s.
+//
+// Deriving the byte mirror is O(length of the text). That is fine for a function
+// or loop BODY, but every one of those parses is bracketed by a restore of the
+// ENCLOSING source, which is the whole program. Rebuilding the mirror there makes
+// each call cost O(program size): a 20KB file ran array_hof in 3.98s versus 0.68s
+// for the same program without the padding. So callers that are restoring
+// previously-current text must use savesrc()/restoresrc(), which carry the mirror
+// rather than recomputing it.
 fn setsrc(s: string) {
+    // Same text as now (a loop re-lexing its body each iteration): the mirror is
+    // already correct, so only the string needs re-establishing.
     if srclen == s.len() and src == s { src = sdup(s); return }
+    // The other slot: a nested parse returning to its enclosing source, or the
+    // next iteration of a loop that contains a call. Swap instead of rebuilding.
+    //
+    // The swap moves globals into globals through locals only, and never sdup()s.
+    // That matters for more than allocation count: the enclosing source is the
+    // whole program, so an sdup() here would copy the entire program text twice
+    // per call and reintroduce O(program size), just with a smaller constant.
+    // Verified that a global->local->global string swap does not free either side
+    // under this compiler's RC by hammering that exact shape 300k times.
+    if prevlen == s.len() and prevsrc == s {
+        var tb = srcb; var tl = srclen; var ts = src
+        srcb = prevb; srclen = prevlen; src = prevsrc
+        prevb = tb; prevlen = tl; prevsrc = ts
+        return
+    }
+    // A genuinely new text. The text being displaced becomes the other slot, since
+    // it is the thing most likely to be asked for next (it is what we will return
+    // to when this nested parse finishes).
+    prevb = srcb; prevlen = srclen; prevsrc = src
     src = sdup(s)
     srcb = src.bytes()
     srclen = srcb.len()
