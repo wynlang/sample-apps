@@ -2096,6 +2096,20 @@ fn callfn(callee: string, args: [string]) -> string {
                     var ri = i
                     while ri < args.len() { apush(rest_id, args[ri]); ri = ri + 1 }
                     edef(rest_name, varr(rest_id))
+                } else if pname.starts_with("[") or pname.starts_with("{") {
+                    // A DESTRUCTURING parameter - `function f([a,b])`, `({x}) => x`.
+                    // The params string is split on ",", so the pattern's own commas
+                    // are stored as "|" and restored here; a "|" cannot appear in a
+                    // pattern of identifiers, and the encoding is confined to the
+                    // params string.
+                    var pat_src = pname.replace("|", ",")
+                    var argv = vundef()
+                    if i < args.len() { argv = args[i] }
+                    if pat_src.starts_with("[") {
+                        bind_arr_pattern(pat_src.substring(1, pat_src.len() - 1), argv)
+                    } else {
+                        bind_obj_pattern(obj_pattern_names(pat_src.substring(1, pat_src.len() - 1)), argv)
+                    }
                 } else {
                     if i < args.len() { edef(pname, args[i]) }
                     else { edef(pname, vundef()) }
@@ -2159,6 +2173,32 @@ fn register_builtin(name: string) -> string {
     return "f:" + fid.to_string()
 }
 
+// Bind the first two parameters of a params string to two values. Used by callfn2,
+// the fast path for the array HOFs (map/filter/reduce/...), which is why it exists
+// separately from callfn's general loop. It must understand a DESTRUCTURING parameter
+// or `.map(([k,v]) => ...)` binds nothing - the shape Object.entries() feeds.
+fn bind_two_params(psrc: string, a0: string, a1: string) {
+    if psrc.len() == 0 { return }
+    var ps = psrc.split(",")
+    if ps.len() > 0 { var pn = ps[0].trim(); if pn.len() > 0 { bind_one_param(pn, a0) } }
+    if ps.len() > 1 { var pn = ps[1].trim(); if pn.len() > 0 { bind_one_param(pn, a1) } }
+}
+
+// Bind ONE parameter spelling to one value: a destructuring pattern, or a plain name
+// (with any `=default` suffix stripped, since the value is supplied here).
+fn bind_one_param(pn: string, av: string) {
+    if pn.starts_with("[") or pn.starts_with("{") {
+        var pat = pn.replace("|", ",")
+        if pat.starts_with("[") { bind_arr_pattern(pat.substring(1, pat.len() - 1), av) }
+        else { bind_obj_pattern(obj_pattern_names(pat.substring(1, pat.len() - 1)), av) }
+        return
+    }
+    var nm = sdup(pn)
+    var eqp = nm.index_of("=")
+    if eqp > 0 { nm = nm.substring(0, eqp) }
+    edef(nm, av)
+}
+
 fn callfn2(callee: string, a0: string, a1: string) -> string {
     if noeval > 0 or overflow == 1 { return vundef() }
     if vtag(callee) != "f" { return vundef() }
@@ -2174,19 +2214,11 @@ fn callfn2(callee: string, a0: string, a1: string) -> string {
     var s1 = sdup(src); var p1 = pos; var t1 = tt; var v1 = sdup(tv)
     epush()
     if this_depth > 0 { var t = this_stack[this_depth - 1]; if vtag(t) != "u" { edef("this", t) } this_pop() }
-    if psrc.len() > 0 {
-        var ps = psrc.split(",")
-        if ps.len() > 0 { var pn = ps[0].trim(); if pn.len() > 0 { edef(pn, a0) } }
-        if ps.len() > 1 { var pn = ps[1].trim(); if pn.len() > 0 { edef(pn, a1) } }
-    }
+    bind_two_params(psrc, a0, a1)
     edef("arguments", vundef())
     restore_captures(fid)
     // Re-bind params to override captured values
-    if psrc.len() > 0 {
-        var ps2 = psrc.split(",")
-        if ps2.len() > 0 { var pn2 = ps2[0].trim(); if pn2.len() > 0 { edef(pn2, a0) } }
-        if ps2.len() > 1 { var pn2 = ps2[1].trim(); if pn2.len() > 0 { edef(pn2, a1) } }
-    }
+    bind_two_params(psrc, a0, a1)
     src = sdup(bsrc); pos = 0; retflag = 0; next()
     p_block_body()
     var result = sdup(retval)
@@ -2334,6 +2366,43 @@ fn p_primary() -> string {
     if tt == 30 {
         next()
         if tt == 31 { next(); if tt == 40 { next(); return p_arrow("") } return vundef() }
+        // `([a,b]) => ...` / `({x}) => ...`. A pattern parameter must be recognised
+        // BEFORE the identifier path below, which only handles plain names; without
+        // this the arrow was re-parsed as a parenthesised expression and the pattern
+        // names all bound to undefined.
+        if tt == 34 or tt == 32 {
+            var psp = pos
+            var ptt = tt
+            var ptv = sdup(tv)
+            var pparams = ""
+            var pok = 1
+            while pok == 1 {
+                if tt == 34 or tt == 32 {
+                    if pparams.len() > 0 { pparams = pparams + "," }
+                    pparams = pparams + capture_param_pattern()
+                } else if tt == 3 or tt == 98 {
+                    if pparams.len() > 0 { pparams = pparams + "," }
+                    if tt == 98 { next(); pparams = pparams + "..." + tv } else { pparams = pparams + tv }
+                    next()
+                    // A plain parameter AFTER a leading pattern may carry a default -
+                    // `([a], y = 5) => ...`. Same `name=default` encoding the other
+                    // two param paths use, so callfn needs no special case.
+                    if tt == 15 {
+                        next()
+                        if tt == 2 { pparams = pparams + "=\"" + tv + "\""; next() }
+                        else if tt == 1 or tt == 4 { pparams = pparams + "=" + tv; next() }
+                        else { var dstart = tstart; p_expr(); pparams = pparams + "=" + src.substring(dstart, pos).trim() }
+                    }
+                } else { pok = 0; break }
+                if tt == 36 { next() } else { pok = 0 }
+            }
+            if tt == 31 {
+                next()
+                if tt == 40 { next(); return p_arrow(pparams) }
+            }
+            // Not an arrow after all (an array/object LITERAL in parens) - rewind.
+            pos = psp; tt = ptt; tv = sdup(ptv)
+        }
         if tt == 3 {
             var id1 = tv; var sp = pos
             next()
@@ -2370,10 +2439,21 @@ fn p_primary() -> string {
                     }
                     if tt == 36 {
                         next()
-                        // A rest parameter may only be last; the encoding is the
-                        // same `...name` p_func_expr uses.
-                        if tt == 98 { next(); params = params + ",..." + tv } else { params = params + "," + tv }
-                        next()
+                        // A LATER parameter may itself be a destructuring pattern -
+                        // `(x, [a,b], {c}) => ...`. Only a leading pattern is caught
+                        // by the branch above this one, so without this a pattern in
+                        // any non-first position bound nothing.
+                        // No `continue` here: control must reach the top of the loop
+                        // again so a following `= default` and the next `,` are still
+                        // handled - `([a], y = 5) => ...` needs both.
+                        if tt == 34 or tt == 32 {
+                            params = params + "," + capture_param_pattern()
+                        } else {
+                            // A rest parameter may only be last; the encoding is the
+                            // same `...name` p_func_expr uses.
+                            if tt == 98 { next(); params = params + ",..." + tv } else { params = params + "," + tv }
+                            next()
+                        }
                     } else {
                         pdone = 1
                     }
@@ -2551,6 +2631,8 @@ fn p_func_expr() -> string {
     var params = ""
     while tt != 31 and tt != 0 {
         if params.len() > 0 { params = params + "," }
+        // A destructuring parameter - `function f([a,b])` / `function g({x})`.
+        if tt == 34 or tt == 32 { params = params + capture_param_pattern(); if tt == 36 { next() }; continue }
         // Rest parameter: ...name
         if tt == 98 { next(); params = params + "..." }
         params = params + tv; next()
@@ -2864,6 +2946,30 @@ fn p_obj_pattern() -> string {
     return names
 }
 
+// Normalise an object pattern's inner text ("a, b: local") to the "key:local" list
+// bind_obj_pattern expects. Used for a pattern that arrives as SOURCE rather than
+// through p_obj_pattern - i.e. a destructuring function parameter.
+fn obj_pattern_names(inner: string) -> string {
+    // COMPILER WORKAROUND: this accumulator is `acc`, not `out`, because `out` is
+    // declared as an ARRAY in another function in this file (eat_args2) and
+    // the checker leaks an inferred type across functions BY NAME - a string `out`
+    // here then emits array_len() for out.len() and the C compile fails. Filed
+    // against the compiler; do not rename this back to `out`.
+    var acc = ""
+    var parts = inner.split(",")
+    for p in parts {
+        var e = p.trim()
+        if e.len() == 0 { continue }
+        var ci3 = e.index_of(":")
+        var key = sdup(e)
+        var local = sdup(e)
+        if ci3 > 0 { key = e.substring(0, ci3).trim(); local = e.substring(ci3 + 1, e.len()).trim() }
+        if acc.len() > 0 { acc = acc + "," }
+        acc = acc + key + ":" + local
+    }
+    return acc
+}
+
 // Bind an array pattern's names against one value.
 fn bind_arr_pattern(names: string, val: string) {
     if names.len() == 0 { return }
@@ -2900,6 +3006,25 @@ fn bind_obj_pattern(names: string, val: string) {
         if ci2 > 0 { key = pair.substring(0, ci2); local = pair.substring(ci2 + 1, pair.len()) }
         if oid >= 0 { edef(local, oget(oid, key)) } else { edef(local, vundef()) }
     }
+}
+
+// Capture a destructuring PARAMETER, positioned on its "[" or "{", and encode it for
+// the params string: the pattern's own commas become "|" so that callfn's split(",")
+// does not tear it apart. Leaves the token after the closing bracket.
+fn capture_param_pattern() -> string {
+    var open_tt = tt
+    var close_tt = 35
+    if open_tt == 32 { close_tt = 33 }
+    var out = ""
+    if open_tt == 34 { out = "[" } else { out = "{" }
+    next()
+    while tt != close_tt and tt != 0 {
+        if tt == 36 { out = out + "|" } else if tt == 39 { out = out + ":" } else if tt == 98 { out = out + "..." } else { out = out + tv }
+        next()
+    }
+    if tt == close_tt { next() }
+    if open_tt == 34 { out = out + "]" } else { out = out + "}" }
+    return out
 }
 
 // Capture a loop body as source, positioned on its first token. A braced block runs
@@ -2995,6 +3120,8 @@ fn p_stmt() {
         var params = ""
         while tt != 31 and tt != 0 {
             if params.len() > 0 { params = params + "," }
+            // A destructuring parameter - `function f([a,b])` / `function g({x})`.
+            if tt == 34 or tt == 32 { params = params + capture_param_pattern(); if tt == 36 { next() }; continue }
             if tt == 98 { next(); params = params + "..." }
             params = params + tv; next()
             if tt == 15 {

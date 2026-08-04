@@ -96,7 +96,8 @@ fn main() {
         "class_fields",
         "for_of_destructure",
         "key_order",
-        "json_numbers"
+        "json_numbers",
+        "param_destructure"
     ]
 
     pass = 0
