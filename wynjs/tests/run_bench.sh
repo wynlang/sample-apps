@@ -73,10 +73,14 @@ reps = int(sys.argv[1]); cmd = sys.argv[2:]
 best = None
 for _ in range(reps):
     t = time.perf_counter()
-    r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     d = time.perf_counter() - t
     if r.returncode != 0:
-        print("ERR"); sys.exit(0)
+        # Say WHY. A bare "ERR" once sent us chasing a nonexistent bug that was
+        # really the process being killed under load.
+        msg = r.stderr.decode(errors="replace").strip().splitlines()
+        print("ERR(rc=%d%s)" % (r.returncode, ": " + msg[0][:60] if msg else ""))
+        sys.exit(0)
     if best is None or d < best: best = d
 print("%.3f" % best)
 PY

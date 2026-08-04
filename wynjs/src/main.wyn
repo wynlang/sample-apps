@@ -617,18 +617,99 @@ fn init_env() {
 }
 
 // === Lexer ===
-fn ch() -> string { if pos >= src.len() { return "" } return src.substring(pos, pos + 1) }
+//
+// ch() used to be `src.substring(pos, pos+1)`, which HEAP-ALLOCATES a fresh
+// one-character string for every character the lexer looks at. Since every loop
+// body and function body is re-lexed on each iteration/call, that is the single
+// hottest thing the interpreter does: `tests/bench/loop_arith.js` calls ch()
+// 14.8 million times.
+//
+// Measured cost of the allocation, isolated (6.4M characters scanned, --release):
+//
+//   substring per char + DIGITS.contains()      0.37s
+//   substring per char + == comparisons         0.35s   <- so contains() is ~5%
+//   interned table lookup + DIGITS.contains()   0.03s   <- 12x, all from the alloc
+//   raw byte compare, no string at all          0.00s
+//
+// So the allocator was ~92% of the scan cost and the string COMPARISON was
+// noise. Hence: keep the string-returning interface (every one of ~200 call
+// sites compares ch() against a literal, and rewriting those is a separate,
+// much larger change), but stop allocating. Two pieces:
+//
+//   srcb   - `src` as an int byte array, so the byte at `pos` is an array index
+//            rather than a substring.
+//   CHARS  - 256 one-character strings, built once. CHARS[b] is THE string for
+//            byte b, so ch() returns a shared pointer and allocates nothing.
+//
+// Both are maintained only by setsrc(); nothing else may assign `src`.
+//
+// RC safety: CHARS entries are returned by value into caller locals and then
+// compared/concatenated. Verified that this does not free the table element
+// (the README's "local aliasing a global is released at function exit" hazard)
+// by hammering exactly that shape 100k times and re-checking the table.
+srcb: [int] = []
+srclen = 0
+CHARS: [string] = []
+
+// The ONLY way to change `src`. Keeps srcb/srclen in step with it, so the lexer
+// can index bytes instead of slicing strings. sdup() is kept for the reason it
+// has always been here: a bare `src = someLocal` stores a pointer the caller
+// then releases.
+// Re-deriving the byte array costs ~146ns, which a loop or a map() callback pays
+// on EVERY iteration even though it re-lexes the identical text each time. So
+// skip the rebuild when the incoming text equals what srcb already holds: a
+// string compare is far cheaper than a rebuild, and the overwhelmingly common
+// case (same body, next iteration) hits it. Measured on tests/bench/array_hof.js,
+// which re-lexes a callback body once per element: 0.522s -> 0.417s.
+fn setsrc(s: string) {
+    if srclen == s.len() and src == s { src = sdup(s); return }
+    src = sdup(s)
+    srcb = src.bytes()
+    srclen = srcb.len()
+}
+
+fn init_chars() {
+    CHARS = []
+    for i in 0..256 { CHARS.push("") }
+    // Byte 0 stays "" so CHARS[b] for an unreachable byte behaves like the old
+    // out-of-range ch() result rather than producing a stray character.
+    var printable = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    var pb = printable.bytes()
+    var i = 0
+    while i < pb.len() { CHARS[pb[i]] = printable.substring(i, i + 1); i = i + 1 }
+    // Whitespace the lexer explicitly tests for. \n \r \t are not printable but
+    // skipws() compares against them, so they must round-trip.
+    CHARS[9] = "\t"
+    CHARS[10] = "\n"
+    CHARS[13] = "\r"
+}
+
+// A byte outside the table (>=128: any non-ASCII source byte, e.g. UTF-8 text in
+// a string literal) still has to yield its character, or a string containing an
+// emoji would lex as empty. Those are rare, so they take the slow allocating
+// path and the common ASCII case stays allocation-free.
+fn ch() -> string {
+    if pos >= srclen { return "" }
+    var b = srcb[pos]
+    if b >= 128 { return src.substring(pos, pos + 1) }
+    return CHARS[b]
+}
 fn adv() -> string { var c = ch(); pos = pos + 1; return c }
-fn peek2() -> string { if pos + 1 >= src.len() { return "" } return src.substring(pos + 1, pos + 2) }
+fn peek2() -> string {
+    if pos + 1 >= srclen { return "" }
+    var b = srcb[pos + 1]
+    if b >= 128 { return src.substring(pos + 1, pos + 2) }
+    return CHARS[b]
+}
 
 fn skipws() {
-    while pos < src.len() {
+    while pos < srclen {
         var c = ch()
         if c == " " or c == "\t" or c == "\r" or c == "\n" { pos = pos + 1 }
         else if c == "/" {
             var n = peek2()
-            if n == "/" { pos = pos + 2; while pos < src.len() { if ch() == "\n" { pos = pos + 1; break } pos = pos + 1 } }
-            else if n == "*" { pos = pos + 2; while pos < src.len() { if ch() == "*" and peek2() == "/" { pos = pos + 2; break } pos = pos + 1 } }
+            if n == "/" { pos = pos + 2; while pos < srclen { if ch() == "\n" { pos = pos + 1; break } pos = pos + 1 } }
+            else if n == "*" { pos = pos + 2; while pos < srclen { if ch() == "*" and peek2() == "/" { pos = pos + 2; break } pos = pos + 1 } }
             else { return }
         } else { return }
     }
@@ -639,7 +720,7 @@ fn lex_radix(radix: int) -> int {
     var digits = "0123456789abcdef"
     var val = 0
     var any = 0
-    while pos < src.len() {
+    while pos < srclen {
         var c = ch().lower()
         if c == "_" { pos = pos + 1; continue }
         var d = digits.index_of(c)
@@ -674,21 +755,21 @@ fn next() {
     // past the token, so `pos` cannot delimit a source slice; tstart can. It is how
     // a class field initializer's source is cut out exactly (see the class parser).
     tstart = pos
-    if pos >= src.len() { tt = 0; tv = ""; return }
+    if pos >= srclen { tt = 0; tv = ""; return }
     var c = ch()
     // Numbers
     if DIGITS.contains(c) {
         // 0x.. / 0b.. / 0o.. radix literals, plus 1_000 digit separators and
         // 1e3 exponents. All are normalised to a plain decimal token here so the
         // rest of the interpreter only ever sees base-10 text.
-        if c == "0" and pos + 1 < src.len() {
+        if c == "0" and pos + 1 < srclen {
             var c2 = peek2()
             if c2 == "x" or c2 == "X" { pos = pos + 2; tt = 1; tv = lex_radix(16).to_string(); return }
             if c2 == "b" or c2 == "B" { pos = pos + 2; tt = 1; tv = lex_radix(2).to_string(); return }
             if c2 == "o" or c2 == "O" { pos = pos + 2; tt = 1; tv = lex_radix(8).to_string(); return }
         }
         var n = ""
-        while pos < src.len() {
+        while pos < srclen {
             c = ch()
             if DIGITS.contains(c) or c == "." { n = n + c; pos = pos + 1 }
             else if c == "_" { pos = pos + 1 }
@@ -699,7 +780,7 @@ fn next() {
                 var sign = ""
                 if ch() == "+" or ch() == "-" { sign = ch(); pos = pos + 1 }
                 var digits = ""
-                while pos < src.len() and DIGITS.contains(ch()) { digits = digits + ch(); pos = pos + 1 }
+                while pos < srclen and DIGITS.contains(ch()) { digits = digits + ch(); pos = pos + 1 }
                 if digits.len() == 0 { pos = save; break }
                 n = expand_exp(n, sign, digits)
                 break
@@ -709,14 +790,14 @@ fn next() {
         tt = 1; tv = n; return
     }
     // Strings
-    if c == "\"" { pos = pos + 1; var s = ""; while pos < src.len() { c = ch(); if c == "\"" { pos = pos + 1; break } else if c == "\\" { pos = pos + 1; var e = adv(); if e == "n" { s = s + "\n" } else if e == "t" { s = s + "\t" } else if e == "r" { s = s + "\r" } else if e == "\\" { s = s + "\\" } else if e == "\"" { s = s + "\"" } else if e == "'" { s = s + "'" } else { s = s + e } } else { s = s + c; pos = pos + 1 } } tt = 2; tv = s; return }
-    if c == "'" { pos = pos + 1; var s = ""; while pos < src.len() { c = ch(); if c == "'" { pos = pos + 1; break } else if c == "\\" { pos = pos + 1; var e = adv(); if e == "n" { s = s + "\n" } else if e == "t" { s = s + "\t" } else if e == "'" { s = s + "'" } else if e == "\\" { s = s + "\\" } else { s = s + e } } else { s = s + c; pos = pos + 1 } } tt = 2; tv = s; return }
+    if c == "\"" { pos = pos + 1; var s = ""; while pos < srclen { c = ch(); if c == "\"" { pos = pos + 1; break } else if c == "\\" { pos = pos + 1; var e = adv(); if e == "n" { s = s + "\n" } else if e == "t" { s = s + "\t" } else if e == "r" { s = s + "\r" } else if e == "\\" { s = s + "\\" } else if e == "\"" { s = s + "\"" } else if e == "'" { s = s + "'" } else { s = s + e } } else { s = s + c; pos = pos + 1 } } tt = 2; tv = s; return }
+    if c == "'" { pos = pos + 1; var s = ""; while pos < srclen { c = ch(); if c == "'" { pos = pos + 1; break } else if c == "\\" { pos = pos + 1; var e = adv(); if e == "n" { s = s + "\n" } else if e == "t" { s = s + "\t" } else if e == "'" { s = s + "'" } else if e == "\\" { s = s + "\\" } else { s = s + e } } else { s = s + c; pos = pos + 1 } } tt = 2; tv = s; return }
     // Template literal
-    if c == "`" { pos = pos + 1; var s = ""; while pos < src.len() { c = ch(); if c == "`" { pos = pos + 1; break } else if c == "\\" { pos = pos + 1; var e = adv(); if e == "n" { s = s + "\n" } else { s = s + e } } else if c == "$" { if peek2() == "{" { pos = pos + 2; tt = 61; tv = s; return } s = s + c; pos = pos + 1 } else { s = s + c; pos = pos + 1 } } tt = 2; tv = s; return }
+    if c == "`" { pos = pos + 1; var s = ""; while pos < srclen { c = ch(); if c == "`" { pos = pos + 1; break } else if c == "\\" { pos = pos + 1; var e = adv(); if e == "n" { s = s + "\n" } else { s = s + e } } else if c == "$" { if peek2() == "{" { pos = pos + 2; tt = 61; tv = s; return } s = s + c; pos = pos + 1 } else { s = s + c; pos = pos + 1 } } tt = 2; tv = s; return }
     // Identifiers / keywords
     if ALPHA.contains(c) {
         var id = ""
-        while pos < src.len() { c = ch(); if ALPHA.contains(c) or DIGITS.contains(c) { id = id + c; pos = pos + 1 } else { break } }
+        while pos < srclen { c = ch(); if ALPHA.contains(c) or DIGITS.contains(c) { id = id + c; pos = pos + 1 } else { break } }
         if id == "let" { tt = 50 } else if id == "const" { tt = 51 } else if id == "var" { tt = 52 }
         else if id == "function" { tt = 53 } else if id == "return" { tt = 54 }
         else if id == "if" { tt = 55 } else if id == "else" { tt = 56 }
@@ -775,7 +856,7 @@ fn next() {
     // just the "#" prefix being hidden from Object.keys/JSON, like "__" keys.
     if c == "#" {
         var pid = "#"
-        while pos < src.len() { c = ch(); if ALPHA.contains(c) or DIGITS.contains(c) { pid = pid + c; pos = pos + 1 } else { break } }
+        while pos < srclen { c = ch(); if ALPHA.contains(c) or DIGITS.contains(c) { pid = pid + c; pos = pos + 1 } else { break } }
         tt = 3; tv = pid; return
     }
     if c == ":" { tt = 39; tv = ":"; return }
@@ -2084,9 +2165,9 @@ fn callfn(callee: string, args: [string]) -> string {
                         // Evaluate default
                         var dsrc = pname.substring(eq_pos + 1, pname.len())
                         var ds = sdup(src); var dp = pos; var dt = tt; var dv = sdup(tv)
-                        src = sdup(dsrc); pos = 0; next()
+                        setsrc(dsrc); pos = 0; next()
                         var dval = p_expr()
-                        src = sdup(ds); pos = dp; tt = dt; tv = sdup(dv)
+                        setsrc(ds); pos = dp; tt = dt; tv = sdup(dv)
                         edef(real_name, dval)
                     }
                 } else if pname.starts_with("...") {
@@ -2145,7 +2226,7 @@ fn callfn(callee: string, args: [string]) -> string {
             }
         }
     }
-    src = sdup(bsrc); pos = 0; retflag = 0; next()
+    setsrc(bsrc); pos = 0; retflag = 0; next()
     p_block_body()
     var result = sdup(retval)
     if retflag == 0 { result = vundef() }
@@ -2157,7 +2238,7 @@ fn callfn(callee: string, args: [string]) -> string {
     save_captures(fid)
     epop()
     writeback_captures(fid, cap_before)
-    src = sdup(s1); pos = p1; tt = t1; tv = sdup(v1)
+    setsrc(s1); pos = p1; tt = t1; tv = sdup(v1)
     call_depth = call_depth - 1
     return result
 }
@@ -2219,7 +2300,7 @@ fn callfn2(callee: string, a0: string, a1: string) -> string {
     restore_captures(fid)
     // Re-bind params to override captured values
     bind_two_params(psrc, a0, a1)
-    src = sdup(bsrc); pos = 0; retflag = 0; next()
+    setsrc(bsrc); pos = 0; retflag = 0; next()
     p_block_body()
     var result = sdup(retval)
     if retflag == 0 { result = vundef() }
@@ -2230,7 +2311,7 @@ fn callfn2(callee: string, a0: string, a1: string) -> string {
     save_captures(fid)
     epop()
     writeback_captures(fid, cap_before)
-    src = sdup(s1); pos = p1; tt = t1; tv = sdup(v1)
+    setsrc(s1); pos = p1; tt = t1; tv = sdup(v1)
     call_depth = call_depth - 1
     return result
 }
@@ -2338,11 +2419,11 @@ fn p_primary() -> string {
             if tt == 33 {
                 // Read raw text after } until ` or ${
                 var more = ""
-                while pos < src.len() {
+                while pos < srclen {
                     var c = ch()
                     if c == "`" { pos = pos + 1; next(); return vstr(result + more) }
                     if c == "$" {
-                        if pos + 1 < src.len() and src.substring(pos + 1, pos + 2) == "{" {
+                        if pos + 1 < srclen and src.substring(pos + 1, pos + 2) == "{" {
                             pos = pos + 2; next()
                             result = result + more
                             more = ""
@@ -2853,10 +2934,10 @@ fn run_field_inits(ci: int, inst: string) {
     var s1 = sdup(src); var p1 = pos; var t1 = tt; var v1 = sdup(tv); var ts1 = tstart
     epush()
     edef("this", inst)
-    src = sdup(fsrc); pos = 0; next()
+    setsrc(fsrc); pos = 0; next()
     while tt != 0 and overflow == 0 { p_stmt() }
     epop()
-    src = sdup(s1); pos = p1; tt = t1; tv = sdup(v1); tstart = ts1
+    setsrc(s1); pos = p1; tt = t1; tv = sdup(v1); tstart = ts1
 }
 
 fn new_class(cls_name: string) -> string {
@@ -3412,15 +3493,15 @@ fn p_stmt() {
         var s1 = sdup(src); var p1 = pos; var t1 = tt; var v1 = sdup(tv)
         var iter = 0
         while iter < 1000000 {
-            src = sdup(csrc); pos = 0; next(); var cv = p_expr()
+            setsrc(csrc); pos = 0; next(); var cv = p_expr()
             if vtruthy(cv) == 0 { break }
-            src = sdup(bsrc); pos = 0; next(); epush(); p_block_body(); epop()
+            setsrc(bsrc); pos = 0; next(); epush(); p_block_body(); epop()
             if retflag == 1 or throwflag == 1 { break }
             if brkflag == 1 { brkflag = 0; break }
             contflag = 0
             iter = iter + 1
         }
-        src = sdup(s1); pos = p1; tt = t1; tv = sdup(v1)
+        setsrc(s1); pos = p1; tt = t1; tv = sdup(v1)
         return
     }
     // do...while
@@ -3456,15 +3537,15 @@ fn p_stmt() {
         var s1 = sdup(src); var p1 = pos; var t1 = tt; var v1 = sdup(tv)
         var iter = 0
         while iter < 1000000 {
-            src = sdup(bsrc); pos = 0; next(); epush(); p_block_body(); epop()
+            setsrc(bsrc); pos = 0; next(); epush(); p_block_body(); epop()
             if retflag == 1 or throwflag == 1 { break }
             if brkflag == 1 { brkflag = 0; break }
             contflag = 0
-            src = sdup(csrc); pos = 0; next(); var cv = p_expr()
+            setsrc(csrc); pos = 0; next(); var cv = p_expr()
             if vtruthy(cv) == 0 { break }
             iter = iter + 1
         }
-        src = sdup(s1); pos = p1; tt = t1; tv = sdup(v1)
+        setsrc(s1); pos = p1; tt = t1; tv = sdup(v1)
         return
     }
     // for...in / for...of / C-style for
@@ -3497,7 +3578,7 @@ fn p_stmt() {
                     while di < alens[daid] {
                         var elem = aget(daid, di)
                         if is_arr_pat == 1 { bind_arr_pattern(pat, elem) } else { bind_obj_pattern(pat, elem) }
-                        src = sdup(dbsrc); pos = 0; next(); p_block_body()
+                        setsrc(dbsrc); pos = 0; next(); p_block_body()
                         if retflag == 1 or throwflag == 1 { break }
                         if brkflag == 1 { brkflag = 0; break }
                         contflag = 0
@@ -3505,7 +3586,7 @@ fn p_stmt() {
                     }
                 }
                 epop()
-                src = sdup(ds1); pos = dp1; tt = dt1; tv = sdup(dv1)
+                setsrc(ds1); pos = dp1; tt = dt1; tv = sdup(dv1)
                 return
             }
         }
@@ -3542,7 +3623,7 @@ fn p_stmt() {
                     for k in ks {
                         if not k.starts_with("__") {
                             edef(vname, vstr(k))
-                            src = sdup(bsrc); pos = 0; next(); p_block_body()
+                            setsrc(bsrc); pos = 0; next(); p_block_body()
                             if retflag == 1 or throwflag == 1 { break }
                             if brkflag == 1 { brkflag = 0; break }
                             contflag = 0
@@ -3553,7 +3634,7 @@ fn p_stmt() {
                     var i = 0
                     while i < alens[aid] {
                         edef(vname, vstr(i.to_string()))
-                        src = sdup(bsrc); pos = 0; next(); p_block_body()
+                        setsrc(bsrc); pos = 0; next(); p_block_body()
                         if retflag == 1 or throwflag == 1 { break }
                         if brkflag == 1 { brkflag = 0; break }
                         contflag = 0
@@ -3561,7 +3642,7 @@ fn p_stmt() {
                     }
                 }
                 epop()
-                src = sdup(s1); pos = p1; tt = t1; tv = sdup(v1)
+                setsrc(s1); pos = p1; tt = t1; tv = sdup(v1)
                 return
             }
             // for (x of arr)
@@ -3594,7 +3675,7 @@ fn p_stmt() {
                     var i = 0
                     while i < alens[aid] {
                         edef(vname, aget(aid, i))
-                        src = sdup(bsrc); pos = 0; next(); p_block_body()
+                        setsrc(bsrc); pos = 0; next(); p_block_body()
                         if retflag == 1 or throwflag == 1 { break }
                         if brkflag == 1 { brkflag = 0; break }
                         contflag = 0
@@ -3606,7 +3687,7 @@ fn p_stmt() {
                     var i = 0
                     while i < str_val.len() {
                         edef(vname, vstr(str_val.substring(i, i + 1)))
-                        src = sdup(bsrc); pos = 0; next(); p_block_body()
+                        setsrc(bsrc); pos = 0; next(); p_block_body()
                         if retflag == 1 or throwflag == 1 { break }
                         if brkflag == 1 { brkflag = 0; break }
                         contflag = 0
@@ -3614,7 +3695,7 @@ fn p_stmt() {
                     }
                 }
                 epop()
-                src = sdup(s1); pos = p1; tt = t1; tv = sdup(v1)
+                setsrc(s1); pos = p1; tt = t1; tv = sdup(v1)
                 return
             }
             // C-style for - backtrack
@@ -3654,17 +3735,17 @@ fn p_stmt() {
         var s1 = sdup(src); var p1 = pos; var t1 = tt; var v1 = sdup(tv)
         var iter = 0
         while iter < 1000000 {
-            src = sdup(csrc); pos = 0; next(); var cv = p_expr()
+            setsrc(csrc); pos = 0; next(); var cv = p_expr()
             if vtruthy(cv) == 0 { break }
-            src = sdup(bsrc); pos = 0; next(); p_block_body()
+            setsrc(bsrc); pos = 0; next(); p_block_body()
             if retflag == 1 or throwflag == 1 { break }
             if brkflag == 1 { brkflag = 0; break }
             contflag = 0
-            src = sdup(usrc); pos = 0; next(); p_expr(); while tt == 36 { next(); p_expr() }
+            setsrc(usrc); pos = 0; next(); p_expr(); while tt == 36 { next(); p_expr() }
             iter = iter + 1
         }
         epop()
-        src = sdup(s1); pos = p1; tt = t1; tv = sdup(v1)
+        setsrc(s1); pos = p1; tt = t1; tv = sdup(v1)
         return
     }
     // break
@@ -3687,7 +3768,7 @@ fn p_stmt() {
 fn peek_is_function() -> int {
     var sp = pos
     skipws()
-    if pos < src.len() {
+    if pos < srclen {
         var c = ch()
         pos = sp
         if c == "f" { return 1 }
@@ -3797,11 +3878,11 @@ fn load_module(path: string) -> string {
     var exports_oid = onew()
     epush()
     edef("module", vobj(exports_oid))
-    src = sdup(code); pos = 0; next()
+    setsrc(code); pos = 0; next()
     while tt != 0 { p_stmt(); if retflag == 1 or overflow == 1 or throwflag == 1 { break } }
     retflag = 0
     epop()
-    src = sdup(s1); pos = p1; tt = t1; tv = sdup(v1)
+    setsrc(s1); pos = p1; tt = t1; tv = sdup(v1)
     mod_paths[mod_cnt] = sdup(path)
     mod_exports[mod_cnt] = sdup(vobj(exports_oid))
     mod_cnt = mod_cnt + 1
@@ -3887,6 +3968,9 @@ fn setup_globals() {
 
 fn main() {
     init_env()
+    // Must precede any lexing: ch() reads CHARS, and an empty table would make
+    // every character lex as "".
+    init_chars()
     setup_globals()
     var args = System.args()
     var js_file = ""
@@ -3913,7 +3997,7 @@ fn main() {
     var code = File.read(js_file)
     if code.len() == 0 { print("Error: cannot read ${js_file}"); return 1 }
 
-    src = sdup(code); pos = 0; next()
+    setsrc(code); pos = 0; next()
     while tt != 0 {
         p_stmt()
         if retflag == 1 or overflow == 1 or throwflag == 1 { break }
