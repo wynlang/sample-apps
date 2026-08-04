@@ -282,11 +282,29 @@ fn on_strength(id: int) {
 // and the two can drift: the day someone widens the slider to 0..1000, a filter
 // receiving a 10x radius is a hang, not a wrong picture. A guard whose cost is
 // two comparisons and whose absence is a hang is worth keeping unproven.
+// COMPILER WORKAROUND: this local is `sf`, not the obvious `f`.
+//
+// `set_folded` above declares `var f = g_folded`, a STRING. This compiler decides
+// a local's C type by NAME on first textual occurrence rather than per function
+// scope, so a later `var f` holding a FLOAT inherits the string's
+// reference-counting and the emitted C does not compile:
+//
+//   double f = (int_to_float(g_strength) / 100.0);
+//   ({ const char* __rc_tmp = 0.0; wyn_rc_retain(__rc_tmp);
+//      wyn_rc_release(f); f = __rc_tmp; });      // <- RC on a double
+//
+// giving "initializing 'const char *' with an expression of incompatible type
+// 'double'". Renaming the local sidesteps it; the arithmetic is unchanged.
+//
+// Reported upstream with a 23-line standalone repro (two functions, each with a
+// local named `f`, one string one float). It is ORDER-DEPENDENT: putting the
+// float function first compiles, which is what identifies the cause as name-keyed
+// rather than scoped inference. Reverse this once the compiler is fixed.
 fn strength_frac() -> float {
-    var f = g_strength.to_float() / 100.0
-    if f < 0.0 { f = 0.0 }
-    if f > 2.0 { f = 2.0 }
-    return f
+    var sf = g_strength.to_float() / 100.0
+    if sf < 0.0 { sf = 0.0 }
+    if sf > 2.0 { sf = 2.0 }
+    return sf
 }
 var g_tex_w = 0
 var g_tex_h = 0
