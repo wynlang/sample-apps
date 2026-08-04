@@ -66,8 +66,57 @@ pub fn HUE_X() -> int { return SV_X() + SV_SIZE() + 10 }
 pub fn HUE_Y() -> int { return SV_Y() }
 pub fn HUE_W() -> int { return 22 }
 
-// The layer list starts below the picker, its swatch, and the layer buttons.
-pub fn LAYERS_Y() -> int { return SV_Y() + SV_SIZE() + 92 }
+// ---- the right panel's vertical stack --------------------------------------
+//
+// ONE UNIT, AND EVERY BAND DERIVED FROM THE ONE ABOVE IT. This replaced a single
+// `LAYERS_Y = SV_Y + SV_SIZE + 92` magic number, and the 92 was not merely
+// unexplained - it was WRONG, by a measurable amount, and the symptom was the
+// "Layers" heading being painted underneath the layer buttons.
+//
+// The arithmetic that was actually running: the swatch band ended at 238, the
+// two button rows ran 252..298, and the heading was drawn at LAYERS_Y-18 = 282,
+// i.e. 16px INSIDE the second button row. Because the widgets are painted last
+// (see paint()'s comment on why), the buttons covered it: a screenshot showed a
+// stray "r" fragment between "<b" and "b>" and nothing else. The heading was not
+// faint or misaligned, it was destroyed, and no assertion had ever named it.
+//
+// The reason a magic 92 could be wrong at all is that THREE places computed this
+// stack independently - paint_picker placed the swatch, build_form placed the
+// buttons at `LAYERS_Y - 48`, and paint_layers placed the heading at
+// `LAYERS_Y - 18`. Nothing related them, so nothing could notice that the three
+// together needed 106px of the 92 available. Deriving each band from the one
+// above makes an overlap impossible to write: the space is allocated, not
+// assumed, and tests/test_layout.wyn asserts the bands do not intersect.
+//
+// PAD is the base spacing unit, used for the gap INSIDE a group of related
+// controls; 2*PAD separates one group from the next, which is the standard
+// dark-UI trick for showing grouping with space instead of with dividers.
+
+pub fn PAD() -> int { return 8 }
+
+// The current-colour swatch, directly under the SV square.
+pub fn SWATCH_Y() -> int { return SV_Y() + SV_SIZE() + PAD() }
+pub fn SWATCH_W() -> int { return 56 }
+pub fn SWATCH_H() -> int { return 22 }
+
+// The layer command buttons: two rows, a new group, so 2*PAD below the swatch.
+pub fn LAYER_BTN_Y() -> int { return SWATCH_Y() + SWATCH_H() + 2 * PAD() }
+pub fn LAYER_BTN_H() -> int { return 22 }
+// The pitch between the two button rows - one row plus a hairline gap, so they
+// read as one block of controls rather than two separate groups.
+pub fn LAYER_BTN_PITCH() -> int { return LAYER_BTN_H() + 2 }
+pub fn LAYER_BTN_BOTTOM() -> int {
+    return LAYER_BTN_Y() + LAYER_BTN_PITCH() + LAYER_BTN_H()
+}
+
+// The "Layers" heading, which is what the old arithmetic lost. Its own band,
+// 2*PAD below the buttons, so the heading labels the LIST rather than floating
+// between two groups.
+pub fn LAYERS_HDR_Y() -> int { return LAYER_BTN_BOTTOM() + 2 * PAD() }
+pub fn LAYERS_HDR_H() -> int { return 14 }
+
+// The layer list, one PAD under its heading.
+pub fn LAYERS_Y() -> int { return LAYERS_HDR_Y() + LAYERS_HDR_H() + PAD() }
 
 // ---- hit tests -------------------------------------------------------------
 //

@@ -531,6 +531,32 @@ check "flip-h does not resize the document"        'msg=flip-h on layer'        
 check "and rotate180 does not either"              'doc=256x256 sel=256x256 buf=256x256'          "$out"
 
 # ---------------------------------------------------------------------------
+# 12b. THE PANEL'S STOREYS DO NOT PAINT OVER EACH OTHER.
+#
+# Found by looking at the screenshot section 13 writes, which nothing had ever
+# done: the word "Layers" was ABSENT from the window. The panel's vertical stack
+# was placed by three unrelated expressions over a 92px budget the three together
+# needed 106px of, so the heading landed 16px inside the second row of layer
+# buttons - and because paint() draws widgets LAST, the buttons covered it. All
+# that survived was a stray "r" fragment between "<b" and "b>".
+#
+# WHY THIS IS A PIXEL CHECK AND NOT A LAYOUT ASSERTION. tests/test_layout.wyn now
+# asserts the bands do not intersect, and that is the check that constrains the
+# design. But it cannot see the PAINT ORDER: the heading and the buttons could be
+# given disjoint bands and the heading still be invisible if something later drew
+# over it. Only a window pixel settles that, which is exactly this script's job.
+#
+# (943,320) is the vertical stem of the "L" of "Layers" - a glyph interior, at the
+# text colour 235,235,240 rather than an antialiased edge, so the value is exact
+# and a one-pixel drift of the heading fails rather than dimming.
+out=$(run 'winpx:943:320,winpx:1000:322')
+check "the Layers heading is painted, not covered" 'winpx(943,320)=235,235,240' "$out"
+# ...and the band to its right is bare panel, which is what proves the check above
+# is reading a GLYPH and not a button face that happens to sit there. A button
+# face is 52,52,62; panel background is 34,34,41.
+check "the heading sits on bare panel, not on a button" 'winpx(1000,322)=34,34,41' "$out"
+
+# ---------------------------------------------------------------------------
 # 13. A screenshot, because no assertion can say the UI LOOKED right.
 # ---------------------------------------------------------------------------
 rm -f /tmp/wc_verify.bmp

@@ -41,12 +41,69 @@ test "the viewport is exactly the window minus the toolbar, panels and status ba
 }
 
 test "the values other suites derive by hand are these" {
-    // run_groups_test.sh computes LAYERS_Y = VIEW_Y+12+SV_SIZE+92 = 300,
-    // ROW_H = 24 and PANEL_X = 1180-250 = 930 in a comment. Pinned here so a
-    // change to the panel breaks a test rather than that shell script's guess.
-    assert_eq(layout.LAYERS_Y(), 300)
+    // run_groups_test.sh derives the layer-row pixels it probes from LAYERS_Y,
+    // ROW_H and PANEL_X in a comment. Pinned here so a change to the panel breaks
+    // a test rather than that shell script's guess.
+    //
+    // LAYERS_Y is 338, not the 300 it was while the stack used a magic 92: the
+    // heading now has a band of its own instead of sharing the buttons'.
+    assert_eq(layout.LAYERS_Y(), 338)
     assert_eq(layout.ROW_H(), 24)
     assert_eq(layout.PANEL_X(), 930)
+}
+
+// ---- the right panel's vertical stack ---------------------------------------
+//
+// THE BUG THIS SECTION EXISTS FOR. The panel's storeys were placed by three
+// unrelated expressions - the swatch at `SV_Y+SV_SIZE+8`, the buttons at
+// `LAYERS_Y-48`, the heading at `LAYERS_Y-18` - over a budget of 92px that the
+// three together needed 106px of. The heading therefore landed 16px inside the
+// second button row, and since paint() draws widgets LAST the buttons covered it:
+// the word "Layers" was absent from the window entirely.
+//
+// Every check below is an ORDERING or NON-OVERLAP claim rather than a coordinate,
+// so they keep holding if the panel is redesigned and stop holding the moment two
+// storeys are allowed to share a pixel again.
+
+test "the panel's storeys are stacked in order and do not overlap" {
+    // Each band starts at or after the end of the one above it. Written as a
+    // chain because that is the property that was violated.
+    assert_true(layout.SWATCH_Y() >= layout.SV_Y() + layout.SV_SIZE())
+    assert_true(layout.LAYER_BTN_Y() >= layout.SWATCH_Y() + layout.SWATCH_H())
+    // The one that actually failed: the heading must begin BELOW the last button
+    // row, not inside it.
+    assert_true(layout.LAYERS_HDR_Y() >= layout.LAYER_BTN_BOTTOM())
+    assert_true(layout.LAYERS_Y() >= layout.LAYERS_HDR_Y() + layout.LAYERS_HDR_H())
+}
+
+test "the two layer-button rows clear each other and clear the heading" {
+    // The pitch has to exceed the row height or the second row paints over the
+    // first, which is the same class of bug one storey down.
+    assert_true(layout.LAYER_BTN_PITCH() > layout.LAYER_BTN_H())
+    // The heading's last pixel is above the list's first.
+    assert_true(layout.LAYERS_HDR_Y() + layout.LAYERS_HDR_H() <= layout.LAYERS_Y())
+    // And the buttons' last pixel is above the heading's first. Stated from
+    // LAYER_BTN_BOTTOM so a third button row cannot be added without this failing.
+    assert_true(layout.LAYER_BTN_BOTTOM() < layout.LAYERS_HDR_Y())
+}
+
+test "the whole panel stack fits above the status bar with room for rows" {
+    // The stack is only correct if it also leaves the LIST some space: an
+    // arrangement that satisfies every non-overlap claim above by pushing
+    // LAYERS_Y off the bottom of the window would be worse than the bug.
+    assert_true(layout.LAYERS_Y() < layout.VIEW_Y() + layout.VIEW_H())
+    assert_true(layout.rows_visible() >= 8)
+}
+
+test "the spacing unit is used, not ad-hoc offsets" {
+    // The gaps between storeys are PAD or 2*PAD - a scale, not arbitrary pixels.
+    // Checked as a property so the scale cannot quietly gain a third value.
+    var gap_sv_swatch = layout.SWATCH_Y() - (layout.SV_Y() + layout.SV_SIZE())
+    var gap_swatch_btn = layout.LAYER_BTN_Y() - (layout.SWATCH_Y() + layout.SWATCH_H())
+    var gap_btn_hdr = layout.LAYERS_HDR_Y() - layout.LAYER_BTN_BOTTOM()
+    assert_eq(gap_sv_swatch, layout.PAD())
+    assert_eq(gap_swatch_btn, 2 * layout.PAD())
+    assert_eq(gap_btn_hdr, 2 * layout.PAD())
 }
 
 // ---- region hit tests ------------------------------------------------------

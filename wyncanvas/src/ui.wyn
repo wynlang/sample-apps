@@ -2368,10 +2368,15 @@ fn paint_picker(ui: Ui) {
     // The resulting colour, as a swatch. Painted with the sRGB bytes, because
     // Win_rect takes display values - using the linear ones would show a
     // markedly darker colour than the brush actually paints.
-    var sw_y = layout.SV_Y() + layout.SV_SIZE() + 8
-    gui.Win_rect(g_win, layout.SV_X(), sw_y, 56, 22,
+    // The band comes from `layout`, not from arithmetic here: it is one storey of
+    // the panel's vertical stack, and the storey above and below it are placed by
+    // the same functions. See layout.SWATCH_Y for what the hand-rolled version
+    // cost.
+    var sw_y = layout.SWATCH_Y()
+    gui.Win_rect(g_win, layout.SV_X(), sw_y, layout.SWATCH_W(), layout.SWATCH_H(),
                  paint.color_byte(0), paint.color_byte(1), paint.color_byte(2))
-    gui.Win_rect_outline(g_win, layout.SV_X(), sw_y, 56, 22, 120, 120, 140)
+    gui.Win_rect_outline(g_win, layout.SV_X(), sw_y, layout.SWATCH_W(),
+                         layout.SWATCH_H(), 120, 120, 140)
     gui.Win_text(g_win, g_font, paint.tool_name(paint.tool())
                  + " r" + rounded(paint.radius())
                  + " a" + rounded(paint.alpha()),
@@ -2387,8 +2392,12 @@ fn paint_picker(ui: Ui) {
 // from a cached copy in a widget: after an Undo the layer module is the truth,
 // and a widget-held flag would silently disagree with the pixels on screen.
 fn paint_layers(ui: Ui) {
-    gui.Win_text(g_win, g_font, "Layers", layout.PANEL_X() + 12, layout.LAYERS_Y() - 18,
-                 235, 235, 240)
+    // The heading sits in its OWN band, from `layout`. It used to be placed at
+    // `LAYERS_Y - 18`, which the panel's other two storeys had already claimed:
+    // the layer buttons are painted after this (widgets go last) and covered it
+    // completely. See layout.LAYERS_HDR_Y.
+    gui.Win_text(g_win, g_font, "Layers", layout.PANEL_X() + 12,
+                 layout.LAYERS_HDR_Y(), 235, 235, 240)
 
     var n = layer.count()
     // `k` counts LAYERS walked; `vis` counts rows actually DRAWN. They diverge the
@@ -2631,25 +2640,29 @@ fn build_form(win: int, font: int) -> Ui {
     ui = widgets.Ui_button(ui, "Lass", 5, ty + 236, 44, 28, on_tool_lasso)
     ui = widgets.Ui_button(ui, "Text", 5, ty + 266, 44, 28, on_tool_text)
 
-    // Layer commands, above the layer list.
-    var ly = layout.LAYERS_Y() - 48
-    ui = widgets.Ui_button(ui, "+L", layout.PANEL_X() + 8, ly, 32, 22, on_layer_add)
-    ui = widgets.Ui_button(ui, "-L", layout.PANEL_X() + 42, ly, 32, 22, on_layer_del)
-    ui = widgets.Ui_button(ui, "up", layout.PANEL_X() + 76, ly, 32, 22, on_layer_up)
-    ui = widgets.Ui_button(ui, "dn", layout.PANEL_X() + 110, ly, 32, 22, on_layer_down)
-    ui = widgets.Ui_button(ui, "o-", layout.PANEL_X() + 148, ly, 28, 22,
+    // Layer commands, above the layer list. Placed from `layout`'s panel stack
+    // rather than by backing off from LAYERS_Y: the previous `LAYERS_Y - 48`
+    // reached back over the heading's band and the buttons painted on top of it.
+    var ly = layout.LAYER_BTN_Y()
+    var lh = layout.LAYER_BTN_H()
+    var ly2 = ly + layout.LAYER_BTN_PITCH()
+    ui = widgets.Ui_button(ui, "+L", layout.PANEL_X() + 8, ly, 32, lh, on_layer_add)
+    ui = widgets.Ui_button(ui, "-L", layout.PANEL_X() + 42, ly, 32, lh, on_layer_del)
+    ui = widgets.Ui_button(ui, "up", layout.PANEL_X() + 76, ly, 32, lh, on_layer_up)
+    ui = widgets.Ui_button(ui, "dn", layout.PANEL_X() + 110, ly, 32, lh, on_layer_down)
+    ui = widgets.Ui_button(ui, "o-", layout.PANEL_X() + 148, ly, 28, lh,
                            on_opacity_down)
-    ui = widgets.Ui_button(ui, "o+", layout.PANEL_X() + 178, ly, 28, 22, on_opacity_up)
-    ui = widgets.Ui_button(ui, "<b", layout.PANEL_X() + 8, ly + 24, 32, 22,
+    ui = widgets.Ui_button(ui, "o+", layout.PANEL_X() + 178, ly, 28, lh, on_opacity_up)
+    ui = widgets.Ui_button(ui, "<b", layout.PANEL_X() + 8, ly2, 32, lh,
                            on_blend_prev)
-    ui = widgets.Ui_button(ui, "b>", layout.PANEL_X() + 42, ly + 24, 32, 22,
+    ui = widgets.Ui_button(ui, "b>", layout.PANEL_X() + 42, ly2, 32, lh,
                            on_blend_next)
     // Group / ungroup, in the space left on the blend row. "[G]" and "]G["
     // rather than words because the panel is 250px wide and the labels have to
     // sit beside four other controls; the brackets read as "wrap" and "unwrap".
-    ui = widgets.Ui_button(ui, "[G]", layout.PANEL_X() + 80, ly + 24, 36, 22,
+    ui = widgets.Ui_button(ui, "[G]", layout.PANEL_X() + 80, ly2, 36, lh,
                            on_layer_group)
-    ui = widgets.Ui_button(ui, "]G[", layout.PANEL_X() + 118, ly + 24, 36, 22,
+    ui = widgets.Ui_button(ui, "]G[", layout.PANEL_X() + 118, ly2, 36, lh,
                            on_layer_ungroup)
 
     // Filters, in the toolbar's second row. Abbreviated labels because seven
