@@ -22,6 +22,31 @@
 # be slowed by a neighbour, never sped up), and the minimum is the closest
 # estimate of the true cost. Check `uptime` before trusting small deltas.
 #
+# WARNING - these shapes use a lot of memory, and it is not their fault. WynJS
+# leaks on every loop iteration: an empty-bodied 90k-iteration loop peaks at
+# ~130MB, and tests/bench/string_build.js peaks at ~1.5GB. Peak RSS measured
+# per shape (interpreter of 2026-08-04):
+#
+#   string_build 1567MB   loop_arith 493MB   array_hof 388MB
+#   obj_prop      328MB   fn_call    183MB   fib         94MB
+#
+# Consequence: obj_prop intermittently SEGFAULTS (4 runs in 12 on one build),
+# which is why best_of ignores failed runs rather than averaging them in. Do not
+# raise the iteration counts without fixing the leak first.
+#
+# The leak is NOT in this interpreter. Minimal reproduction in plain Wyn -
+# assigning a freshly-built string to a GLOBAL never frees the old value, while
+# the same loop targeting a LOCAL is flat (30.5MB vs 1.5MB over 300k iterations):
+#
+#   g = ""
+#   fn main() -> int {
+#       var i = 0
+#       while i < 300000 { g = "abcdefghij" + ""; i = i + 1 }
+#       print(g); return 0
+#   }
+#
+# Reported to the compiler lane; fixing it belongs there, not here.
+#
 # Usage:
 #   bash tests/run_bench.sh                 # build from src, then measure
 #   WYNJS=/path/to/binary bash tests/run_bench.sh   # measure an existing binary
