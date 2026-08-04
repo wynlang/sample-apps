@@ -672,6 +672,38 @@ check "a gutter separates the columns (row 1)" 'winpx(1134,372)=40,40,48'  "$out
 # edges now; before, only the outer one was.
 
 # ---------------------------------------------------------------------------
+# 12f. THE TOOLBAR'S MARGINS ARE SYMMETRIC.
+#
+# The toolbar's 21 gaps used to be SIX different values - 2, 4, 6, 10, 12, 14 -
+# with no rule relating them, so the same 2px meant "these two are one stepper" in
+# one place and "these are unrelated commands" in another. Four independent filters
+# were spaced exactly like the two halves of a -/+ pair. Space is the cheapest
+# grouping signal a toolbar has and it was being spent at random.
+#
+# Now three values with one meaning each: TB_TIGHT 3 (one unit), TB_PAIR 8
+# (stepper pairs within a group), TB_GROUP 16 (between groups). Roughly a
+# doubling, so they are told apart by ratio rather than by the 4-vs-6 that read as
+# noise. Measured off the rendered toolbar afterwards, the histogram is exactly
+# {3:12, 8:3, 16:6} over 22 controls.
+#
+# WHAT IS CHECKED HERE, and why it is the margins rather than the histogram: the
+# gap VALUES are a property of layout.wyn and are asserted in test_layout.wyn,
+# where they can be stated as ratios. What no layout test can see is whether the
+# accumulated walk actually LANDS where it should - the toolbar is built by adding
+# widths and gaps 22 times, and an error anywhere in that chain shows up only as a
+# right margin that does not match the left.
+#
+# This caught a real error: the hand-computed path-entry width left a right margin
+# of 3 against a left margin of 8. The width is 190, not the 195 the arithmetic
+# said, and it was found by measuring the window.
+out=$(run 'winpx:5:12,winpx:8:12,winpx:1171:12,winpx:1174:12')
+check "the toolbar's left margin is bare"    'winpx(5,12)=38,38,46'     "$out"
+check "the first control starts at PAD"      'winpx(8,12)=120,120,140'  "$out"
+check "the last control ends at WIN_W - PAD" 'winpx(1171,12)=120,120,140' "$out"
+check "the toolbar's right margin is bare"   'winpx(1174,12)=38,38,46'  "$out"
+# 8 on the left and 8 on the right, over an accumulated walk of 22 controls.
+
+# ---------------------------------------------------------------------------
 # 13. A screenshot, because no assertion can say the UI LOOKED right.
 # ---------------------------------------------------------------------------
 rm -f /tmp/wc_verify.bmp

@@ -466,6 +466,35 @@ test "the meta readout is right-aligned inside the panel" {
     assert_true(layout.row_meta_x(120) > layout.PANEL_X())
 }
 
+// ---- the toolbar's spacing scale -------------------------------------------
+//
+// The 21 gaps used to be six unrelated values (2, 4, 6, 10, 12, 14), so the same
+// 2px meant "one stepper" in one place and "unrelated commands" in another. These
+// assert the scale's SHAPE - that there are three levels and that they are far
+// enough apart to read - rather than the three numbers, which would pass by
+// construction.
+
+test "the toolbar scale has three levels, ordered" {
+    assert_true(layout.TB_TIGHT() < layout.TB_PAIR())
+    assert_true(layout.TB_PAIR() < layout.TB_GROUP())
+    assert_true(layout.TB_TIGHT() > 0)
+}
+
+test "the toolbar's levels are separated by ratio, not by a pixel or two" {
+    // The old scale's failure was 4-vs-6: adjacent values so close that the
+    // grouping they encoded was invisible. Each level here is at least ~1.8x the
+    // one below, which is what makes them tell apart at a glance.
+    assert_true(layout.TB_PAIR() * 10 >= layout.TB_TIGHT() * 18)
+    assert_true(layout.TB_GROUP() * 10 >= layout.TB_PAIR() * 18)
+}
+
+test "a group gap is bigger than a whole tight gap plus a pair gap" {
+    // Otherwise two groups could sit closer together than two members of one
+    // group, which is the grouping signal inverted - the specific thing the old
+    // toolbar did when four filters at 2px sat beside a 2px stepper pair.
+    assert_true(layout.TB_GROUP() > layout.TB_TIGHT() + layout.TB_PAIR())
+}
+
 // ---- the meta COLUMNS ------------------------------------------------------
 //
 // The blend mode and opacity were one right-aligned string, which aligns only its

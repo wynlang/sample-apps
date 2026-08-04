@@ -94,6 +94,44 @@ pub fn HUE_W() -> int { return 22 }
 
 pub fn PAD() -> int { return 8 }
 
+// ---- the toolbar's spacing scale -------------------------------------------
+//
+// TWO VALUES, AND THE GAP IS THE GROUPING. The toolbar's 21 gaps used to be six
+// different values - 2, 4, 6, 10, 12, 14 - with no rule relating them, and the
+// inconsistency was not merely untidy, it was MISLEADING about what belongs with
+// what:
+//
+//   Open|Save 4, Save|Undo 10, Undo|Redo 4     - file vs history: readable
+//   r-|r+ 2, r+|h- 6, h-|h+ 2                  - stepper pairs: readable
+//   -|+ 2, +|Fit 2, Fit|1:1 2                  - but a zoom stepper PAIR is
+//                                                spaced exactly like two
+//                                                unrelated zoom commands
+//   Blur|Shrp|Sat+|Inv all 2                   - four independent filters look
+//                                                like one stepper pair
+//   text|t- 4 vs t-|t+ 2                       - the entry that OWNS the
+//                                                steppers is nearly as close as
+//                                                the pair is to itself
+//
+// So the same 2px meant "these two are one control" in one place and "these are
+// separate commands" in another. Space is the cheapest grouping signal a toolbar
+// has and it was being spent randomly.
+//
+// The replacement is a scale with exactly three steps, each with one meaning:
+//
+//   TB_TIGHT  3   controls that form ONE unit (a -/+ stepper pair)
+//   TB_PAIR   8   between stepper pairs INSIDE one group (r, h and a are three
+//                 parameters of one brush, so they are nearer than groups but
+//                 further than a pair's own halves)
+//   TB_GROUP 16   between groups that do different jobs
+//
+// 3 < 8 < 16 is roughly a doubling, so the three levels are told apart by ratio
+// rather than by a couple of pixels - the reason 4-vs-6 read as noise. Measured
+// off the rendered toolbar afterwards the histogram is exactly {3:12, 8:3, 16:6}
+// over 22 controls, and both margins are PAD.
+pub fn TB_TIGHT() -> int { return 3 }
+pub fn TB_PAIR() -> int { return 8 }
+pub fn TB_GROUP() -> int { return 16 }
+
 // The current-colour swatch, directly under the SV square.
 pub fn SWATCH_Y() -> int { return SV_Y() + SV_SIZE() + PAD() }
 pub fn SWATCH_W() -> int { return 56 }

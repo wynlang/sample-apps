@@ -2710,34 +2710,80 @@ fn paint(ui: Ui) {
 fn build_form(win: int, font: int) -> Ui {
     var ui = widgets.Ui_new(win, font)
 
-    ui = widgets.Ui_button(ui, "Open", 8, 9, 60, 28, on_open)
-    ui = widgets.Ui_button(ui, "Save", 72, 9, 60, 28, on_save)
-    ui = widgets.Ui_button(ui, "Undo", 142, 9, 60, 28, on_undo)
-    ui = widgets.Ui_button(ui, "Redo", 206, 9, 60, 28, on_redo)
+    // THE TOOLBAR IS WALKED LEFT TO RIGHT ON A SPACING SCALE, not placed at 22
+    // literal x's. Every control's x is `tx`, advanced by its own width plus one
+    // of layout's three gaps, so the GAP carries the grouping and no gap can be
+    // wrong by accident. See layout.TB_TIGHT for the six-value mess this replaced
+    // and why the same 2px used to mean two different things.
+    //
+    // A literal-x toolbar cannot be checked: nothing relates 424 to 452, so a
+    // typo is a typo you have to see. Here a group boundary is `tx = tx +
+    // TB_GROUP()`, which is either right or absent.
+    var tby = 9
+    var tbh = 28
+    var tx = layout.PAD()
 
-    ui = widgets.Ui_button(ui, "-", 276, 9, 26, 28, on_zoom_out)
-    ui = widgets.Ui_button(ui, "+", 304, 9, 26, 28, on_zoom_in)
-    ui = widgets.Ui_button(ui, "Fit", 332, 9, 38, 28, on_zoom_fit)
-    ui = widgets.Ui_button(ui, "1:1", 372, 9, 38, 28, on_zoom_100)
+    // File.
+    ui = widgets.Ui_button(ui, "Open", tx, tby, 60, tbh, on_open)
+    tx = tx + 60 + layout.TB_TIGHT()
+    ui = widgets.Ui_button(ui, "Save", tx, tby, 60, tbh, on_save)
+    tx = tx + 60 + layout.TB_GROUP()
 
-    // Brush parameter steppers.
-    ui = widgets.Ui_button(ui, "r-", 424, 9, 26, 28, on_radius_down)
-    ui = widgets.Ui_button(ui, "r+", 452, 9, 26, 28, on_radius_up)
-    ui = widgets.Ui_button(ui, "h-", 484, 9, 26, 28, on_hard_down)
-    ui = widgets.Ui_button(ui, "h+", 512, 9, 26, 28, on_hard_up)
-    ui = widgets.Ui_button(ui, "a-", 544, 9, 26, 28, on_alpha_down)
-    ui = widgets.Ui_button(ui, "a+", 572, 9, 26, 28, on_alpha_up)
+    // History.
+    ui = widgets.Ui_button(ui, "Undo", tx, tby, 60, tbh, on_undo)
+    tx = tx + 60 + layout.TB_TIGHT()
+    ui = widgets.Ui_button(ui, "Redo", tx, tby, 60, tbh, on_redo)
+    tx = tx + 60 + layout.TB_GROUP()
 
-    ui = widgets.Ui_entry(ui, "/tmp/wyncanvas-out.png", 610, 9, 240, 28)
+    // Zoom. The -/+ pair is TIGHT (one stepper); Fit and 1:1 are separate
+    // commands, so they sit at PAIR distance rather than sharing the stepper's
+    // spacing - which is exactly what the old uniform 2px could not express.
+    ui = widgets.Ui_button(ui, "-", tx, tby, 26, tbh, on_zoom_out)
+    tx = tx + 26 + layout.TB_TIGHT()
+    ui = widgets.Ui_button(ui, "+", tx, tby, 26, tbh, on_zoom_in)
+    tx = tx + 26 + layout.TB_PAIR()
+    ui = widgets.Ui_button(ui, "Fit", tx, tby, 38, tbh, on_zoom_fit)
+    tx = tx + 38 + layout.TB_TIGHT()
+    ui = widgets.Ui_button(ui, "1:1", tx, tby, 38, tbh, on_zoom_100)
+    tx = tx + 38 + layout.TB_GROUP()
+
+    // Brush parameters: three stepper PAIRS - radius, hardness, alpha. TIGHT
+    // inside a pair, PAIR between them, because they are three parameters of one
+    // brush and not three unrelated groups.
+    ui = widgets.Ui_button(ui, "r-", tx, tby, 26, tbh, on_radius_down)
+    tx = tx + 26 + layout.TB_TIGHT()
+    ui = widgets.Ui_button(ui, "r+", tx, tby, 26, tbh, on_radius_up)
+    tx = tx + 26 + layout.TB_PAIR()
+    ui = widgets.Ui_button(ui, "h-", tx, tby, 26, tbh, on_hard_down)
+    tx = tx + 26 + layout.TB_TIGHT()
+    ui = widgets.Ui_button(ui, "h+", tx, tby, 26, tbh, on_hard_up)
+    tx = tx + 26 + layout.TB_PAIR()
+    ui = widgets.Ui_button(ui, "a-", tx, tby, 26, tbh, on_alpha_down)
+    tx = tx + 26 + layout.TB_TIGHT()
+    ui = widgets.Ui_button(ui, "a+", tx, tby, 26, tbh, on_alpha_up)
+    tx = tx + 26 + layout.TB_GROUP()
+
+    // The output path. 190px rather than 240: the scale needs 141px of gap and the
+    // old width left only 106px, and at 190 the LAST control's right edge lands on
+    // WIN_W - PAD, so the toolbar's two margins match at 8px. (Width found by
+    // MEASURING the rendered toolbar, not by hand arithmetic - the hand figure was
+    // 5px out, which is exactly the sort of drift the pixel check below catches.)
+    // The default path measures 130px, comfortably inside the 180px of interior.
+    ui = widgets.Ui_entry(ui, "/tmp/wyncanvas-out.png", tx, tby, 190, tbh)
     g_path_id = widgets.Ui_last_id(ui)
+    tx = tx + 190 + layout.TB_GROUP()
 
     // The text tool's string, plus its size steppers. A real entry widget rather
     // than an on-canvas caret - see the note on g_text_id for why the toolkit's
-    // key handling makes that the only shape available.
-    ui = widgets.Ui_entry(ui, "Wyn", 854, 9, 90, 28)
+    // key handling makes that the only shape available. The steppers are TIGHT to
+    // the entry they act on, which is the relationship the old 4-vs-2 blurred.
+    ui = widgets.Ui_entry(ui, "Wyn", tx, tby, 90, tbh)
     g_text_id = widgets.Ui_last_id(ui)
-    ui = widgets.Ui_button(ui, "t-", 948, 9, 24, 28, on_text_smaller)
-    ui = widgets.Ui_button(ui, "t+", 974, 9, 24, 28, on_text_bigger)
+    tx = tx + 90 + layout.TB_TIGHT()
+    ui = widgets.Ui_button(ui, "t-", tx, tby, 24, tbh, on_text_smaller)
+    tx = tx + 24 + layout.TB_TIGHT()
+    ui = widgets.Ui_button(ui, "t+", tx, tby, 24, tbh, on_text_bigger)
+    tx = tx + 24 + layout.TB_GROUP()
 
     // Tool palette, down the left edge.
     var ty = layout.VIEW_Y() + 8
@@ -2779,14 +2825,22 @@ fn build_form(win: int, font: int) -> Ui {
     ui = widgets.Ui_button(ui, "]G[", layout.PANEL_X() + 118, ly2, 36, lh,
                            on_layer_ungroup)
 
-    // Filters, in the toolbar's second row. Abbreviated labels because seven
+    // Filters, at the right end of the toolbar. Abbreviated labels because seven
     // filters at full width would not fit; their PARAMETERS come from the
     // strength slider below the layer list - see run_filter for the mapping.
-    var fy = 9
-    ui = widgets.Ui_button(ui, "Blur", 1004, fy, 40, 28, on_flt_blur)
-    ui = widgets.Ui_button(ui, "Shrp", 1046, fy, 40, 28, on_flt_sharpen)
-    ui = widgets.Ui_button(ui, "Sat+", 1088, fy, 40, 28, on_flt_saturate)
-    ui = widgets.Ui_button(ui, "Inv", 1130, fy, 36, 28, on_flt_invert)
+    //
+    // Continues the same `tx` walk, so these four are one TB_GROUP clear of the
+    // text steppers and TB_TIGHT apart from each other - four commands of one
+    // kind. They used to be at 2px, i.e. spaced like the halves of a single
+    // stepper. `tx` ends at WIN_W - PAD, which is what makes the toolbar's right
+    // margin equal its left; tests/test_layout.wyn asserts that sum.
+    ui = widgets.Ui_button(ui, "Blur", tx, tby, 40, tbh, on_flt_blur)
+    tx = tx + 40 + layout.TB_TIGHT()
+    ui = widgets.Ui_button(ui, "Shrp", tx, tby, 40, tbh, on_flt_sharpen)
+    tx = tx + 40 + layout.TB_TIGHT()
+    ui = widgets.Ui_button(ui, "Sat+", tx, tby, 40, tbh, on_flt_saturate)
+    tx = tx + 40 + layout.TB_TIGHT()
+    ui = widgets.Ui_button(ui, "Inv", tx, tby, 36, tbh, on_flt_invert)
 
     // Filter strength, at the BOTTOM of the right panel.
     //
