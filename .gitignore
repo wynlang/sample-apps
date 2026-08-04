@@ -52,3 +52,6 @@ lib*.dylib
 lib*.so
 lib*.dll
 python/math-lib/math_lib.py
+
+# Agent worktrees and session scratch - never part of the repo.
+.claude/
