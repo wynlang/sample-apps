@@ -557,6 +557,59 @@ check "the Layers heading is painted, not covered" 'winpx(943,320)=235,235,240' 
 check "the heading sits on bare panel, not on a button" 'winpx(1000,322)=34,34,41' "$out"
 
 # ---------------------------------------------------------------------------
+# 12c. THE THREE INTERACTION FACES, IN THE ORDER A FINGER IMPLIES.
+#
+# rest, hover and pressed must be TELLABLE APART, and pressed must RECEDE while
+# hover ADVANCES - pressing pushes a control in. The old ramp did neither: rest
+# 52,52,62, hover 70,110,170, pressed 50,90,150, which is hover BRIGHTER than
+# pressed and the two only 1.34:1 apart. A pressed button looked like a hovered
+# one that had dimmed a little.
+#
+# Note what made that survivable for so long: neither face was reachable from a
+# script. `click:` presses and releases in one action, so it can only ever leave
+# the resting face on screen, and nothing else moved the pointer at all. The
+# `hover:` and `hold:` actions added alongside this section are what make the
+# other two faces observable - the fix and the ability to see the fix arrived
+# together, which is why they are one change.
+#
+# x=150,y=15 is the interior of the "Undo" button, clear of its glyphs, so these
+# are face colours and not antialiased text.
+out=$(run 'winpx:150:15,hover:Undo,winpx:150:15')
+check "a button at rest is the neutral face"     'winpx(150,15)=52,52,62' "$out"
+check "hovering a button ADVANCES it"            'winpx(150,15)=74,74,84' "$out"
+out=$(run 'winpx:150:15,hold:Undo,winpx:150:15')
+check "pressing a button RECEDES it"             'winpx(150,15)=28,28,34' "$out"
+# Relative luminance of the three: .0119 < .0353 < .0699. Monotonic, which is the
+# property the old ramp broke, and hover-vs-pressed is now 1.94:1 (was 1.34:1).
+
+# THE SELECTED TOOL KEEPS LOOKING SELECTED WHILE THE POINTER IS ON IT.
+#
+# The sharpest of these, and a real defect in the old ramp rather than a
+# refinement: hover and pressed were flat blues that REPLACED the green
+# selected-tool colour, so hovering the selected Brush made it stop looking
+# selected. The pointer destroyed the state the user was pointing at in order to
+# check.
+#
+# Interaction is now a TRANSFORM of the base colour instead of a different
+# colour, so both facts survive together. x=10,y=55 is the Brush button's
+# interior; Brush is the tool selected at startup.
+out=$(run 'winpx:10:55,hover:Brush,winpx:10:55')
+check "the selected tool is green, not neutral"    'winpx(10,55)=32,100,82'  "$out"
+check "hovering it stays GREEN, brighter"          'winpx(10,55)=54,122,104' "$out"
+out=$(run 'winpx:10:55,hold:Brush,winpx:10:55')
+check "pressing it stays green, darker"            'winpx(10,55)=17,55,45'   "$out"
+# All three selected faces are green (g > r and g > b); under the old ramp two of
+# the three were blue. Every one of the six faces above keeps the label at or
+# above 4.5:1, WCAG AA for body text - the binding case is selected+hover, which
+# is why the green is 32,100,82 and not a lighter, prettier one.
+
+# A hovered button is not confusable with an UNhovered neighbour: "Redo" sits
+# beside "Undo" and must stay at the resting face while Undo is hovered. Without
+# this, a bug that lit every button on any hover would pass every check above.
+out=$(run 'hover:Undo,winpx:150:15,winpx:215:15')
+check "hover is per-widget, not global"          'winpx(215,15)=52,52,62' "$out"
+
+# ---------------------------------------------------------------------------
 # 13. A screenshot, because no assertion can say the UI LOOKED right.
 # ---------------------------------------------------------------------------
 rm -f /tmp/wc_verify.bmp

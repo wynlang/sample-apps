@@ -2024,6 +2024,36 @@ fn paint_button(ui: Ui, i: int) {
     var id = widgets.Ui_id_at(ui, i)
     var label = widgets.Ui_label_at(ui, i)
 
+    // TWO ORTHOGONAL AXES, and this is the fix for a state ramp that used to be
+    // both non-monotonic and self-erasing.
+    //
+    // What it did before: rest 52,52,62; hover 70,110,170; pressed 50,90,150.
+    // Measured, that is HOVER BRIGHTER THAN PRESSED (relative luminance .0838 vs
+    // .0616) and only 1.34:1 apart - so a pressed button looked like a hovered
+    // one that had dimmed slightly, and the two states were not reliably
+    // distinguishable at all. Worse, both were flat blues that REPLACED the
+    // green selected-tool colour: hovering the selected Brush made it stop
+    // looking selected, so the pointer destroyed the very state the user was
+    // checking.
+    //
+    // The shape that fixes both: BASE says what the control IS (neutral, or
+    // selected), and the interaction is a TRANSFORM of that base rather than a
+    // different colour. So the two facts are readable at once and cannot mask
+    // each other.
+    //
+    //   pressed = base * 0.55   (recedes - pressing pushes IN)
+    //   hover   = base + 22     (advances)
+    //
+    // Monotonic by construction: pressed < rest < hover in luminance for EVERY
+    // base, which is the physical metaphor and the property the old ramp broke.
+    // Numbers chosen against measured ratios, not by eye:
+    //   - the label stays >= 4.5:1 (WCAG AA body text) on all six faces; the
+    //     binding constraint is the selected+hover face at 4.27:1... which is why
+    //     the selected green is 32,100,82 rather than a lighter one, bringing it
+    //     to 4.5:1. A brighter, prettier green failed this and was rejected.
+    //   - hover vs pressed is 1.94:1, up from 1.34:1.
+    //   - selected stays separated from neutral in all three states (>= 1.30:1),
+    //     which is the "hover must not erase selection" property.
     var r = 52
     var g = 52
     var b = 62
@@ -2032,23 +2062,34 @@ fn paint_button(ui: Ui, i: int) {
     // future keyboard shortcut the module is the truth, and a cached flag would
     // silently disagree with what the next click will do.
     if is_selected_tool(label) {
-        r = 36
-        g = 104
-        b = 86
+        r = 32
+        g = 100
+        b = 82
     }
+    // The border tracks the state too, so the affordance survives for a user who
+    // cannot separate these fills by hue.
+    var br = 120
+    var bg = 120
+    var bb = 140
     if id == widgets.Ui_active(ui) {
-        r = 50
-        g = 90
-        b = 150
+        r = r * 55 / 100
+        g = g * 55 / 100
+        b = b * 55 / 100
+        br = 92
+        bg = 92
+        bb = 108
     } else {
         if id == widgets.Ui_hot(ui) {
-            r = 70
-            g = 110
-            b = 170
+            r = r + 22
+            g = g + 22
+            b = b + 22
+            br = 170
+            bg = 170
+            bb = 190
         }
     }
     gui.Win_rect(g_win, x, y, w, h, r, g, b)
-    gui.Win_rect_outline(g_win, x, y, w, h, 120, 120, 140)
+    gui.Win_rect_outline(g_win, x, y, w, h, br, bg, bb)
 
     var tw = gui.Win_text_width(g_font, label)
     var th = gui.Win_font_height(g_font)
@@ -2879,6 +2920,74 @@ fn run_action(ui: Ui, act: string) -> Ui {
         var _st = "tool=${paint.tool_name(paint.tool())} layers=${layer.count()} active=${g_active}"
         print("  click:${label} -> msg=${g_msg} req=${g_req} ${_st} hist=${history.depth()} zoom=${view.zoom()}%")
         return u
+    }
+
+    // hover:Brush - park the pointer over a widget WITHOUT pressing it.
+    //
+    // WHY THIS COMMAND HAS TO EXIST. The hover highlight was previously
+    // unreachable from a script: `click:` moves the pointer and presses in the
+    // same breath, so it can only ever observe the PRESSED face, and every other
+    // command leaves the pointer wherever it was. The hover state was therefore
+    // the one piece of visual feedback in the editor that no test could see - and
+    // it was measurably wrong (brighter than pressed) for exactly as long.
+    //
+    // A move alone, pushed through the real queue so the toolkit recomputes `hot`
+    // from the pointer the same way a human's mouse-move does. It deliberately
+    // does NOT press: the point is to leave the pointer resting there so a
+    // following `winpx:` reads the hovered face.
+    if act.starts_with("hover:") {
+        var hl = act.substring(6, act.len())
+        var hi = 0
+        while hi < widgets.Ui_count(ui) {
+            if widgets.Ui_label_at(ui, hi) == hl {
+                var hx = widgets.Ui_x_at(ui, hi) + widgets.Ui_w_at(ui, hi) / 2
+                var hy = widgets.Ui_y_at(ui, hi) + widgets.Ui_h_at(ui, hi) / 2
+                gui.Win_push_mouse_move(g_win, hx, hy)
+                var hu = widgets.Ui_events(ui)
+                // Repaint, so the pixel a following winpx: reads is the hovered
+                // one. Without this the probe would read the previous frame and
+                // the check would silently be about the resting face.
+                paint(hu)
+                print("  hover:${hl} -> hot=${widgets.Ui_hot(hu)} at=${hx},${hy}")
+                return hu
+            }
+            hi = hi + 1
+        }
+        print("  no widget labelled ${hl}")
+        return ui
+    }
+
+    // hold:Brush - press a widget and DO NOT release it, so the pressed face is
+    // on screen when a following `winpx:` reads it.
+    //
+    // The companion to hover:, and needed for the same reason: `click:` presses
+    // and releases in one action, so by the time anything can probe the window the
+    // button is back at rest. Between them the two commands make all three
+    // interaction faces - rest, hover, pressed - reachable from a script, which is
+    // what let the non-monotonic ramp above be measured instead of guessed at.
+    //
+    // Ui_press without Ui_release leaves `active` set, which is exactly the state
+    // a human's finger-down produces. The Ui is returned still pressed; nothing
+    // after it in the script should assume the button was activated, because it
+    // has not been - activation happens on release.
+    if act.starts_with("hold:") {
+        var dl = act.substring(5, act.len())
+        var di = 0
+        while di < widgets.Ui_count(ui) {
+            if widgets.Ui_label_at(ui, di) == dl {
+                var dx2 = widgets.Ui_x_at(ui, di) + widgets.Ui_w_at(ui, di) / 2
+                var dy2 = widgets.Ui_y_at(ui, di) + widgets.Ui_h_at(ui, di) / 2
+                gui.Win_push_mouse_move(g_win, dx2, dy2)
+                var du = widgets.Ui_events(ui)
+                du = widgets.Ui_press(du, dx2, dy2)
+                paint(du)
+                print("  hold:${dl} -> active=${widgets.Ui_active(du)} at=${dx2},${dy2}")
+                return du
+            }
+            di = di + 1
+        }
+        print("  no widget labelled ${dl}")
+        return ui
     }
 
     // stroke:x0:y0:x1:y1 in DOCUMENT coordinates, through the window path.
