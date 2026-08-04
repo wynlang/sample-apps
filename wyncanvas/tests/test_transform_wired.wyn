@@ -12,6 +12,17 @@ import xform
 // Before this, xform.wyn was dead code - imported only by its own test, never by the
 // editor - so rotate/flip/crop/resize could not be reached at all despite being written
 // and tested. This is the check that they stay wired and stay size-preserving.
+//
+// THE SIZE-CHANGING TRANSFORMS ARE NOW WIRED TOO, and NOT through this path: rot90,
+// crop and scale go through src/docxform.wyn and a whole-document history op
+// (OP_DOC_XFORM), because they change the size of every layer at once and so cannot
+// use the wynimg_copy_into restore this file's subjects rely on. They are tested in
+// tests/test_docxform.wyn.
+//
+// So the dimension-preserving property asserted below is no longer "the reason only
+// these three are reachable" - it is the reason these three stay on the CHEAP undo.
+// A flip routed through the document path would take a full-document snapshot per
+// flip, N buffers instead of 2, for a transform that does not need one.
 
 fn px(h: int, i: int) -> float => wynimg_get(h, i)
 

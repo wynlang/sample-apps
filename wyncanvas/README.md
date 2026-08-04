@@ -260,9 +260,11 @@ Symptom / minimal-repro / root-cause records live with the upstream compiler iss
 | `src/filter.wyn` | Blur / sharpen / levels / curves / saturation |
 | `src/text.wyn` | Text as coverage, through the brush kernel |
 | `src/project.wyn` | `.wync` layered save / load |
-| `src/xform.wyn` | Scale / rotate / flip / crop / canvas resize / affine |
+| `src/xform.wyn` | Scale / rotate / flip / crop / canvas resize / affine (one buffer) |
+| `src/docsnap.wyn` | A whole-document undo snapshot: N layer buffers + N masks |
+| `src/docxform.wyn` | Applies a size-changing transform to the whole document, atomically |
 | `src/ui.wyn` | Native SDL3 editor window: layout, paint, dispatch |
-| `verify_ui.sh` | 132 headless pixel assertions against the built editor |
+| `verify_ui.sh` | 150 headless pixel assertions against the built editor |
 | `tests/golden/` | Reference images (see its README) |
 
 ## Compiler bugs found while building the editor
