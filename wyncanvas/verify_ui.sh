@@ -610,6 +610,40 @@ out=$(run 'hover:Undo,winpx:150:15,winpx:215:15')
 check "hover is per-widget, not global"          'winpx(215,15)=52,52,62' "$out"
 
 # ---------------------------------------------------------------------------
+# 12d. THE STATUS BAR HAS A HIERARCHY, IN PIXELS.
+#
+# Sections 5 and 8 already check that the bar SAYS the right thing - they grep
+# `msg=undo invert` off stdout. That is a different claim from this one: stdout
+# proves the string was computed, and says nothing whatever about what reached the
+# window. The bar could be painted in one flat colour, or off the bottom edge, and
+# every existing status check would still pass. It was in fact painted flat: all
+# fourteen fields at 200,200,212, so "what did that just do?" - the only reason a
+# status bar exists - carried the same weight as the document size, which has not
+# changed since the file was opened.
+#
+# Now split by LIFETIME: persistent STATE dim (150,150,164, 6.29:1 on the
+# 20,20,25 bar), the transient MESSAGE bright (238,238,246, 15.91:1) behind a
+# 1px rule. Both clear WCAG AA. The state is deliberately the dimmer of the two -
+# a hierarchy needs a quiet level in order to have a loud one.
+#
+# The three probes are a state glyph, the rule, and a message glyph, all under the
+# same script so the string is the one being measured.
+out=$(run 'click:+L,hsv:200:0.9:1,brush:26:0.5:1,tool:brush,stroke:40:40:210:210,winpx:70:744,winpx:323:744,winpx:341:745')
+check "status STATE is the dim tier"          'winpx(70,744)=150,150,164'  "$out"
+check "a rule separates state from message"   'winpx(323,744)=58,58,70'    "$out"
+check "the MESSAGE is the bright tier"        'winpx(341,745)=238,238,246' "$out"
+# The two tiers must differ - a regression to one flat colour would pass a check
+# that only named one of them, so the contrast between the two is the real claim:
+# 150,150,164 vs 238,238,246 is 2.53:1, comfortably distinguishable.
+
+# THE RULE IS PLACED FROM THE MEASURED TEXT WIDTH, not a fixed column - the state
+# string grows when a selection appears. Same script plus a selection, so the
+# state text is LONGER: the rule must have moved right, and x=323 (the rule above)
+# must now be something else. A hardcoded column would fail this.
+out=$(run 'click:+L,tool:mrect,marquee:10:10:60:60,winpx:323:744')
+check "the rule moves when the state text grows" 'winpx(323,744)=20,20,25' "$out"
+
+# ---------------------------------------------------------------------------
 # 13. A screenshot, because no assertion can say the UI LOOKED right.
 # ---------------------------------------------------------------------------
 rm -f /tmp/wc_verify.bmp

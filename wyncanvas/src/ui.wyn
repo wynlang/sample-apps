@@ -2558,6 +2558,24 @@ fn paint_status(ui: Ui) {
     gui.Win_rect(g_win, 0, y, layout.WIN_W(), layout.STATUS_H(), 20, 20, 25)
     gui.Win_line(g_win, 0, y, layout.WIN_W(), y, 60, 60, 72)
 
+    // TWO KINDS OF INFORMATION, DRAWN AS TWO KINDS. Everything here used to be
+    // one concatenated string at one colour, which meant the answer to "what did
+    // that just do?" - the whole reason a status bar exists - carried exactly the
+    // same weight as the document size, which has not changed since the file was
+    // opened. Fourteen fields at identical brightness is a line you stop reading.
+    //
+    // The split is by LIFETIME, which is the distinction a user actually cares
+    // about:
+    //   STATE (left, secondary 150,150,164) - persistent facts. Reference
+    //     material: you look at it when you want it.
+    //   MESSAGE (right of a rule, 238,238,246) - what just happened. Transient,
+    //     and the brightest thing in the bar because it is the newest.
+    //
+    // Measured on the 20,20,25 bar: state 6.29:1, message 15.91:1. Both clear
+    // WCAG AA; the state is deliberately the dimmer of the two rather than being
+    // made as bright as possible, because a hierarchy needs a quiet level to have
+    // a loud one. The previous single 200,200,212 sat at 11.08:1 - between the
+    // two, and so distinguishing nothing.
     var s = g_doc_w.to_string() + "x" + g_doc_h.to_string()
     s = s + "  " + layer.count().to_string() + "L"
     s = s + "  z" + view.zoom().to_string() + "%"
@@ -2577,8 +2595,22 @@ fn paint_status(ui: Ui) {
     }
     s = s + "  @" + g_cur_dx.to_string() + "," + g_cur_dy.to_string()
     s = s + "  hist " + history.depth().to_string()
-    s = s + "  " + g_msg
-    gui.Win_text(g_win, g_font, s, 8, y + 5, 200, 200, 212)
+    gui.Win_text(g_win, g_font, s, 8, y + 5, 150, 150, 164)
+
+    // The rule, placed from the MEASURED width of the state text rather than at a
+    // fixed column: the state string grows and shrinks (a selection appears, the
+    // zoom reaches three digits), and a fixed column would be overrun by it in
+    // one direction and leave a gap in the other. This is the same
+    // measure-then-place discipline row_meta_x uses in the layer panel.
+    //
+    // Drawn only when there IS a message, so an idle bar does not carry a rule
+    // with nothing after it.
+    if g_msg != "" {
+        var sw = gui.Win_text_width(g_font, s)
+        var rule_x = 8 + sw + 10
+        gui.Win_rect(g_win, rule_x, y + 6, 1, layout.STATUS_H() - 12, 58, 58, 70)
+        gui.Win_text(g_win, g_font, g_msg, rule_x + 10, y + 5, 238, 238, 246)
+    }
 }
 
 fn paint(ui: Ui) {
