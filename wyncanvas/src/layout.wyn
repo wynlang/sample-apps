@@ -252,3 +252,49 @@ pub fn row_clip_w(depth: int, mw: int) -> int {
     return PANEL_W() - 44 - mw - row_indent(depth)
 }
 pub fn row_meta_x(mw: int) -> int { return PANEL_X() + PANEL_W() - 10 - mw }
+
+// ---- the layer row's two meta COLUMNS --------------------------------------
+//
+// The blend mode and the opacity used to be ONE right-aligned string, "normal
+// 100%" / "multiply 75%". Right-aligning the concatenation aligns only its right
+// edge: measured off the window, the readouts ended together at x=1168 but STARTED
+// at 1098, 1098, 1101, 1098, because the left edge floats by however much the
+// blend name's width differs. So neither fact formed a column, and the eye cannot
+// compare a blend mode down the stack - which is the one thing a layers panel is
+// for.
+//
+// Two columns instead, each aligned on its own:
+//
+//   OPACITY  right-aligned at the panel's right margin. Right, because these are
+//            numbers of varying width ("75%" vs "100%") and digits compare when
+//            their units line up.
+//   BLEND    right-aligned against the opacity column's left edge, so the gap
+//            between the two is constant and the blend names - which vary far
+//            more in width ("normal" vs "linear_light") - still end on a shared
+//            edge rather than drifting.
+//
+// OPACITY_W is a fixed reservation rather than the measured width of THIS row's
+// text: that is what makes it a column. Measuring per row is exactly what the old
+// code did, and per-row measurement is per-row alignment, i.e. none. 34px holds
+// "100%" at the 14px UI font with a little air.
+pub fn row_opacity_w() -> int { return 34 }
+
+// The right margin matches row_meta_x's, so a row keeps the same outer edge it
+// had before the split.
+pub fn row_opacity_x() -> int {
+    return PANEL_X() + PANEL_W() - 10 - row_opacity_w()
+}
+
+// The blend column's right edge, one PAD clear of the opacity column. `bw` is the
+// measured width of this row's blend name, so the text is right-aligned TO this
+// edge - the parameter is a width, not a position.
+pub fn row_blend_x(bw: int) -> int {
+    return row_opacity_x() - PAD() - bw
+}
+
+// The name's clip now stops at the BLEND column's left edge. Takes the widest
+// blend name's measured width so the clip does not change per row - a name that
+// was clipped on one row and not the next would look like a rendering bug.
+pub fn row_name_clip_w(depth: int, widest_bw: int) -> int {
+    return row_opacity_x() - PAD() - widest_bw - PAD() - row_clip_x(depth)
+}

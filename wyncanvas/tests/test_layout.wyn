@@ -466,6 +466,60 @@ test "the meta readout is right-aligned inside the panel" {
     assert_true(layout.row_meta_x(120) > layout.PANEL_X())
 }
 
+// ---- the meta COLUMNS ------------------------------------------------------
+//
+// The blend mode and opacity were one right-aligned string, which aligns only its
+// outer edge - the join floats by the difference in blend-name widths, so neither
+// field formed a column. These assert the two-column replacement as PROPERTIES
+// (shared edges, a gutter, no overlap) rather than as coordinates.
+
+test "the opacity column is a fixed reservation, not a measured width" {
+    // This is what makes it a COLUMN: the position must not depend on the text in
+    // it. If row_opacity_x ever took a width parameter, the alignment is per-row
+    // again, which is the bug.
+    assert_true(layout.row_opacity_w() > 0)
+    assert_eq(layout.row_opacity_x() + layout.row_opacity_w(),
+              layout.PANEL_X() + layout.PANEL_W() - 10)
+    // It keeps the outer margin the single-string version had, so a row's right
+    // edge did not move.
+    assert_eq(layout.row_opacity_x() + layout.row_opacity_w(),
+              layout.row_meta_x(70) + 70)
+}
+
+test "the blend column is right-aligned one gutter clear of the opacity column" {
+    // A wider blend name starts further left and its RIGHT edge stays put - that
+    // shared right edge is the whole point of the column.
+    var narrow = 40
+    var wide = 90
+    assert_eq(layout.row_blend_x(narrow) + narrow,
+              layout.row_blend_x(wide) + wide)
+    assert_true(layout.row_blend_x(wide) < layout.row_blend_x(narrow))
+    // And the gutter is real: the blend text ends strictly before the opacity
+    // column begins, at every width.
+    assert_true(layout.row_blend_x(narrow) + narrow < layout.row_opacity_x())
+    assert_true(layout.row_blend_x(wide) + wide < layout.row_opacity_x())
+    assert_eq(layout.row_opacity_x() - (layout.row_blend_x(wide) + wide),
+              layout.PAD())
+}
+
+test "the name's clip stops short of the blend column at every depth" {
+    // The clip is measured from the WIDEST blend name so it does not change per
+    // row; a name clipped on one row and not the next reads as a glitch.
+    var widest = 90
+    var d = 0
+    while d < 4 {
+        var name_end = layout.row_clip_x(d) + layout.row_name_clip_w(d, widest)
+        assert_true(name_end <= layout.row_blend_x(widest))
+        // Indenting shrinks the room for the name rather than pushing it under
+        // the columns.
+        if d > 0 {
+            assert_true(layout.row_name_clip_w(d, widest)
+                        < layout.row_name_clip_w(d - 1, widest))
+        }
+        d = d + 1
+    }
+}
+
 test "a very wide meta readout leaves no negative-width clip rect" {
     // Win_clip with a negative width is not a clip the toolkit defines. A
     // pathological font (or a 12-word blend name) must degrade to "no room for

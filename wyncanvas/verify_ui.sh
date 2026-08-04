@@ -644,6 +644,34 @@ out=$(run 'click:+L,tool:mrect,marquee:10:10:60:60,winpx:323:744')
 check "the rule moves when the state text grows" 'winpx(323,744)=20,20,25' "$out"
 
 # ---------------------------------------------------------------------------
+# 12e. THE LAYER ROW'S BLEND AND OPACITY ARE TWO COLUMNS, NOT ONE STRING.
+#
+# They used to be one right-aligned concatenation, "normal 100%" / "multiply 75%".
+# Right-aligning a concatenation aligns only its outer edge: measured off the
+# window, four rows ended together at x=1168 but STARTED at 1098, 1098, 1101,
+# 1098, because the join floats by the difference in blend-name widths. So neither
+# fact formed a column, and comparing blend modes down the stack - most of what a
+# layers panel is FOR - meant reading each row individually.
+#
+# The default document is the right fixture precisely because its two rows
+# disagree in both fields: "blue" is multiply 75% at y=348 and "ramp" is normal
+# 100% at y=372. Under the old single-string layout the two rows' text began at
+# different x; if that regressed, the gutter check below is what fails.
+#
+# THE GUTTER IS THE LOAD-BEARING CHECK. x=1134 is between the two columns, and it
+# must be bare row band on BOTH rows - 52,74,96 on the selected row 0 and
+# 40,40,48 on row 1. A single joined string puts a space or a glyph there on at
+# least one row, because the join lands wherever the blend name happens to end.
+out=$(run 'winpx:1101:347,winpx:1123:372,winpx:1134:347,winpx:1134:372')
+check "row 0 blend column has its glyphs"    'winpx(1101,347)=150,160,175' "$out"
+check "row 1 blend column has its glyphs"    'winpx(1123,372)=150,160,175' "$out"
+check "a gutter separates the columns (row 0)" 'winpx(1134,347)=52,74,96'  "$out"
+check "a gutter separates the columns (row 1)" 'winpx(1134,372)=40,40,48'  "$out"
+# Measured column edges afterwards, for the record: the blend column ends at
+# 1127/1126 and the opacity column at 1168/1168 on the two rows. Both are shared
+# edges now; before, only the outer one was.
+
+# ---------------------------------------------------------------------------
 # 13. A screenshot, because no assertion can say the UI LOOKED right.
 # ---------------------------------------------------------------------------
 rm -f /tmp/wc_verify.bmp

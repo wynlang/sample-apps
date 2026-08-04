@@ -2524,17 +2524,40 @@ fn paint_layers(ui: Ui) {
                     fg = 130
                     fb = 142
                 }
-                // Name, then the blend mode and opacity on the right.
+                // Name, then the blend mode and the opacity as TWO COLUMNS.
+                //
+                // They used to be one right-aligned string ("normal 100%"), which
+                // aligns only the outer edge: measured off the window, four rows
+                // ended together at x=1168 but started at 1098/1098/1101/1098,
+                // because the join floats by the difference in blend-name widths.
+                // Neither fact formed a column, so you could not compare blend
+                // modes down the stack - which is most of what a layers panel is
+                // for. See layout.row_opacity_x.
                 var pct = (layer.opacity(li) * 100.0 + 0.5).to_int()
-                var meta = pixel.blend_name(layer.blend_mode(li)) + " "
-                           + pct.to_string() + "%"
-                var mw = gui.Win_text_width(g_font, meta)
+                var opct = pct.to_string() + "%"
+                var bname = pixel.blend_name(layer.blend_mode(li))
+
+                // The name's clip is measured from the WIDEST blend name, not this
+                // row's, so the clip is the same on every row. Using this row's
+                // width would clip a name on one row and not the next, which reads
+                // as a rendering glitch rather than as a column.
+                var widest = gui.Win_text_width(g_font, "linear_light")
                 gui.Win_clip(g_win, layout.row_clip_x(dep), y,
-                             layout.row_clip_w(dep, mw), layout.row_band_h())
+                             layout.row_name_clip_w(dep, widest),
+                             layout.row_band_h())
                 gui.Win_text(g_win, g_font, layer.name(li),
                              layout.row_name_x(dep), y + 3, fr, fg, fb)
                 gui.Win_clip(g_win, 0, 0, 0, 0)
-                gui.Win_text(g_win, g_font, meta, layout.row_meta_x(mw), y + 3,
+
+                // Opacity right-aligned in its reserved column, so the digits'
+                // units line up down the stack and 75% is comparable with 100%.
+                var ow = gui.Win_text_width(g_font, opct)
+                gui.Win_text(g_win, g_font, opct,
+                             layout.row_opacity_x() + layout.row_opacity_w() - ow,
+                             y + 3, 150, 160, 175)
+                // Blend mode right-aligned against the opacity column's edge.
+                var bw = gui.Win_text_width(g_font, bname)
+                gui.Win_text(g_win, g_font, bname, layout.row_blend_x(bw), y + 3,
                              150, 160, 175)
                 vis = vis + 1
                 k = k + 1
