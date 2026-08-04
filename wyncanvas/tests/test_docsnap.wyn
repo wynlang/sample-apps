@@ -1,0 +1,267 @@
+import pixel
+import docsnap
+
+// The snapshot store that a whole-document transform's undo record owns.
+//
+// WHAT THESE TESTS ARE FOR. src/history.wyn's OP_PIXELS entry owns two buffer
+// handles and restores by wynimg_copy_into, which needs the size unchanged. A
+// rotate-90 / crop / scale changes every layer's size at once, so its record owns
+// N buffers and N masks. This file pins the three properties the undo path depends
+// on and that nothing else can check:
+//
+//   * a discarded snapshot FREES what it held, counted - the leak that a
+//     "whole-document undo" would otherwise hide is N full float32 layers per
+//     step, not the 2 an OP_PIXELS leak costs;
+//   * an id is NEVER REUSED, so a stale id reads dead rather than aliasing a live
+//     snapshot's buffers;
+//   * masks are held in their OWN column, because wynimg_composite REFUSES a mask
+//     whose dimensions disagree with the destination - a resize that transformed
+//     buffers but not masks would make masked layers silently vanish.
+//
+// Call convention (see src/pixel.wyn): extern fns BARE, module fns QUALIFIED.
+//
+// ---------------------------------------------------------------------------
+// TWO COMPILER DEFECTS SHAPED src/docsnap.wyn. Both are worked around there, and
+// both are recorded here so a future reader does not "simplify" the workaround
+// back into a bug. Compiler at repos/wyn (branch dev).
+//
+// 1. A MODULE-LEVEL ARRAY INITIALISER IS DROPPED IN AN IMPORTED MODULE. It works
+//    in the entry file. Repro - src/m.wyn:
+//        var a = [7, 8, 9]
+//        pub fn n() -> int { return a.len() }
+//    ...and an entry file `import m` / `print(m.n())` prints 0, not 3. Same for
+//    [""], [1.5] and [[0]]. Every parallel-array module in this project
+//    (src/layer.wyn, src/history.wyn) is written to never READ a length it did not
+//    itself push, which is why none of them tripped over this; docsnap makes the
+//    assumption explicit in `reserve()` instead of inheriting it silently.
+//
+// 2. ASSIGNING AN ARRAY LITERAL INTO A NESTED ARRAY ELEMENT IS AN INTERNAL
+//    CODEGEN ERROR. Repro, complete:
+//        var b = [[0]]
+//        fn main() {
+//            b.push([1])
+//            b[0] = []
+//            print(b[0].len())
+//        }
+//    -> "Error: compilation failed (internal codegen error)"; with WYN_DEBUG=1 the
+//    emitted C is `__arr_ptr->data[__idx].data.int_val = ({ WynArray __arr_3 = ...
+//    })` - i.e. the element is typed WYN_TYPE_INT and assigned a WynArray. Nested
+//    push / index / index-assign of a scalar / len / pop all work; only
+//    `nested[i] = <array literal>` fails. So `discard` DRAINS its inner arrays with
+//    pop() rather than clearing them with `= []`.
+// ---------------------------------------------------------------------------
+
+fn mkbuf(w: int, h: int, v: float) -> int {
+    var b = wynimg_new(w, h)
+    wynimg_fill(b, v, v, v, 1.0)
+    return b
+}
+
+test "a fresh snapshot has the size and slot count it was asked for" {
+    var id = docsnap.take(3, 8, 5)
+    assert_true(id > 0)
+    assert_true(docsnap.alive(id))
+    assert_eq(docsnap.count(id), 3)
+    assert_eq(docsnap.doc_w(id), 8)
+    assert_eq(docsnap.doc_h(id), 5)
+    // Slots start EMPTY, which is what makes discarding a half-filled snapshot
+    // the same code path as discarding a full one.
+    assert_eq(docsnap.buf_at(id, 0), 0)
+    assert_eq(docsnap.buf_at(id, 2), 0)
+    assert_eq(docsnap.mask_at(id, 1), 0)
+    docsnap.discard(id)
+}
+
+test "id 0 is never a snapshot, so a missing one reads as empty not as slot zero" {
+    // 0 is this project's universal "no handle", and the outer arrays' literal
+    // element 0 must not be reachable as a snapshot - otherwise a caller that
+    // forgot to record an id would silently operate on it.
+    assert_false(docsnap.alive(0))
+    assert_eq(docsnap.count(0), 0)
+    assert_eq(docsnap.doc_w(0), 0)
+    assert_eq(docsnap.buf_at(0, 0), 0)
+    assert_eq(docsnap.discard(0), 0)
+}
+
+test "a refused snapshot is 0, not a live slot with nonsense dimensions" {
+    // A zero or negative document size can only come from a bug upstream, and a
+    // snapshot that accepted it would report doc_w 0 to the undo path, which reads
+    // that as "no snapshot" - so refuse at the door instead.
+    assert_eq(docsnap.take(2, 0, 4), 0)
+    assert_eq(docsnap.take(2, 4, 0), 0)
+    assert_eq(docsnap.take(2, 0 - 1, 4), 0)
+    assert_eq(docsnap.take(0 - 1, 4, 4), 0)
+    // n == 0 IS legal: a document with no layers is a real state (layer.store_new
+    // leaves one), and refusing it would make the caller special-case it.
+    var z = docsnap.take(0, 4, 4)
+    assert_true(z > 0)
+    assert_eq(docsnap.count(z), 0)
+    docsnap.discard(z)
+}
+
+test "handles round-trip through the slots, buffers and masks independently" {
+    var id = docsnap.take(2, 4, 4)
+    var b0 = mkbuf(4, 4, 0.25)
+    var b1 = mkbuf(4, 4, 0.5)
+    var m0 = mkbuf(4, 4, 1.0)
+
+    assert_eq(docsnap.set_buf(id, 0, b0), 0)   // displaced nothing
+    assert_eq(docsnap.set_buf(id, 1, b1), 0)
+    assert_eq(docsnap.set_mask(id, 0, m0), 0)
+
+    assert_eq(docsnap.buf_at(id, 0), b0)
+    assert_eq(docsnap.buf_at(id, 1), b1)
+    assert_eq(docsnap.mask_at(id, 0), m0)
+    // THE MASK COLUMN IS ITS OWN COLUMN. Storing a mask must not disturb the
+    // buffer at the same index - if they shared storage, a masked layer's pixels
+    // would be replaced by its coverage on the first undo.
+    assert_eq(docsnap.buf_at(id, 0), b0)
+    assert_eq(docsnap.mask_at(id, 1), 0)
+
+    docsnap.discard(id)
+}
+
+test "set_buf returns the handle it displaced, so a swap needs no temporary" {
+    // This is the operation the undo path is built out of: exchange the live
+    // handle with the parked one. A setter that swallowed the old value would
+    // force the caller to read-then-write, and an early return between the two
+    // would drop a buffer on the floor.
+    var id = docsnap.take(1, 4, 4)
+    var a = mkbuf(4, 4, 0.1)
+    var b = mkbuf(4, 4, 0.2)
+    docsnap.set_buf(id, 0, a)
+    var displaced = docsnap.set_buf(id, 0, b)
+    assert_eq(displaced, a)
+    assert_eq(docsnap.buf_at(id, 0), b)
+    var dm = docsnap.set_mask(id, 0, a)
+    assert_eq(dm, 0)
+    assert_eq(docsnap.mask_at(id, 0), a)
+    docsnap.discard(id)
+}
+
+test "out-of-range slots refuse rather than growing the snapshot" {
+    var id = docsnap.take(2, 4, 4)
+    var b = mkbuf(4, 4, 0.3)
+    assert_eq(docsnap.set_buf(id, 2, b), 0)
+    assert_eq(docsnap.set_buf(id, 0 - 1, b), 0)
+    assert_eq(docsnap.set_mask(id, 9, b), 0)
+    // The count is unchanged: a refused write must not silently extend the
+    // snapshot, or its slot indices would stop matching layer positions.
+    assert_eq(docsnap.count(id), 2)
+    assert_eq(docsnap.buf_at(id, 5), 0)
+    assert_eq(docsnap.mask_at(id, 0 - 3), 0)
+    wynimg_free(b)
+    docsnap.discard(id)
+}
+
+test "discard frees every handle it holds and counts them" {
+    // THE LEAK THIS GUARDS. A whole-document undo record owns one buffer per
+    // layer, so a discard that forgot them leaks the entire document per undo
+    // step - 16 bytes a pixel times the layer count. The count is asserted rather
+    // than just "it did not crash", because wynimg_free of a stale handle is a
+    // deliberate no-op (csrc/wynimg_buf.c) and so a store that freed nothing would
+    // look identical from the outside.
+    var id = docsnap.take(3, 4, 4)
+    var b0 = mkbuf(4, 4, 0.1)
+    var b1 = mkbuf(4, 4, 0.2)
+    var m1 = mkbuf(4, 4, 0.9)
+    docsnap.set_buf(id, 0, b0)
+    docsnap.set_buf(id, 1, b1)
+    docsnap.set_mask(id, 1, m1)
+    // Slot 2 stays empty - a half-filled snapshot, which is what an aborted
+    // transform leaves behind.
+    assert_eq(docsnap.discard(id), 3)
+
+    // The handles are genuinely dead, not merely forgotten. wynimg_alive is the
+    // only way to observe that from Wyn.
+    assert_eq(wynimg_alive(b0), 0)
+    assert_eq(wynimg_alive(b1), 0)
+    assert_eq(wynimg_alive(m1), 0)
+
+    // ...and the snapshot itself is dead and empty.
+    assert_false(docsnap.alive(id))
+    assert_eq(docsnap.count(id), 0)
+    assert_eq(docsnap.buf_at(id, 0), 0)
+    assert_eq(docsnap.doc_w(id), 0)
+}
+
+test "discarding twice frees nothing the second time" {
+    // The redo-branch truncation in src/history.wyn can reach the same entry
+    // twice if a record is discarded and the log is then reset; a double discard
+    // that re-freed would be a double free of every layer buffer.
+    var id = docsnap.take(1, 4, 4)
+    docsnap.set_buf(id, 0, mkbuf(4, 4, 0.4))
+    assert_eq(docsnap.discard(id), 1)
+    assert_eq(docsnap.discard(id), 0)
+}
+
+test "ids are never reused, so a stale id reads dead instead of aliasing" {
+    // THE PROPERTY THAT MAKES A STALE ID HARMLESS. If `take` recycled a dead
+    // slot, a caller holding an id from a discarded record would silently read
+    // and free the CURRENT record's buffers - the invisible class of bug the
+    // wynimg handle table spends 39 generation bits to avoid.
+    var first = docsnap.take(1, 4, 4)
+    docsnap.discard(first)
+    var second = docsnap.take(1, 4, 4)
+    assert_true(second != first)
+    assert_false(docsnap.alive(first))
+    assert_true(docsnap.alive(second))
+    // Two live snapshots also do not share slots.
+    var third = docsnap.take(2, 6, 6)
+    assert_true(third != second)
+    var bs = mkbuf(4, 4, 0.7)
+    docsnap.set_buf(second, 0, bs)
+    assert_eq(docsnap.buf_at(third, 0), 0)
+    docsnap.discard(second)
+    docsnap.discard(third)
+}
+
+test "set_dims moves the recorded size, and only to a legal one" {
+    // The undo swap exchanges the snapshot's size with the document's at the same
+    // moment it exchanges their buffers. A rejected size must leave the old one
+    // intact rather than zeroing it, because a snapshot reporting 0 would be read
+    // as "no snapshot" by the undo path and its buffers would be stranded.
+    var id = docsnap.take(1, 8, 4)
+    assert_true(docsnap.set_dims(id, 4, 8))
+    assert_eq(docsnap.doc_w(id), 4)
+    assert_eq(docsnap.doc_h(id), 8)
+    assert_false(docsnap.set_dims(id, 0, 8))
+    assert_false(docsnap.set_dims(id, 4, 0 - 2))
+    assert_eq(docsnap.doc_w(id), 4)
+    assert_eq(docsnap.doc_h(id), 8)
+    assert_false(docsnap.set_dims(0, 4, 4))
+    docsnap.discard(id)
+}
+
+test "a dead snapshot answers every query without touching its old slots" {
+    var id = docsnap.take(2, 4, 4)
+    var b = mkbuf(4, 4, 0.6)
+    docsnap.set_buf(id, 0, b)
+    docsnap.discard(id)
+    // Every accessor must be safe on a dead id: the undo path reads count() and
+    // doc_w() before it decides whether an entry has a snapshot at all.
+    assert_eq(docsnap.count(id), 0)
+    assert_eq(docsnap.doc_w(id), 0)
+    assert_eq(docsnap.doc_h(id), 0)
+    assert_eq(docsnap.buf_at(id, 0), 0)
+    assert_eq(docsnap.mask_at(id, 0), 0)
+    assert_eq(docsnap.set_buf(id, 0, 12345), 0)
+    assert_eq(docsnap.set_mask(id, 0, 12345), 0)
+    assert_false(docsnap.set_dims(id, 4, 4))
+}
+
+test "snapshots hold real layer-sized buffers, not just integers" {
+    // The store is handle-agnostic by design, so this is the one test that proves
+    // the handles it parks are still usable buffers with their pixels intact -
+    // i.e. that parking a buffer is not a copy and does not disturb it.
+    var id = docsnap.take(1, 3, 2)
+    var b = wynimg_new(3, 2)
+    wynimg_fill(b, 0.125, 0.25, 0.5, 1.0)
+    docsnap.set_buf(id, 0, b)
+    var got = docsnap.buf_at(id, 0)
+    assert_eq(wynimg_width(got), 3)
+    assert_eq(wynimg_height(got), 2)
+    assert_true(pixel.approx(wynimg_get(got, 0), 0.125, 0.0001))
+    assert_true(pixel.approx(wynimg_get(got, 2), 0.5, 0.0001))
+    docsnap.discard(id)
+}

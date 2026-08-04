@@ -1,0 +1,219 @@
+// docsnap - a DOCUMENT SNAPSHOT: the N layer buffers and N layer masks that a
+// whole-document transform displaced, plus the document size they belong to.
+//
+// WHY THIS EXISTS. src/history.wyn's OP_PIXELS record owns exactly TWO buffer
+// handles and restores them with wynimg_copy_into, which requires the size to be
+// unchanged (see its header). A rotate-90, a crop or a scale changes the size of
+// EVERY layer at once, so its undo record owns N buffers and N masks, and cannot
+// restore by copying. One handle per column does not express that; a snapshot id
+// does, and history then needs ONE new column rather than 2N.
+//
+// ONE SIDE, NOT TWO - the snapshot holds whichever side is NOT on the document.
+//
+// A record could store "before" and "after" and pick one. It stores one list and
+// SWAPS instead, which is the same shape src/history.wyn's OP_SWAP already uses
+// ("undo and redo are the same swap"): applying a doc transform parks the old
+// buffers here, undo exchanges them with the live ones, and redo is the identical
+// exchange. That halves the memory - a full float32 RGBA layer is 16 bytes a
+// pixel, so a 12MP document is 192MB per layer per side - and removes the state
+// where both sides are reachable and one of them is stale.
+//
+// MASKS ARE HELD TOO, AND THAT IS NOT OPTIONAL. A layer mask is a
+// document-sized coverage buffer, and wynimg_composite REFUSES (returns 0) when
+// the mask's dimensions disagree with the destination. So a document resize that
+// left masks at the old size would make every masked layer silently stop
+// compositing - the layer would vanish from the picture with no error anywhere.
+// Transforming the mask alongside the buffer is the only version that keeps the
+// document intact, so the snapshot carries both and the two travel together.
+//
+// IDS ARE NEVER REUSED, deliberately. Slots grow monotonically and a discarded
+// slot stays dead forever, so a stale id can only ever read as an empty, dead
+// snapshot - never as somebody else's live one. That is the same property the
+// wynimg handle table buys with a generation counter (see csrc/wynimg_buf.c), and
+// here it is free. The cost is a few ints per doc transform per session, against
+// the alternative of an id that silently aliases a different document's buffers -
+// which is invisible rather than merely wasteful.
+//
+// CALL CONVENTION: every function here is a `pub fn`, so importers call them
+// QUALIFIED (`docsnap.take(...)`). Handles reach the C shim as `wynimg::free`,
+// the `::` form, for the reason src/render.wyn's header records.
+
+import pixel
+
+// Parallel arrays, one column per field - the shape src/layer.wyn and
+// src/history.wyn both use, because a `pub fn` returning a struct across a module
+// boundary miscompiles here.
+//
+// `d_bufs` and `d_masks` are ARRAYS OF ARRAYS: entry k is the k'th snapshot's
+// list of handles, indexed by layer position.
+//
+// THE INITIALISERS ARE DECORATIVE - THEY DECLARE THE ELEMENT TYPE, NOT CONTENT.
+//
+// Measured on this compiler (see the repro in tests/test_docsnap.wyn): a
+// module-level array initialiser is DROPPED when the module is imported rather
+// than being the entry file - `var a = [7, 8, 9]` in an imported module reads back
+// `len() == 0`. So none of these arrays can be assumed to start at length 1, and
+// `reserve()` below establishes the one thing this store does need: that index 0
+// exists and is permanently dead. Nothing here reads a length it did not push.
+//
+// Index 0 is never handed out, which is why a valid id is always >= 1 and 0 means
+// "no snapshot" - the same convention every buffer handle in this project uses.
+var d_bufs = [[0]]
+var d_masks = [[0]]
+var d_w = [0]
+var d_h = [0]
+var d_live = [0]
+
+// Makes index 0 exist and be dead, whatever the initialisers did. Called by
+// `take` before it appends, so the store is correct whether it is reached from
+// the entry file (initialisers kept) or through an import (dropped).
+fn reserve() {
+    while d_live.len() < 1 {
+        d_bufs.push([])
+        d_masks.push([])
+        d_w.push(0)
+        d_h.push(0)
+        d_live.push(0)
+    }
+    // Belt and braces: if the initialiser DID survive, slot 0 holds a live-looking
+    // 0 from the literal. Force it dead - a snapshot at id 0 could never be freed
+    // by a caller, because 0 is also "no snapshot".
+    d_live[0] = 0
+}
+
+pub fn alive(id: int) -> bool {
+    if id <= 0 { return false }
+    if id >= d_live.len() { return false }
+    return d_live[id] == 1
+}
+
+// Allocates a snapshot with `n` empty slots for a `w` x `h` document. Returns the
+// id, or 0 if refused.
+//
+// The slots start at 0 (no handle) rather than being filled by the caller's
+// buffers in one go, because a caller building a snapshot has to be able to
+// abandon it halfway - a transform of layer 3 can fail after layers 0..2
+// succeeded, and `discard` on a half-filled snapshot must free exactly the
+// handles that were stored. Zero-initialised slots make that the same code path
+// as discarding a full one.
+pub fn take(n: int, w: int, h: int) -> int {
+    if n < 0 { return 0 }
+    if w <= 0 { return 0 }
+    if h <= 0 { return 0 }
+    reserve()
+    // Always APPEND. Reusing a dead slot would mean clearing its inner array,
+    // and an id that can be reused is an id that can alias - see the header.
+    d_bufs.push([])
+    d_masks.push([])
+    d_w.push(w)
+    d_h.push(h)
+    d_live.push(1)
+    var id = d_live.len() - 1
+    var i = 0
+    while i < n {
+        d_bufs[id].push(0)
+        d_masks[id].push(0)
+        i = i + 1
+    }
+    return id
+}
+
+pub fn count(id: int) -> int {
+    if alive(id) == false { return 0 }
+    return d_bufs[id].len()
+}
+
+pub fn doc_w(id: int) -> int {
+    if alive(id) == false { return 0 }
+    return d_w[id]
+}
+
+pub fn doc_h(id: int) -> int {
+    if alive(id) == false { return 0 }
+    return d_h[id]
+}
+
+// The document size the snapshot's buffers belong to. Written by the swap in
+// src/history.wyn, which exchanges the snapshot's size with the document's at the
+// same moment it exchanges their buffers - the two must move together or an undo
+// would install the right pixels at the wrong stated size.
+pub fn set_dims(id: int, w: int, h: int) -> bool {
+    if alive(id) == false { return false }
+    if w <= 0 { return false }
+    if h <= 0 { return false }
+    d_w[id] = w
+    d_h[id] = h
+    return true
+}
+
+pub fn buf_at(id: int, i: int) -> int {
+    if alive(id) == false { return 0 }
+    if i < 0 { return 0 }
+    if i >= d_bufs[id].len() { return 0 }
+    return d_bufs[id][i]
+}
+
+pub fn mask_at(id: int, i: int) -> int {
+    if alive(id) == false { return 0 }
+    if i < 0 { return 0 }
+    if i >= d_masks[id].len() { return 0 }
+    return d_masks[id][i]
+}
+
+// Stores a handle at slot `i` and returns the one it displaced, so the caller
+// decides that handle's fate. Returning the previous value rather than
+// overwriting silently is what makes a swap expressible without a temporary that
+// could be dropped on an early return - the same reason layer.set_buffer returns
+// the old handle.
+pub fn set_buf(id: int, i: int, h: int) -> int {
+    if alive(id) == false { return 0 }
+    if i < 0 { return 0 }
+    if i >= d_bufs[id].len() { return 0 }
+    var prev = d_bufs[id][i]
+    d_bufs[id][i] = h
+    return prev
+}
+
+pub fn set_mask(id: int, i: int, h: int) -> int {
+    if alive(id) == false { return 0 }
+    if i < 0 { return 0 }
+    if i >= d_masks[id].len() { return 0 }
+    var prev = d_masks[id][i]
+    d_masks[id][i] = h
+    return prev
+}
+
+// Frees every buffer and mask the snapshot still holds and marks it dead.
+// Returns how many handles were freed, which is what lets a test assert that a
+// discarded snapshot released N buffers rather than merely forgetting them.
+//
+// A 0 slot is skipped rather than passed to wynimg_free: free(0) is already a
+// no-op in the shim, but counting it would make the return value a slot count
+// instead of a free count, and that number is the one a leak test reads.
+//
+// The inner arrays are DRAINED, not replaced. `d_bufs[id] = []` is an internal
+// codegen error on this compiler (see the note in tests/test_docsnap.wyn), and
+// draining also has the property that matters: after this returns, buf_at cannot
+// hand back a freed handle even if the id is used again by mistake.
+pub fn discard(id: int) -> int {
+    if alive(id) == false { return 0 }
+    var n = 0
+    while d_bufs[id].len() > 0 {
+        var b = d_bufs[id].pop()
+        if b != 0 {
+            wynimg::free(b)
+            n = n + 1
+        }
+    }
+    while d_masks[id].len() > 0 {
+        var m = d_masks[id].pop()
+        if m != 0 {
+            wynimg::free(m)
+            n = n + 1
+        }
+    }
+    d_live[id] = 0
+    d_w[id] = 0
+    d_h[id] = 0
+    return n
+}
