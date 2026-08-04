@@ -53,10 +53,27 @@ fn run_case(name: string, wynjs: string) -> int {
 fn main() {
     print("=== WynJS test suite ===")
 
+    // The compiler to build with: $WYN if set, else the sibling checkout. A hardcoded
+    // ../../wyn/wyn always resolves to the SHARED repos/wyn, so an agent working in its
+    // own worktree would silently test somebody else's compiler.
+    wyn = Env.get("WYN")
+    if wyn.len() == 0 { wyn = "../../wyn/wyn" }
+
     // Build the interpreter once; every case runs against this one binary.
-    wynjs = "/tmp/wynjs_test_bin"
+    //
+    // The path is per-process, not a fixed /tmp/wynjs_test_bin: this runner `rm -f`s it
+    // first, so two concurrent suite runs (two agents, or a re-run overlapping a slow
+    // one) would delete and overwrite each other's interpreter mid-run. $TMPDIR keeps it
+    // inside an agent's own scratch directory when one is set.
+    tmp = Env.get("TMPDIR")
+    if tmp.len() == 0 { tmp = "/tmp" }
+    if not tmp.ends_with("/") { tmp = tmp + "/" }
+    // The suffix comes from the shell ($$), not from Wyn: there is no System.pid()
+    // builtin, and adding one to the compiler for a test harness would be the wrong
+    // trade.
+    wynjs = tmp + "wynjs_test_bin." + System_exec("printf %s $$").trim()
     System_exec("rm -f " + wynjs)
-    build_out = System_exec("../../wyn/wyn build src/main.wyn -o " + wynjs + " 2>&1")
+    build_out = System_exec(wyn + " build src/main.wyn -o " + wynjs + " 2>&1")
     if not File.exists(wynjs) {
         print("BUILD FAILED:")
         print(build_out)
