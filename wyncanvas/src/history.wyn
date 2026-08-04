@@ -73,9 +73,10 @@ pub fn can_redo() -> bool { return h_pos < h_len }
 // advanced h_len to 6 while h_a still held 2, so the first structural undo read
 // off the end. A scalar-only session never touches h_a and never notices.
 //
-// One writer makes the eleven columns the same length by construction, which is
+// One writer makes the TWELVE columns the same length by construction, which is
 // the only version of this invariant that cannot rot - and it is why adding h_m
-// for the delete record's mask was a two-line change rather than an audit.
+// for the delete record's mask, and later h_snap for a whole-document transform,
+// were each a two-line change rather than an audit.
 fn push(op: int, lid: int, of: float, nf: float, oi: int, ni: int) -> int {
     return push_ex(op, lid, of, nf, oi, ni, 0, 0, "", 0)
 }
@@ -167,12 +168,33 @@ pub fn label(i: int) -> string {
 // not free the buffer: between the delete and its undo, history owns it.
 
 import pixel
+import docsnap
 
 fn OP_PIXELS() -> int { return 3 }
 fn OP_ADD_LAYER() -> int { return 4 }
 fn OP_DEL_LAYER() -> int { return 5 }
 fn OP_SWAP() -> int { return 6 }
 fn OP_NAME() -> int { return 7 }
+
+// A WHOLE-DOCUMENT TRANSFORM: rotate 90, crop, scale, canvas resize.
+//
+// WHY THIS IS NOT OP_PIXELS WITH MORE COLUMNS - the one case where a new opcode is
+// right, having argued twice above that it usually is not (see record_pixels_as).
+//
+// OP_PIXELS restores with wynimg_copy_into, which REQUIRES the source and
+// destination to be the same size, and it owns exactly two handles. A
+// size-changing transform breaks both halves at once: it changes the size of EVERY
+// layer, so the record owns N buffers and N masks, and it cannot restore by
+// copying because there is nothing of the right size to copy into. There is no
+// version of OP_PIXELS that covers it - the difference is in the arithmetic, not
+// in the label, which is exactly the test record_pixels_as's note sets for
+// deserving an opcode.
+//
+// The record is one snapshot id (src/docsnap.wyn) in ONE new column plus the
+// document's size, and undo is a SWAP: the snapshot holds whichever side is not on
+// the document, so undo and redo are the identical exchange - the shape OP_SWAP
+// already uses.
+fn OP_DOC_XFORM() -> int { return 8 }
 
 // Extra columns. Parallel arrays again, one per field: `h_a`/`h_b` are buffer
 // handles for OP_PIXELS and OP_DEL_LAYER/OP_ADD_LAYER, `h_s` is the layer name,
@@ -190,18 +212,50 @@ var h_s = [""]
 var h_k = [0]
 var h_m = [0]
 
+// THE TWELFTH COLUMN: the docsnap id of a whole-document transform's parked
+// buffers, 0 for every other op.
+//
+// A COLUMN, not a reuse of h_a, for the same reason h_m was not a reuse of h_b.
+// h_a is OP_PIXELS's "before" snapshot and a raw wynimg handle that
+// `discard_above` frees with wynimg_free; a docsnap id is not a wynimg handle at
+// all, and freeing one as if it were would either be a no-op that leaked N layer
+// buffers or - if the integers happened to collide - free an unrelated live
+// buffer. The two namespaces must not share a column.
+//
+// The document SIZE rides in the columns this op does not use: h_old_i/h_new_i are
+// the width before/after and h_old_f/h_new_f the height before/after. Undo needs
+// both sides because the size is not recoverable from the buffers alone once they
+// have been swapped out - and it is `float` for the height only because that is
+// which column was free, which is stated here rather than left to look
+// intentional. Widths and heights are small integers, exactly representable.
+var h_snap = [0]
+
 fn push_ex(op: int, lid: int, of: float, nf: float, oi: int, ni: int,
            a: int, b: int, s: string, k: int) -> int {
     return push_full(op, lid, of, nf, oi, ni, a, b, s, k, 0)
 }
 
-// THE ONE WRITER. push_ex delegates here for the same reason `push` delegates to
-// push_ex: the columns were extended once before and a second writer left them at
-// DIFFERENT LENGTHS, which crashed the first structural undo of any session that
-// had only made scalar edits ("array index out of bounds: index 5, length 2").
-// Eleven columns stay the same length because exactly one function appends.
+// push_full delegates to push_all for the same reason `push` delegates to push_ex
+// and push_ex to push_full: the columns have now been extended TWICE (h_m for a
+// delete's mask, h_snap for a whole-document transform), and each time the
+// delegation chain meant the existing callers did not have to be audited. Adding a
+// parameter to the one writer and letting every other entry point pass the default
+// is a two-line change; a second append site is the bug below.
 fn push_full(op: int, lid: int, of: float, nf: float, oi: int, ni: int,
              a: int, b: int, s: string, k: int, m: int) -> int {
+    return push_all(op, lid, of, nf, oi, ni, a, b, s, k, m, 0)
+}
+
+// THE ONE WRITER - now of TWELVE columns.
+//
+// The columns were extended once before and a second writer left them at DIFFERENT
+// LENGTHS, which crashed the first structural undo of any session that had only
+// made scalar edits ("array index out of bounds: index 5, length 2"). Twelve
+// columns stay the same length because exactly one function appends. h_snap was
+// added by editing this function and nothing else, which is the property being
+// preserved: every other entry point reaches here and cannot skip a column.
+fn push_all(op: int, lid: int, of: float, nf: float, oi: int, ni: int,
+            a: int, b: int, s: string, k: int, m: int, snap: int) -> int {
     // Free any snapshot the discarded redo branch owned. Without this every
     // "paint, undo, paint again" leaks a full-canvas float buffer.
     discard_above(h_pos)
@@ -234,6 +288,16 @@ fn push_full(op: int, lid: int, of: float, nf: float, oi: int, ni: int,
         h_k.push(k)
         h_m.push(m)
     }
+    // h_snap gets its OWN length check rather than riding the h_a branch above.
+    // The two are the same length in every reachable state, but "in every
+    // reachable state" is precisely the assumption that broke last time; a column
+    // that checks its own length cannot be desynchronised by a future column being
+    // added to the wrong branch.
+    if h_len < h_snap.len() {
+        h_snap[h_len] = snap
+    } else {
+        h_snap.push(snap)
+    }
     h_len = h_len + 1
     h_pos = h_len
     return h_len
@@ -248,6 +312,14 @@ fn push_full(op: int, lid: int, of: float, nf: float, oi: int, ni: int,
 // h_m (the delete record's mask) is NEVER freed here for exactly that reason,
 // and it is why the mask needed its own column rather than a seat in h_b: h_b is
 // freed two lines below.
+//
+// OP_DOC_XFORM's SNAPSHOT IS FREED, and it is the second thing that owns buffers
+// outright. Its docsnap holds the N layer buffers and N masks that are NOT on the
+// document, so once the entry is unreachable nothing else references them - the
+// same position OP_PIXELS's two snapshots are in, and the leak is N full-canvas
+// layers per discarded step instead of 2. `docsnap.discard` frees them and marks
+// the id dead; zeroing the column afterwards means a double discard of the same
+// entry cannot reach it twice even if the log is reset after a truncation.
 fn discard_above(start: int) -> int {
     var i = start
     var n = 0
@@ -259,6 +331,15 @@ fn discard_above(start: int) -> int {
                 h_a[i] = 0
                 h_b[i] = 0
                 n = n + 1
+            }
+        }
+        if h_op[i] == OP_DOC_XFORM() {
+            if i < h_snap.len() {
+                if h_snap[i] != 0 {
+                    docsnap.discard(h_snap[i])
+                    h_snap[i] = 0
+                    n = n + 1
+                }
             }
         }
         i = i + 1
@@ -343,6 +424,52 @@ pub fn record_name(layer_id: int, old_s: string, new_s: string) -> int {
                    old_s + "\n" + new_s, 0)
 }
 
+// A WHOLE-DOCUMENT TRANSFORM. `snap` is a docsnap id holding the layer buffers and
+// masks the transform DISPLACED (the "before" side), and ow/oh are the document
+// size those buffers belong to; nw/nh are the size the document now has. History
+// takes ownership of the snapshot and frees it via docsnap.discard - through
+// `discard_above` when the redo branch is truncated, and through history_reset.
+//
+// THE CALLER MUST HAVE ALREADY INSTALLED THE NEW BUFFERS. This records a fait
+// accompli, exactly as record_pixels does: the transform ran, the layers hold the
+// new handles, the old ones are in the snapshot. Recording first and applying
+// second would leave a window where a failed apply had a log entry for something
+// that never happened, which is the one shape undo cannot recover from.
+//
+// `what` is the label, in the string column - "rotate 90", "crop", "scale" - so the
+// status bar names which document transform Undo will reverse. A record with an
+// invalid snapshot is REFUSED (0) rather than logged: an OP_DOC_XFORM whose undo
+// cannot restore anything would silently drop the pre-transform document on the
+// first Ctrl+Z, and a missing log entry is a recoverable annoyance where a
+// corrupting one is not.
+pub fn record_doc_xform(snap: int, ow: int, oh: int, nw: int, nh: int,
+                        what: string) -> int {
+    if docsnap.alive(snap) == false { return 0 }
+    if ow <= 0 or oh <= 0 or nw <= 0 or nh <= 0 { return 0 }
+    return push_all(OP_DOC_XFORM(), 0, oh.to_float(), nh.to_float(),
+                    ow, nw, 0, 0, what, 0, 0, snap)
+}
+
+// The document size the LAST undo/redo left behind, published by the applier.
+//
+// WHY THE APPLIER PUBLISHES IT INSTEAD OF THE CALLER DERIVING IT. `h_pos` has
+// already moved by the time a caller could look (undo_any decrements before
+// applying, redo_any increments after), so "the entry at h_pos" means a different
+// entry and a different END of it in each direction. A caller that gets that
+// off-by-one wrong installs the correct picture at the wrong stated size - which
+// does not fail here, it corrupts the texture on the NEXT refresh, when
+// src/ui.wyn's refresh() compares g_doc_w against the texture it already made.
+//
+// The applier has no ambiguity: it knows `use_new`. So it writes the answer, and
+// -1 means "the last undo/redo did not change the document size", which is every
+// other opcode. Reset before each apply so a stale value cannot be read as a fresh
+// one - the failure that would resize the document on an unrelated undo.
+var h_doc_w = 0 - 1
+var h_doc_h = 0 - 1
+
+pub fn doc_w_now() -> int { return h_doc_w }
+pub fn doc_h_now() -> int { return h_doc_h }
+
 // Applies the non-scalar ops. Returns 1 if it handled `i`, 0 if not (in which
 // case the scalar `apply` above owns it).
 fn apply_ex(i: int, use_new: bool) -> int {
@@ -400,14 +527,86 @@ fn apply_ex(i: int, use_new: bool) -> int {
         else { layer.set_name(lid, parts[0]) }
         return 1
     }
+    if op == OP_DOC_XFORM() {
+        // SWAP, NOT COPY - the one place in this file that does. Everywhere else
+        // undo copies pixels into the live buffer and keeps one buffer identity for
+        // the life of the layer (see the OP_PIXELS note), because the handle is also
+        // held by the texture upload path and can be a mask reference.
+        //
+        // That is impossible here and the reason is the whole opcode: the parked
+        // buffers are a DIFFERENT SIZE, so there is nothing of the right size to
+        // copy into. So the handles are exchanged, and the obligation the copy rule
+        // was protecting moves to the caller: src/ui.wyn must rebuild the texture
+        // and replace the selection after this returns, which it does by setting
+        // g_doc_w/g_doc_h (refresh() recreates the texture when those change) and
+        // calling select.init.
+        //
+        // UNDO AND REDO ARE THE IDENTICAL EXCHANGE, exactly as OP_SWAP's are: the
+        // snapshot holds whichever side is not on the document, so applying it twice
+        // returns to the start. `use_new` is therefore unused for the pixels and is
+        // read only for the SIZE, which is not symmetric.
+        var snap = 0
+        if i < h_snap.len() { snap = h_snap[i] }
+        if docsnap.alive(snap) == false {
+            // A record whose snapshot is gone cannot restore anything. Refusing to
+            // touch the layers is the only safe answer: half-swapping would leave
+            // the document with buffers of two different sizes, which
+            // wynimg_composite refuses layer by layer - a document that renders as
+            // a partial picture with no error reported anywhere.
+            return 1
+        }
+        var n = docsnap.count(snap)
+        // The snapshot's slot count is the layer count it was taken at. A store that
+        // has since gained or lost rows cannot be swapped row-for-row, and the
+        // mismatch can only come from an undo log that skipped an entry - so refuse
+        // rather than swap the rows that happen to line up.
+        if n != layer.count() { return 1 }
+        var j = 0
+        while j < n {
+            // Exchange the buffer, then the mask, one row at a time. set_buffer and
+            // set_mask both hand back the displaced handle, which is what makes each
+            // exchange two statements with no temporary that an early return could
+            // drop.
+            var parked_b = docsnap.buf_at(snap, j)
+            var live_b = layer.set_buffer(j, parked_b)
+            docsnap.set_buf(snap, j, live_b)
+
+            var parked_m = docsnap.mask_at(snap, j)
+            var live_m = layer.mask(j)
+            layer.set_mask(j, parked_m)
+            docsnap.set_mask(snap, j, live_m)
+            j = j + 1
+        }
+        // The size the document must now have, and the size the snapshot's freshly
+        // parked buffers belong to. These move together with the buffers or an undo
+        // installs the right pixels at the wrong stated size.
+        if use_new {
+            h_doc_w = h_new_i[i]
+            h_doc_h = h_new_f[i].to_int()
+            docsnap.set_dims(snap, h_old_i[i], h_old_f[i].to_int())
+        } else {
+            h_doc_w = h_old_i[i]
+            h_doc_h = h_old_f[i].to_int()
+            docsnap.set_dims(snap, h_new_i[i], h_new_f[i].to_int())
+        }
+        return 1
+    }
     return 0
 }
 
 // Undo/redo that also handle the non-scalar ops. The originals are left intact
 // - tests/test_history.wyn asserts their exact behaviour - and these are what
 // the UI calls.
+// h_doc_w/h_doc_h are CLEARED FIRST, in both, so `doc_w_now()` describes the undo
+// that just ran and never a previous one. Without this, undoing a rotate and then
+// undoing an unrelated opacity change would leave the rotate's size published, and
+// a UI that reads it after every undo would resize the document on the opacity
+// undo - which is worse than the resize never working, because it corrupts a
+// document that was correct.
 pub fn undo_any() -> int {
     if can_undo() == false { return 0 }
+    h_doc_w = 0 - 1
+    h_doc_h = 0 - 1
     h_pos = h_pos - 1
     if apply_ex(h_pos, false) == 1 { return 1 }
     return apply(h_pos, false)
@@ -415,6 +614,8 @@ pub fn undo_any() -> int {
 
 pub fn redo_any() -> int {
     if can_redo() == false { return 0 }
+    h_doc_w = 0 - 1
+    h_doc_h = 0 - 1
     var r = 0
     if apply_ex(h_pos, true) == 1 { r = 1 }
     else { r = apply(h_pos, true) }
@@ -437,6 +638,16 @@ pub fn label_any(i: int) -> string {
     if op == OP_DEL_LAYER() { return "delete layer" }
     if op == OP_SWAP() { return "reorder" }
     if op == OP_NAME() { return "rename" }
+    if op == OP_DOC_XFORM() {
+        // The operation's own name ("rotate 90", "crop", "scale"), like a named
+        // pixel op. Without a case here the status bar says nothing at all for the
+        // one command that changes the whole document - the point at which a user
+        // most needs to be told what Undo is about to do.
+        if i < h_s.len() {
+            if h_s[i] != "" { return h_s[i] }
+        }
+        return "transform document"
+    }
     return label(i)
 }
 

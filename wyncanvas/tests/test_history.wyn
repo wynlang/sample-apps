@@ -1,6 +1,7 @@
 import pixel
 import layer
 import history
+import docsnap
 
 // Call convention (v1.20.0 codegen constraint, see the wyn compiler's issue tracker):
 //   extern fns   -> called BARE          (wynimg_new)
@@ -612,4 +613,368 @@ test "visibility undo round-trips in both directions" {
     history.redo()
     assert_true(layer.visible(id))
     wynimg_free(b)
+}
+
+// ---- whole-document transform (OP_DOC_XFORM) -------------------------------
+//
+// The opcode that unblocks rotate-90 / crop / scale. Everything else in this file
+// records a scalar pair or two same-sized buffer handles; this one records a
+// SNAPSHOT of every layer buffer and mask, because a size-changing transform
+// changes every layer at once and OP_PIXELS's wynimg_copy_into restore requires the
+// size to be unchanged.
+//
+// UNDO IS A SWAP, NOT A COPY - the one place in src/history.wyn that swaps handles.
+// It has to be: the parked buffers are a DIFFERENT SIZE, so there is nothing of the
+// right size to copy into. These tests pin what that buys and what it costs.
+
+// A buffer whose pixels identify it, so a swap that returned the WRONG buffer of
+// the right size cannot pass. R carries the index, G a per-buffer tag.
+fn tagged(w: int, h: int, tag: float) -> int {
+    var b = wynimg_new(w, h)
+    var i = 0
+    while i < w * h {
+        wynimg_set(b, i * 4 + 0, i.to_float() / 64.0)
+        wynimg_set(b, i * 4 + 1, tag)
+        wynimg_set(b, i * 4 + 3, 1.0)
+        i = i + 1
+    }
+    return b
+}
+
+// Builds the snapshot a doc transform's caller would: park the layers' CURRENT
+// handles, install the transformed ones. Returns the snapshot id.
+//
+// This is deliberately the shape src/ui.wyn's apply path has to use, so these
+// tests exercise the real contract rather than a convenient one: the layers must
+// already hold the new buffers before the record is made.
+fn swap_in(nw: int, nh: int, tag: float) -> int {
+    var n = layer.count()
+    var snap = docsnap.take(n, wynimg_width(layer.buffer(0)),
+                            wynimg_height(layer.buffer(0)))
+    var j = 0
+    while j < n {
+        var fresh = tagged(nw, nh, tag + j.to_float())
+        docsnap.set_buf(snap, j, layer.set_buffer(j, fresh))
+        var old_m = layer.mask(j)
+        layer.set_mask(j, 0)
+        docsnap.set_mask(snap, j, old_m)
+        j = j + 1
+    }
+    return snap
+}
+
+test "a doc transform records one entry and labels it by name" {
+    layer.store_new()
+    history.history_new()
+    var b = tagged(4, 2, 0.5)
+    layer.add("l", b, layer.KIND_RASTER())
+
+    var snap = swap_in(2, 4, 0.9)
+    assert_true(history.record_doc_xform(snap, 4, 2, 2, 4, "rotate 90") > 0)
+    assert_eq(history.depth(), 1)
+    // THE LABEL MATTERS HERE MORE THAN ANYWHERE. Without a label_any case the
+    // status bar says nothing for the one command that changes the whole document.
+    assert_eq(history.undo_label(), "rotate 90")
+    assert_true(history.can_undo())
+    history.history_reset()
+}
+
+test "an unnamed doc transform still labels itself, rather than saying nothing" {
+    layer.store_new()
+    history.history_new()
+    layer.add("l", tagged(4, 2, 0.5), layer.KIND_RASTER())
+    var snap = swap_in(2, 4, 0.9)
+    history.record_doc_xform(snap, 4, 2, 2, 4, "")
+    assert_eq(history.undo_label(), "transform document")
+    history.history_reset()
+}
+
+test "a doc transform with a dead snapshot is REFUSED, not logged" {
+    // A logged entry whose undo can restore nothing would silently drop the
+    // pre-transform document on the first Ctrl+Z. A missing entry is a recoverable
+    // annoyance; a corrupting one is not.
+    layer.store_new()
+    history.history_new()
+    layer.add("l", tagged(4, 2, 0.5), layer.KIND_RASTER())
+    assert_eq(history.record_doc_xform(0, 4, 2, 2, 4, "rotate 90"), 0)
+    assert_eq(history.depth(), 0)
+
+    var snap = docsnap.take(1, 4, 2)
+    docsnap.discard(snap)
+    assert_eq(history.record_doc_xform(snap, 4, 2, 2, 4, "rotate 90"), 0)
+    assert_eq(history.depth(), 0)
+
+    // ...and a nonsense size is refused for the same reason: doc_w_now() would
+    // publish 0, which src/ui.wyn reads as "do not resize", so the document would
+    // keep a stale size while holding resized buffers.
+    var live = swap_in(2, 4, 0.9)
+    assert_eq(history.record_doc_xform(live, 0, 2, 2, 4, "x"), 0)
+    assert_eq(history.record_doc_xform(live, 4, 2, 2, 0, "x"), 0)
+    assert_eq(history.depth(), 0)
+    docsnap.discard(live)
+}
+
+test "undo of a doc transform restores every layer's buffer AND its size" {
+    // THE CORE PROPERTY. Two layers, so "swaps the active layer only" fails.
+    layer.store_new()
+    history.history_new()
+    var b0 = tagged(4, 2, 0.10)
+    var b1 = tagged(4, 2, 0.20)
+    layer.add("a", b0, layer.KIND_RASTER())
+    layer.add("b", b1, layer.KIND_RASTER())
+
+    var snap = swap_in(2, 4, 0.90)
+    history.record_doc_xform(snap, 4, 2, 2, 4, "rotate 90")
+    // The layers now hold the 2x4 buffers.
+    assert_eq(wynimg_width(layer.buffer(0)), 2)
+    assert_eq(wynimg_width(layer.buffer(1)), 2)
+
+    history.undo_any()
+    // Both original handles are back, identically - not a copy, the same handles.
+    assert_eq(layer.buffer(0), b0)
+    assert_eq(layer.buffer(1), b1)
+    assert_eq(wynimg_width(layer.buffer(0)), 4)
+    assert_eq(wynimg_height(layer.buffer(0)), 2)
+    // ...and the SIZE the document must now have is published. A caller that
+    // restored the pixels but not the size would install a correct picture at the
+    // wrong stated size, which corrupts the texture on the NEXT refresh.
+    assert_eq(history.doc_w_now(), 4)
+    assert_eq(history.doc_h_now(), 2)
+
+    history.redo_any()
+    assert_eq(wynimg_width(layer.buffer(0)), 2)
+    assert_eq(wynimg_height(layer.buffer(0)), 4)
+    assert_eq(history.doc_w_now(), 2)
+    assert_eq(history.doc_h_now(), 4)
+    history.history_reset()
+}
+
+test "undo/redo of a doc transform is exact, and repeatable" {
+    // The swap must be a true involution: the pixels after undo-redo-undo are the
+    // ORIGINAL pixels, bit for bit. rot90 is an exact permutation and so is the
+    // swap, so equality is the honest assertion here - a tolerance would let a
+    // lossy restore hide, which is the argument this file's header makes for
+    // opacity.
+    layer.store_new()
+    history.history_new()
+    var b = tagged(4, 2, 0.375)
+    layer.add("a", b, layer.KIND_RASTER())
+
+    var snap = swap_in(2, 4, 0.75)
+    history.record_doc_xform(snap, 4, 2, 2, 4, "rotate 90")
+
+    var cycles = 0
+    while cycles < 3 {
+        history.undo_any()
+        assert_eq(layer.buffer(0), b)
+        assert_eq(history.doc_w_now(), 4)
+        // Pixel-exact, not merely the right handle: G carries the buffer's tag.
+        assert_eq(wynimg_get(layer.buffer(0), 1), 0.375)
+        assert_eq(wynimg_get(layer.buffer(0), 4 * 4 + 0), 4.0 / 64.0)
+        history.redo_any()
+        assert_eq(wynimg_width(layer.buffer(0)), 2)
+        assert_eq(history.doc_w_now(), 2)
+        cycles = cycles + 1
+    }
+    history.history_reset()
+}
+
+test "a doc transform swaps MASKS as well as buffers" {
+    // WHY THIS IS NOT OPTIONAL. wynimg_composite REFUSES a mask whose dimensions
+    // disagree with the destination, so a resize that transformed buffers but left
+    // masks at the old size would make every masked layer silently vanish from the
+    // picture with no error reported anywhere.
+    layer.store_new()
+    history.history_new()
+    layer.add("a", tagged(4, 2, 0.1), layer.KIND_RASTER())
+    var m_old = ramp_mask(4, 2)
+    layer.set_mask(0, m_old)
+
+    var snap = swap_in(2, 4, 0.9)
+    // swap_in parked the mask and left the layer unmasked, which is what a
+    // transform that has not yet made a resized mask looks like.
+    assert_eq(layer.mask(0), 0)
+    history.record_doc_xform(snap, 4, 2, 2, 4, "rotate 90")
+
+    history.undo_any()
+    assert_eq(layer.mask(0), m_old)
+    // The coverage is the original ramp, not some other buffer of the right size.
+    assert_true(pixel.approx(wynimg_get(layer.mask(0), 3 * 4), 3.0 / 100.0, 0.00001))
+
+    history.redo_any()
+    assert_eq(layer.mask(0), 0)
+    history.history_reset()
+}
+
+test "doc_w_now is -1 after an undo that did not resize the document" {
+    // THE STALENESS BUG THIS GUARDS. If the published size were not cleared before
+    // each apply, undoing a rotate and then undoing an unrelated opacity change
+    // would leave the rotate's size published - and a UI that reads it after every
+    // undo would resize a document that was correct. That is worse than the resize
+    // never working.
+    layer.store_new()
+    history.history_new()
+    layer.add("a", tagged(4, 2, 0.1), layer.KIND_RASTER())
+
+    var snap = swap_in(2, 4, 0.9)
+    history.record_doc_xform(snap, 4, 2, 2, 4, "rotate 90")
+    layer.set_opacity(0, 0.5)
+    history.record_opacity(0, 1.0, 0.5)
+
+    history.undo_any()                       // the opacity change
+    assert_eq(history.doc_w_now(), 0 - 1)
+    assert_eq(history.doc_h_now(), 0 - 1)
+    history.undo_any()                       // the rotate
+    assert_eq(history.doc_w_now(), 4)
+    // ...and redoing the opacity change on top clears it again.
+    history.redo_any()
+    assert_eq(history.doc_w_now(), 2)
+    history.redo_any()
+    assert_eq(history.doc_w_now(), 0 - 1)
+    history.history_reset()
+}
+
+test "a doc transform refuses to swap a layer store that has changed shape" {
+    // The snapshot's slot count is the layer count it was taken at. Swapping
+    // row-for-row into a store that has gained or lost rows would leave the
+    // document holding buffers of two different sizes - which wynimg_composite
+    // refuses layer by layer, i.e. a partial picture with no error anywhere.
+    layer.store_new()
+    history.history_new()
+    layer.add("a", tagged(4, 2, 0.1), layer.KIND_RASTER())
+    var snap = swap_in(2, 4, 0.9)
+    history.record_doc_xform(snap, 4, 2, 2, 4, "rotate 90")
+
+    var extra = tagged(2, 4, 0.5)
+    layer.add("b", extra, layer.KIND_RASTER())
+    var before = layer.buffer(0)
+    history.undo_any()
+    // Refused: the buffers are untouched and no size is published.
+    assert_eq(layer.buffer(0), before)
+    assert_eq(history.doc_w_now(), 0 - 1)
+    history.history_reset()
+    wynimg_free(extra)
+}
+
+test "truncating the redo branch frees a doc transform's whole snapshot" {
+    // THE LEAK THIS GUARDS is the entire document per discarded step - one full
+    // float32 layer per row, 16 bytes a pixel - not the two buffers an OP_PIXELS
+    // leak costs. wynimg_free of a stale handle is a deliberate no-op, so a
+    // discard_above that missed OP_DOC_XFORM would look identical from outside;
+    // wynimg_alive is what makes it observable.
+    layer.store_new()
+    history.history_new()
+    layer.add("a", tagged(4, 2, 0.1), layer.KIND_RASTER())
+    layer.add("b", tagged(4, 2, 0.2), layer.KIND_RASTER())
+
+    var snap = swap_in(2, 4, 0.9)
+    history.record_doc_xform(snap, 4, 2, 2, 4, "rotate 90")
+
+    // Undo first, so there IS a redo branch to truncate. This also moves the
+    // originals back onto the layers and parks the TRANSFORMED pair - so the
+    // handles read out of the snapshot must be read HERE, after the swap, not
+    // before it. (Reading them before the undo is a real mistake and this test
+    // caught it: it then asserts that the live layer buffers were freed.)
+    history.undo_any()
+    var parked0 = docsnap.buf_at(snap, 0)
+    var parked1 = docsnap.buf_at(snap, 1)
+    var on_layer0 = layer.buffer(0)
+    var on_layer1 = layer.buffer(1)
+    assert_eq(wynimg_alive(parked0), 1)
+    // The two sides really are different buffers - otherwise "freed the parked
+    // side, kept the live side" would be vacuous.
+    assert_true(parked0 != on_layer0)
+
+    // Record something else: the doc transform is now above h_pos and its snapshot
+    // is unreachable, so push_all's discard_above(h_pos) must free it.
+    layer.set_opacity(0, 0.5)
+    history.record_opacity(0, 1.0, 0.5)
+
+    // The entry is gone...
+    assert_eq(history.depth(), 1)
+    // ...and so is every buffer it owned - both rows, not just the first.
+    assert_eq(wynimg_alive(parked0), 0)
+    assert_eq(wynimg_alive(parked1), 0)
+    assert_false(docsnap.alive(snap))
+    // ...while the buffers that are ON THE DOCUMENT are untouched. A discard that
+    // freed the wrong side of the swap would pass every assertion above and leave
+    // the editor compositing freed memory.
+    assert_eq(wynimg_alive(on_layer0), 1)
+    assert_eq(wynimg_alive(on_layer1), 1)
+    history.history_reset()
+}
+
+test "history_reset frees a doc transform's snapshot too" {
+    // history_reset calls discard_above(0), so this is the same free path - but it
+    // is the path that runs when the DOCUMENT is replaced (opening a file), where
+    // the log is the only remaining reference to every parked buffer. Missing it
+    // strands the whole outgoing document.
+    layer.store_new()
+    history.history_new()
+    layer.add("a", tagged(4, 2, 0.1), layer.KIND_RASTER())
+    var snap = swap_in(2, 4, 0.9)
+    history.record_doc_xform(snap, 4, 2, 2, 4, "rotate 90")
+    var parked = docsnap.buf_at(snap, 0)
+    assert_eq(wynimg_alive(parked), 1)
+
+    history.history_reset()
+    assert_eq(history.depth(), 0)
+    assert_eq(wynimg_alive(parked), 0)
+    assert_false(docsnap.alive(snap))
+}
+
+test "the twelfth column stays in step with the other eleven" {
+    // THE INVARIANT h_snap WAS ADDED UNDER, and the second time this file has had
+    // to assert it: one writer, so every column is the same length by construction.
+    // The measured failure it guards was a second append site that wrote only some
+    // columns - a session of one kind of record advanced h_len past another
+    // column's length and the first read of that column panicked with "array index
+    // out of bounds". Scalar records, then a structural one, then a doc transform
+    // is exactly that shape with h_snap as the newest column to fall behind.
+    layer.store_new()
+    history.history_new()
+    layer.add("a", tagged(4, 2, 0.1), layer.KIND_RASTER())
+
+    history.record_opacity(0, 1.0, 0.9)
+    history.record_blend(0, 0, 3)
+    history.record_visible(0, true, false)
+    history.record_name(0, "a", "b")
+    assert_eq(history.depth(), 4)
+
+    // Now a doc transform, which reads h_snap at index 4.
+    var snap = swap_in(2, 4, 0.9)
+    history.record_doc_xform(snap, 4, 2, 2, 4, "rotate 90")
+    assert_eq(history.depth(), 5)
+    history.undo_any()
+    assert_eq(history.doc_w_now(), 4)
+    assert_eq(wynimg_width(layer.buffer(0)), 4)
+
+    // ...and the four scalar entries still undo correctly underneath it.
+    history.undo_any()
+    assert_eq(layer.name(0), "a")
+    history.undo_any()
+    assert_true(layer.visible(0))
+    history.undo_any()
+    assert_eq(layer.blend_mode(0), 0)
+    history.undo_any()
+    assert_eq(layer.opacity(0), 1.0)
+    assert_false(history.can_undo())
+    history.history_reset()
+}
+
+test "a doc transform undoes correctly on a document with no mask anywhere" {
+    // The common case, and the one the mask column must not disturb: an unmasked
+    // layer must come back unmasked rather than with a stale handle from the
+    // snapshot's zero-initialised mask slot.
+    layer.store_new()
+    history.history_new()
+    layer.add("a", tagged(4, 2, 0.1), layer.KIND_RASTER())
+    assert_eq(layer.mask(0), 0)
+    var snap = swap_in(2, 4, 0.9)
+    history.record_doc_xform(snap, 4, 2, 2, 4, "scale")
+    history.undo_any()
+    assert_eq(layer.mask(0), 0)
+    history.redo_any()
+    assert_eq(layer.mask(0), 0)
+    history.history_reset()
 }
