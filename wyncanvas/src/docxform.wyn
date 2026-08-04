@@ -1,0 +1,333 @@
+// docxform - applies a size-changing transform to the WHOLE DOCUMENT, atomically,
+// and records one undoable history entry for it.
+//
+// This is the layer between src/xform.wyn (which transforms ONE buffer and is
+// 1074 lines of tested engine) and src/ui.wyn (which owns the window). It exists
+// because "rotate the document 90 degrees" is not "rotate the active layer": it is
+// N buffers plus N masks plus the document's stated size, all of which must move
+// together or not at all.
+//
+// ---------------------------------------------------------------------------
+// ALL OR NOTHING, AND THAT IS THE WHOLE REASON THIS IS A MODULE.
+//
+// Transforming layer 0, then layer 1, then failing on layer 2 leaves a document
+// whose rows are two different sizes. That is not a visibly broken document - it
+// is an INVISIBLY broken one: wynimg_composite REFUSES (returns 0) when its source
+// and destination disagree, layer by layer, so the picture comes back missing some
+// layers with no error reported anywhere. So every layer is transformed into a
+// fresh buffer FIRST, into a snapshot, and only when all of them have succeeded is
+// anything installed. A failure part-way frees what it made and the document is
+// untouched.
+//
+// ---------------------------------------------------------------------------
+// A MASK IS NOT A PICTURE, AND SCALING IT AS ONE DESTROYS IT.
+//
+// This is the sharp edge of the whole feature, and it was measured rather than
+// reasoned. A layer mask (and a selection) stores linear coverage in the R channel
+// and leaves ALPHA AT 0 - that is src/select.wyn's convention and what
+// wynimg_composite reads. csrc/wynimg_xform.c's `store_px` clamps every resampled
+// pixel into the valid premultiplied domain, which means colour into [0, alpha].
+// With alpha 0 that clamps R to 0. Measured directly: a fully-covered 4x4 mask
+// scaled to 8x8 with a bilinear kernel comes back with R = 0.0 EVERYWHERE - the
+// mask is silently erased, so the layer it was masking becomes fully visible.
+//
+// (The exact paths - rot90, crop, canvas - permute or copy whole pixels and never
+// reach store_px, so they carry a mask through untouched. Only the RESAMPLING
+// paths are affected. That is why scale is the only op here that needs the
+// treatment below, and why getting rot90 working did not require discovering this.)
+//
+// THE FIX IS TO MAKE THE MASK A LEGAL PREMULTIPLIED PIXEL. Coverage is replicated
+// into all four channels before resampling and read back out of R afterwards. With
+// r == g == b == a the premultiplied constraint (colour <= alpha) holds with
+// EQUALITY, so the clamp is a no-op; and resampling all four channels with the
+// same weights keeps them equal, so R comes back as the correctly filtered
+// coverage. Verified: the same 4x4 -> 8x8 bilinear scale that gave 0.0 gives the
+// expected 1.0 / 0.75 / 0.25 / 0.0 ramp across the edge.
+//
+// This also happens to be the honest reading of what coverage IS - an alpha-like
+// quantity - so it is not a trick played on the resampler.
+//
+// ---------------------------------------------------------------------------
+// WHAT THIS MODULE DOES NOT DO: it does not touch the texture, the view transform
+// or the selection. Those are src/ui.wyn's, because they are window state - see
+// the ORDER note on `apply` for the sequence the caller owes.
+//
+// CALL CONVENTION: every function here is a `pub fn`, so importers call them
+// QUALIFIED (`docxform.rot_cw()`). Externs reach C as `wynimg::free` - the `::`
+// form - for the reason src/render.wyn's header records.
+
+import pixel
+import layer
+import history
+import docsnap
+import xform
+
+// ---- the ops ---------------------------------------------------------------
+//
+// The integer is this module's own contract with its callers, not an FFI one.
+// Functions rather than constants, matching every other enum in this project.
+pub fn OP_ROT_CW() -> int  { return 0 }
+pub fn OP_ROT_CCW() -> int { return 1 }
+pub fn OP_CROP() -> int    { return 2 }
+pub fn OP_SCALE() -> int   { return 3 }
+
+pub fn op_label(op: int) -> string {
+    if op == 0 { return "rotate 90 CW" }
+    if op == 1 { return "rotate 90 CCW" }
+    if op == 2 { return "crop" }
+    if op == 3 { return "scale" }
+    return "transform document"
+}
+
+// The document size an op produces from a `w` x `h` document. Split out from the
+// apply path so a caller can size a dialog, and so the arithmetic is testable
+// without allocating a document.
+//
+// Two functions rather than one returning a pair: a `pub fn` cannot return a tuple
+// across a module boundary here (see src/xform.wyn's mat_mul note).
+pub fn out_w(op: int, w: int, h: int, aw: int, ah: int) -> int {
+    if op == OP_ROT_CW() or op == OP_ROT_CCW() { return h }
+    if op == OP_CROP() or op == OP_SCALE() { return aw }
+    return w
+}
+
+pub fn out_h(op: int, w: int, h: int, aw: int, ah: int) -> int {
+    if op == OP_ROT_CW() or op == OP_ROT_CCW() { return w }
+    if op == OP_CROP() or op == OP_SCALE() { return ah }
+    return h
+}
+
+// ---- one buffer ------------------------------------------------------------
+
+// Transforms ONE picture buffer. `x`/`y`/`aw`/`ah` are the crop rect for OP_CROP
+// and the target size for OP_SCALE; both are ignored by the rotations.
+fn xf_pixels(src: int, op: int, x: int, y: int, aw: int, ah: int,
+             kern: int) -> int {
+    if op == OP_ROT_CW() { return xform.rot_cw(src) }
+    if op == OP_ROT_CCW() { return xform.rot_ccw(src) }
+    if op == OP_CROP() { return xform.crop(src, x, y, aw, ah) }
+    if op == OP_SCALE() { return xform.scale(src, aw, ah, kern) }
+    return 0
+}
+
+// Transforms ONE COVERAGE buffer - a layer mask - preserving coverage through a
+// resampling kernel. See the header: coverage lives in R with alpha 0, and the
+// resampler's premultiplied clamp erases exactly that.
+//
+// The exact ops (rot90, crop) do not resample, so they are handed straight to
+// xf_pixels and are bit-exact. Only OP_SCALE takes the replicate-resample-extract
+// path, which is also why this function is not simply "xf_pixels with a flag":
+// the replication is a cost (one full-size temporary) that the exact paths must
+// not pay.
+fn xf_coverage(src: int, op: int, x: int, y: int, aw: int, ah: int,
+               kern: int) -> int {
+    if op != OP_SCALE() { return xf_pixels(src, op, x, y, aw, ah, kern) }
+
+    var w = wynimg::width(src)
+    var h = wynimg::height(src)
+    if w <= 0 or h <= 0 { return 0 }
+
+    // Replicate coverage into all four channels, so the resampler's clamp
+    // (colour <= alpha) holds with equality and cannot bite.
+    var rep = wynimg::new(w, h)
+    if rep == 0 { return 0 }
+    var i = 0
+    var n = w * h
+    while i < n {
+        var c = wynimg::get(src, i * 4 + 0)
+        // Clamped on the way IN, because a coverage value above 1 (trivially
+        // producible by wynimg_set) would otherwise be replicated into alpha and
+        // resampled as an out-of-range premultiplied pixel - the class of bug
+        // csrc/wynimg_blend.c records measuring, where coverage 4.0 turned a grey
+        // into pure white on a save/reload round trip.
+        if c < 0.0 { c = 0.0 }
+        if c > 1.0 { c = 1.0 }
+        wynimg::set(rep, i * 4 + 0, c)
+        wynimg::set(rep, i * 4 + 1, c)
+        wynimg::set(rep, i * 4 + 2, c)
+        wynimg::set(rep, i * 4 + 3, c)
+        i = i + 1
+    }
+
+    var scaled = xform.scale(rep, aw, ah, kern)
+    wynimg::free(rep)
+    if scaled == 0 { return 0 }
+
+    // Extract back to the R-channel convention. The other three channels are left
+    // as they are rather than zeroed: wynimg_composite and every consumer read R
+    // only, and a mask is never composited AS a picture - so zeroing them would be
+    // three writes per pixel for no observable difference.
+    return scaled
+}
+
+// ---- the document ----------------------------------------------------------
+
+// Applies `op` to every layer and records ONE undoable history entry.
+//
+// Returns the snapshot id on success (a positive int), or 0 if nothing was
+// changed. On 0 the document is EXACTLY as it was - no layer holds a new buffer,
+// nothing was freed that the document still needs, and no history entry exists.
+//
+// THE ORDER, WHICH IS THE FUNCTION:
+//
+// 1. Compute the output size and refuse anything degenerate BEFORE allocating.
+// 2. Transform every layer's buffer and mask into a snapshot. Nothing is installed
+//    yet, so an out-of-memory on the last row is recoverable.
+// 3. Install: swap each fresh handle onto the layer and park the displaced one in
+//    the snapshot's slot. Now the snapshot holds the BEFORE side, which is exactly
+//    what the history record wants.
+// 4. Record. If the record is refused the swap is REVERSED rather than left in
+//    place: an unrecorded document transform is a change the user cannot undo, and
+//    silently keeping it is how a session loses work it thought was safe.
+//
+// WHAT THE CALLER STILL OWES, and it is not optional - src/ui.wyn's `refresh`
+// recreates the texture when g_doc_w/g_doc_h change, so:
+//    * set the document size to out_w/out_h (this is what rebuilds the texture);
+//    * view.set_doc + view.zoom_fit, so the viewport maps the new size;
+//    * select.init(w, h) - a selection is document-sized coverage and CANNOT
+//      survive a size change; it is replaced, never clipped;
+//    * the marching-ants texture, which is document-sized too.
+// That list is the open_doc precedent, and this module deliberately does not do it:
+// none of it is document state, and a module that opened a window to rotate an
+// image could not be tested headlessly.
+pub fn apply(op: int, x: int, y: int, aw: int, ah: int, kern: int,
+             doc_w: int, doc_h: int) -> int {
+    if doc_w <= 0 or doc_h <= 0 { return 0 }
+    var nw = out_w(op, doc_w, doc_h, aw, ah)
+    var nh = out_h(op, doc_w, doc_h, aw, ah)
+    // A zero or negative output is refused rather than clamped to 1. Clamping
+    // would turn "crop to an empty marquee" into a 1x1 document, which is a
+    // destroyed document that looks like a working command.
+    if nw <= 0 or nh <= 0 { return 0 }
+    var n = layer.count()
+    if n <= 0 { return 0 }
+
+    // The snapshot starts out holding the FRESH buffers, and is re-purposed to hold
+    // the displaced ones in step 3. One allocation, two roles, in that order - so
+    // an abort in step 2 discards exactly what step 2 made.
+    var snap = docsnap.take(n, doc_w, doc_h)
+    if snap == 0 { return 0 }
+
+    var i = 0
+    var ok = true
+    while i < n {
+        var src = layer.buffer(i)
+        if src == 0 {
+            // A GROUP has no buffer of its own (render.compose composites its
+            // children into a fresh accumulator), so there is nothing to transform
+            // and 0 is the correct fresh handle. Skipping it is not a failure -
+            // treating it as one would make any document containing a group
+            // untransformable.
+            i = i + 1
+        } else {
+            var fresh = xf_pixels(src, op, x, y, aw, ah, kern)
+            if fresh == 0 {
+                ok = false
+                i = n
+            } else {
+                docsnap.set_buf(snap, i, fresh)
+                var m = layer.mask(i)
+                if m != 0 {
+                    var fm = xf_coverage(m, op, x, y, aw, ah, kern)
+                    if fm == 0 {
+                        ok = false
+                        i = n
+                    } else {
+                        docsnap.set_mask(snap, i, fm)
+                        i = i + 1
+                    }
+                } else {
+                    i = i + 1
+                }
+            }
+        }
+    }
+
+    if ok == false {
+        // Nothing was installed, so the snapshot holds only buffers this call
+        // created and discarding it frees exactly those. The document is untouched.
+        docsnap.discard(snap)
+        return 0
+    }
+
+    // INSTALL. Every slot's fresh handle goes onto the layer and the displaced one
+    // takes its place in the slot, so afterwards the snapshot holds the BEFORE side.
+    // A group's slot holds 0 on both sides, which set_buffer refuses to install
+    // (`valid` passes but the row keeps its 0) - correct either way, because 0 is
+    // what a group's buffer must be.
+    var j = 0
+    while j < n {
+        var fresh_b = docsnap.buf_at(snap, j)
+        if fresh_b != 0 {
+            docsnap.set_buf(snap, j, layer.set_buffer(j, fresh_b))
+        }
+        var fresh_m = docsnap.mask_at(snap, j)
+        var old_m = layer.mask(j)
+        // An unmasked layer keeps mask 0 on both sides; a masked one exchanges.
+        if old_m != 0 {
+            layer.set_mask(j, fresh_m)
+            docsnap.set_mask(snap, j, old_m)
+        }
+        j = j + 1
+    }
+    docsnap.set_dims(snap, doc_w, doc_h)
+
+    if history.record_doc_xform(snap, doc_w, doc_h, nw, nh, op_label(op)) == 0 {
+        // REVERSE THE SWAP. An unrecorded document transform is a change the user
+        // cannot undo; leaving it on screen is how a session loses work it thought
+        // was safe. This restores the before side and discards the after side, so
+        // the outcome is identical to the step-2 abort above.
+        var k = 0
+        while k < n {
+            var before_b = docsnap.buf_at(snap, k)
+            if before_b != 0 {
+                docsnap.set_buf(snap, k, layer.set_buffer(k, before_b))
+            }
+            var before_m = docsnap.mask_at(snap, k)
+            if layer.mask(k) != 0 {
+                docsnap.set_mask(snap, k, layer.mask(k))
+                layer.set_mask(k, before_m)
+            }
+            k = k + 1
+        }
+        docsnap.discard(snap)
+        return 0
+    }
+    return snap
+}
+
+// ---- named entry points ----------------------------------------------------
+//
+// The four commands, so a caller does not have to remember which of x/y/aw/ah each
+// op reads. Each returns the snapshot id, or 0 if the document is unchanged.
+
+pub fn rot_cw(doc_w: int, doc_h: int) -> int {
+    return apply(OP_ROT_CW(), 0, 0, 0, 0, xform.kern_nearest(), doc_w, doc_h)
+}
+
+pub fn rot_ccw(doc_w: int, doc_h: int) -> int {
+    return apply(OP_ROT_CCW(), 0, 0, 0, 0, xform.kern_nearest(), doc_w, doc_h)
+}
+
+// Crop to a rectangle in DOCUMENT coordinates. A rect hanging off the edge is not
+// an error - the parts with no source come back transparent - because refusing
+// would make "crop to the marquee" fail whenever the marquee was dragged past the
+// border, which is most of the time. See src/xform.wyn's `crop`.
+pub fn crop(doc_w: int, doc_h: int, x: int, y: int, w: int, h: int) -> int {
+    return apply(OP_CROP(), x, y, w, h, xform.kern_nearest(), doc_w, doc_h)
+}
+
+// Resample the document to exactly w x h.
+//
+// BILINEAR IS THE DEFAULT, not bicubic: it has no negative lobes, so it cannot
+// overshoot, and the antialiasing-on-downscale widening in csrc/wynimg_xform.c
+// makes it correct for reduction too. Bicubic is sharper and is the right choice
+// for a photo, but it rings at a hard step - and a document scale is applied to
+// every layer including flat-colour ones, where ringing is the most visible.
+pub fn scale(doc_w: int, doc_h: int, w: int, h: int) -> int {
+    return apply(OP_SCALE(), 0, 0, w, h, xform.kern_bilinear(), doc_w, doc_h)
+}
+
+pub fn scale_kern(doc_w: int, doc_h: int, w: int, h: int, kern: int) -> int {
+    return apply(OP_SCALE(), 0, 0, w, h, kern, doc_w, doc_h)
+}
