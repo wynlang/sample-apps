@@ -464,6 +464,73 @@ check "a truncated wync is reported, not guessed" 'cannot open /tmp/wc_verify_tr
 check "and the open document survives it"         'layers=2'                              "$out"
 
 # ---------------------------------------------------------------------------
+# 15. WHOLE-DOCUMENT TRANSFORMS: rotate 90 CW/CCW, crop to selection, scale.
+#
+# These were unreachable from the editor until OP_DOC_XFORM existed, because the
+# OP_PIXELS undo restores with wynimg_copy_into (which requires the size to be
+# unchanged) and a texture cannot be resized under its handle.
+#
+# EVERY CHECK READS ALL FOUR SIZES, which is the point of the `doc` action:
+# the document's, the SELECTION's, the active layer's BUFFER, and what the VIEW is
+# fitting. g_doc_w alone would assert the easiest quarter. A selection left at the
+# old size makes every later clip read out of bounds; a layer buffer left at the old
+# size makes wynimg_composite refuse that layer silently; a stale view puts the
+# pointer in the wrong place. All three are invisible in a screenshot, which is why
+# they are asserted here and not left to section 13.
+#
+# The TEXTURE is proved separately, by section 2's `winpx` checks: it is created by
+# refresh() inside the frame loop, so a script (which runs before the first frame)
+# legitimately sees 0x0 and asserting it would test the harness.
+# ---------------------------------------------------------------------------
+
+# Rotate 90 CW then CCW on a NON-SQUARE document, so the w/h swap is observable -
+# on the default 256x256 canvas a rotation that did nothing at all would pass.
+# The crop establishes the non-square document, so it is checked on the way.
+out=$(run 'active:0,tool:mrect,marquee:40:40:120:100,doc,key:y,doc,key:n,doc,key:p,doc')
+check "crop to the marquee resizes the document"   'msg=crop -> 80x60'                "$out"
+check "crop moves doc, selection, buffer and view"      'doc=80x60 sel=80x60 buf=80x60 vfit=80x60'    "$out"
+check "rotate 90 CW swaps w and h"                 'doc=60x80 sel=60x80 buf=60x80 vfit=60x80'    "$out"
+check "rotate 90 CCW swaps them back"              'doc=80x60 sel=80x60 buf=80x60 vfit=80x60'    "$out"
+check "and each is one undo entry, named"          'hist=3 undo=rotate 90 CCW'        "$out"
+
+# The crop rect is the selection's bbox, which is INCLUSIVE at both ends - so a
+# marquee from 40,40 to 120,100 is 80x60, not 81x61 or 79x59. A one-pixel error here
+# looks like a rounding artefact rather than a bug, which is why it gets its own check.
+out=$(run 'active:0,tool:mrect,marquee:10:20:30:50,key:y,doc')
+check "the crop rect is the bbox, inclusive"       'doc=20x30 sel=20x30 buf=20x30 vfit=20x30'    "$out"
+
+# Crop with NO selection must refuse and change nothing: cropping to an empty
+# selection has no meaningful answer, and a 0-sized document is a destroyed one.
+out=$(run 'active:0,key:y,doc')
+check "crop with no selection is refused"          'msg=select an area to crop to'    "$out"
+check "and the document is untouched"              'doc=256x256'                      "$out"
+check "and nothing was recorded"                   'hist=0'                           "$out"
+
+# UNDO of a document transform must restore the SIZE as well as the pixels. This is
+# the check that would fail if on_undo did not call sync_doc_size - the pixels would
+# come back at the old size while the document still claimed the new one.
+out=$(run 'active:0,tool:mrect,marquee:40:40:120:100,key:y,key:n,undo,doc,undo,doc,redo,doc')
+check "undo of a rotate restores the crop's size"  'doc=80x60 sel=80x60 buf=80x60 vfit=80x60'    "$out"
+check "undo of the crop restores the original"     'doc=256x256 sel=256x256 buf=256x256 vfit=256x256' "$out"
+check "redo re-applies the crop's size"            'doc=80x60 sel=80x60 buf=80x60 vfit=80x60'    "$out"
+
+# Scale, both directions, on the same key with shift for "larger". NOT on Cmd+- /
+# Cmd+= (zoom), because zoom is non-destructive and a document scale resamples every
+# layer - one modifier apart would be a footgun.
+out=$(run 'key:u,doc,key:u+shift,doc,undo,doc,undo,doc')
+check "scale halves the document"                  'msg=scale -> 128x128'             "$out"
+check "and moves all four sizes"                  'doc=128x128 sel=128x128 buf=128x128 vfit=128x128' "$out"
+check "shift+scale doubles it"                     'msg=scale -> 256x256'             "$out"
+check "undo of a scale restores the halved size"   'doc=128x128 sel=128x128 buf=128x128 vfit=128x128' "$out"
+
+# The DIMENSION-PRESERVING transforms must still work and must still be OP_PIXELS -
+# i.e. they must NOT resize anything. A flip that went through the document path
+# would be a needless full-document snapshot per flip.
+out=$(run 'active:0,key:j,doc,key:r,doc')
+check "flip-h does not resize the document"        'msg=flip-h on layer'              "$out"
+check "and rotate180 does not either"              'doc=256x256 sel=256x256 buf=256x256'          "$out"
+
+# ---------------------------------------------------------------------------
 # 13. A screenshot, because no assertion can say the UI LOOKED right.
 # ---------------------------------------------------------------------------
 rm -f /tmp/wc_verify.bmp

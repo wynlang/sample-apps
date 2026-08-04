@@ -102,6 +102,7 @@ import project
 import filter
 import text
 import xform
+import docxform
 
 // Bridge from a wynimg buffer handle to a GPU texture. Implemented in
 // csrc/wynimg_tex.c, because resolving a handle to its `float*` requires
@@ -518,6 +519,11 @@ fn on_undo(id: int) {
     var what = history.undo_label()
     history.undo_any()
     clamp_active()
+    // A document transform's undo changes the document SIZE, so the texture, the
+    // view and the selection all have to follow. Unconditional because
+    // sync_doc_size is a no-op for every other op - which is what keeps this from
+    // becoming "on_undo has to know which opcode it undid".
+    sync_doc_size()
     g_msg = "undo " + what
     g_dirty = 1
 }
@@ -530,6 +536,7 @@ fn on_redo(id: int) {
     var what = history.redo_label()
     history.redo_any()
     clamp_active()
+    sync_doc_size()
     g_msg = "redo " + what
     g_dirty = 1
 }
@@ -966,10 +973,151 @@ fn run_filter(what: string) {
     g_dirty = 1
 }
 
+// ---- whole-document transforms ---------------------------------------------
+//
+// The size-CHANGING transforms: rotate 90 CW/CCW, crop to the selection, scale.
+// These used to be unreachable from the editor - written and tested in
+// src/xform.wyn, bound to nothing - because the OP_PIXELS undo restores with
+// wynimg_copy_into, which requires the size to be unchanged, and a texture cannot
+// be resized under its handle. They now go through src/docxform.wyn, which
+// transforms every layer and mask atomically and records one OP_DOC_XFORM entry.
+//
+// THIS FUNCTION IS THE WINDOW HALF, AND IT IS THE HALF THAT COULD CORRUPT THINGS.
+// docxform owns the document; four pieces of state here are document-SIZED and
+// every one of them is now stale:
+//
+//   1. g_doc_w / g_doc_h. Setting these is what makes `refresh` recreate the
+//      texture (it compares them against g_tex_w/g_tex_h), so this is not
+//      bookkeeping - it IS the texture rebuild, and skipping it would blit the new
+//      composite through a texture of the old size.
+//   2. The view transform, which maps document to window.
+//   3. The SELECTION, which is document-sized coverage and CANNOT survive a size
+//      change - it is replaced, never clipped. select.init does that.
+//   4. The marching-ants texture and its coverage buffer, both document-sized.
+//      paint_ants reallocates them when it notices g_ants_w/h disagree, so
+//      nothing is needed here beyond letting it notice.
+//
+// That list is the `open_wync` precedent - the other place the document's size
+// changes underneath the window - and the reason this is one function rather than
+// four call sites is that the four items must move together. A caller that
+// remembered three of them leaves a working-looking editor with a selection that
+// indexes out of bounds.
+//
+// UNDO GOES THROUGH THE SAME FUNCTION, via `sync_doc_size` below, because an undo
+// changes the size in exactly the same way and owes exactly the same four items.
+fn apply_doc_size(nw: int, nh: int) {
+    if nw <= 0 { return }
+    if nh <= 0 { return }
+    g_doc_w = nw
+    g_doc_h = nh
+    // refresh() recreates the texture from these two; the ants texture is
+    // reallocated lazily by paint_ants for the same reason.
+    view.set_doc(nw, nh)
+    view.zoom_fit()
+    // The selection is replaced, not clipped. A coverage buffer that disagrees with
+    // the document makes every later clip read out of bounds, and there is no
+    // meaningful "same selection" after a rotate anyway.
+    select.init(nw, nh)
+    clamp_active()
+    g_dirty = 1
+}
+
+// Called after every undo/redo. history.doc_w_now() is -1 unless the entry that was
+// just applied was a document transform, so this is a no-op for every other op -
+// which is the property that lets on_undo/on_redo call it unconditionally instead of
+// asking what they undid.
+fn sync_doc_size() {
+    var nw = history.doc_w_now()
+    var nh = history.doc_h_now()
+    if nw <= 0 { return }
+    if nh <= 0 { return }
+    if nw == g_doc_w and nh == g_doc_h { return }
+    apply_doc_size(nw, nh)
+}
+
+// One of "rot90-cw", "rot90-ccw", "crop", "scale-half", "scale-double".
+//
+// A STROKE IN PROGRESS IS CANCELLED FIRST. paint's base clone and coverage buffer
+// are full-canvas and sized to the OLD document, and wynimg_stroke_apply refuses a
+// size mismatch - so a stroke that survived a rotate would silently stop painting
+// until the user released and pressed again. Cancelling is honest about it.
+fn run_doc_transform(what: string) {
+    if g_doc_w <= 0 or g_doc_h <= 0 { g_msg = "no document"  return }
+    if layer.count() <= 0 { g_msg = "no layers"  return }
+    if paint.stroke_active() { paint.cancel() }
+
+    var snap = 0
+    if what == "rot90-cw"  { snap = docxform.doc_rot_cw(g_doc_w, g_doc_h) }
+    if what == "rot90-ccw" { snap = docxform.doc_rot_ccw(g_doc_w, g_doc_h) }
+    if what == "crop" {
+        // CROP TO THE SELECTION'S BOUNDING BOX, and the bbox is the honest answer
+        // rather than a compromise: a crop produces a RECTANGULAR document, so an
+        // ellipse or lasso selection has no non-rectangular crop to give. The
+        // pixels outside the shape but inside the box are KEPT, which is what every
+        // editor does and what a user dragging a marquee expects.
+        if select.is_empty() {
+            g_msg = "select an area to crop to"
+            return
+        }
+        var x0 = select.bbox_x0()
+        var y0 = select.bbox_y0()
+        // The bbox is INCLUSIVE at both ends (see src/select.wyn), so the width is
+        // x1 - x0 + 1. Getting this wrong loses the selection's last row and column
+        // - a one-pixel error that looks like a rounding artefact rather than a bug.
+        var cw = select.bbox_x1() - x0 + 1
+        var ch = select.bbox_y1() - y0 + 1
+        if cw <= 0 or ch <= 0 {
+            g_msg = "selection is empty"
+            return
+        }
+        snap = docxform.doc_crop(g_doc_w, g_doc_h, x0, y0, cw, ch)
+    }
+    if what == "scale-half" {
+        // Halving with integer division, floored at 1: a 1px document must stay a
+        // real document rather than becoming a refused 0-wide one.
+        var hw = g_doc_w / 2
+        var hh = g_doc_h / 2
+        if hw < 1 { hw = 1 }
+        if hh < 1 { hh = 1 }
+        snap = docxform.doc_scale(g_doc_w, g_doc_h, hw, hh)
+    }
+    if what == "scale-double" {
+        snap = docxform.doc_scale(g_doc_w, g_doc_h, g_doc_w * 2, g_doc_h * 2)
+    }
+
+    if snap == 0 {
+        // docxform guarantees the document is EXACTLY as it was on failure, so
+        // there is nothing to undo here and nothing to repair.
+        g_msg = what + " refused"
+        return
+    }
+
+    // The transform is applied and recorded; now the window catches up. The new
+    // size comes from the same arithmetic docxform used, read off the layer that
+    // now holds it rather than recomputed - so the two cannot disagree.
+    apply_doc_size(wynimg_width(layer.buffer(top_raster())),
+                   wynimg_height(layer.buffer(top_raster())))
+    g_msg = history.undo_label() + " -> ${g_doc_w}x${g_doc_h}"
+}
+
+// The index of a layer that HAS a buffer, for reading the post-transform size off.
+//
+// Not simply layer 0: a GROUP has no buffer of its own, so a document whose bottom
+// row is a group would read width 0 from it and apply_doc_size would refuse - the
+// transform would work and the window would never learn about it.
+fn top_raster() -> int {
+    var i = 0
+    while i < layer.count() {
+        if layer.buffer(i) != 0 { return i }
+        i = i + 1
+    }
+    return 0
+}
+
 // A dimension-PRESERVING transform (flip H/V, rotate 180). These slot into the same
 // OP_PIXELS undo the filters use, because the result is the same size as the source and
-// so wynimg_copy_into can restore it. Size-CHANGING transforms (rot90, crop, scale) need
-// a whole-document op and are a separate, larger change - not faked here.
+// so wynimg_copy_into can restore it. The size-CHANGING transforms are above, in
+// run_doc_transform, and go through a whole-document history op instead.
 fn run_transform(what: string) {
     if g_active < 0 { g_msg = "no active layer"  return }
     var buf = layer.buffer(g_active)
@@ -1237,12 +1385,33 @@ fn handle_shortcut(key: int, mod: int) {
     if key == gui.SCANCODE_T { on_tool_text(0) return }
 
     // Transforms on bare letters (R/J/K were unbound). Rotate 180 and the two flips are
-    // the dimension-preserving transforms that fit the OP_PIXELS undo; 90-degree rotate,
-    // crop and scale change the document size and need a whole-document op, so they are
-    // not bound yet rather than bound to something that would corrupt the texture handle.
+    // the dimension-preserving transforms that fit the OP_PIXELS undo.
     if key == gui.SCANCODE_R { run_transform("rotate180") return }
     if key == gui.SCANCODE_J { run_transform("flip-h") return }
     if key == gui.SCANCODE_K { run_transform("flip-v") return }
+
+    // The SIZE-CHANGING transforms, which now have a whole-document undo
+    // (OP_DOC_XFORM) and so are reachable at last.
+    //
+    // ON THE LETTERS. These are document commands, so by this file's own modifier
+    // rule they belong on Cmd chords - but Cmd+R, Cmd+C and Cmd+W are taken by the
+    // platform (reload, copy, close window), and a binding the OS eats is worse than
+    // no binding. So they take bare letters next to the flips they are cousins of,
+    // which is also what R/J/K already do.
+    //
+    // NOT on `-` and `=`, which is the tempting choice for the two scales and the
+    // wrong one: those are Cmd+- / Cmd+= for ZOOM, and zoom is non-destructive while
+    // a document scale RESAMPLES every layer. Putting a destructive resample one
+    // modifier away from a harmless zoom is a footgun, so the scales take a letter
+    // and a shift instead.
+    if key == gui.SCANCODE_N { run_doc_transform("rot90-cw") return }
+    if key == gui.SCANCODE_P { run_doc_transform("rot90-ccw") return }
+    if key == gui.SCANCODE_Y { run_doc_transform("crop") return }
+    if key == gui.SCANCODE_U {
+        if shift == 1 { run_doc_transform("scale-double") }
+        else { run_doc_transform("scale-half") }
+        return
+    }
 
     // Bracket keys size the brush - the one binding that is muscle memory rather
     // than a menu equivalent, which is why it earns a key of its own.
@@ -2925,6 +3094,17 @@ fn run_action(ui: Ui, act: string) -> Ui {
         if spec == "m" { kc = gui.SCANCODE_M }
         if spec == "l" { kc = gui.SCANCODE_L }
         if spec == "t" { kc = gui.SCANCODE_T }
+        // The transforms, so a headless script can drive the document ones - the
+        // commands whose failure mode is a corrupted texture handle rather than a
+        // wrong tool, and therefore the ones most worth exercising through the real
+        // dispatch table.
+        if spec == "r" { kc = gui.SCANCODE_R }
+        if spec == "j" { kc = gui.SCANCODE_J }
+        if spec == "k" { kc = gui.SCANCODE_K }
+        if spec == "n" { kc = gui.SCANCODE_N }
+        if spec == "p" { kc = gui.SCANCODE_P }
+        if spec == "y" { kc = gui.SCANCODE_Y }
+        if spec == "u" { kc = gui.SCANCODE_U }
         if spec == "0" { kc = gui.SCANCODE_0 }
         if spec == "1" { kc = gui.SCANCODE_1 }
         if spec == "plus" { kc = gui.SCANCODE_EQUALS }
@@ -3253,6 +3433,35 @@ fn run_action(ui: Ui, act: string) -> Ui {
             i = i + 1
         }
         print("  active=${g_active}")
+        return ui
+    }
+    // doc - the document's stated size, the SELECTION's, and the ACTIVE LAYER's
+    // buffer, plus what the view thinks it is fitting.
+    //
+    // FOUR SIZES, NOT ONE, because a whole-document transform is exactly the
+    // operation that can leave them disagreeing, and every disagreement is
+    // invisible: a selection whose coverage buffer is the old size makes every later
+    // clip read out of bounds, a layer buffer at the old size makes
+    // wynimg_composite refuse that layer silently, and a view still fitting the old
+    // size puts the pointer in the wrong place. Printing g_doc_w alone would assert
+    // the easiest quarter of it.
+    //
+    // The TEXTURE is deliberately NOT here: it is created by `refresh` inside the
+    // frame loop, and a script runs before the first frame, so g_tex_w is 0 at this
+    // point for reasons that have nothing to do with the transform. The texture is
+    // proved instead by `winpx`, which reads the real screen after real frames -
+    // that is the assertion that the upload, the blit rectangle and the view
+    // transform all agree.
+    if act == "doc" {
+        var lw = 0
+        var lh = 0
+        if g_active >= 0 {
+            if layer.buffer(g_active) != 0 {
+                lw = wynimg_width(layer.buffer(g_active))
+                lh = wynimg_height(layer.buffer(g_active))
+            }
+        }
+        print("  doc=${g_doc_w}x${g_doc_h} sel=${select.doc_w()}x${select.doc_h()} buf=${lw}x${lh} vfit=${view.doc_w()}x${view.doc_h()} hist=${history.depth()} undo=${history.undo_label()}")
         return ui
     }
     print("  unknown action: ${act}")

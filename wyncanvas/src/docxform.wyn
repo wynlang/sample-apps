@@ -300,12 +300,27 @@ pub fn apply(op: int, x: int, y: int, aw: int, ah: int, kern: int,
 //
 // The four commands, so a caller does not have to remember which of x/y/aw/ah each
 // op reads. Each returns the snapshot id, or 0 if the document is unchanged.
+//
+// THE `doc_` PREFIX IS LOAD-BEARING, not a naming preference. Named `rot_cw`,
+// `crop` and `scale` these collided with src/xform.wyn's single-buffer functions of
+// the same names and with view.scale(), and the compiler then printed
+//
+//     Error: Type mismatch at line NNN:0
+//       Expected: unique function signature   Got: duplicate signature
+//
+// for each - THREE "Error" lines on every build of src/ui.wyn, while still exiting
+// 0 and dispatching correctly (verified: docxform.scale and view.scale both called
+// the right function). A build that prints Error and succeeds is worse than either
+// outcome alone, because the next real error in this project scrolls past unnoticed.
+// See tests/test_docxform.wyn for the repro. The prefix also reads better at the
+// call site - `docxform.doc_scale` is redundant, but `crop` meaning "the whole
+// document" while `xform.crop` means "this buffer" was the actual ambiguity.
 
-pub fn rot_cw(doc_w: int, doc_h: int) -> int {
+pub fn doc_rot_cw(doc_w: int, doc_h: int) -> int {
     return apply(OP_ROT_CW(), 0, 0, 0, 0, xform.kern_nearest(), doc_w, doc_h)
 }
 
-pub fn rot_ccw(doc_w: int, doc_h: int) -> int {
+pub fn doc_rot_ccw(doc_w: int, doc_h: int) -> int {
     return apply(OP_ROT_CCW(), 0, 0, 0, 0, xform.kern_nearest(), doc_w, doc_h)
 }
 
@@ -313,7 +328,7 @@ pub fn rot_ccw(doc_w: int, doc_h: int) -> int {
 // an error - the parts with no source come back transparent - because refusing
 // would make "crop to the marquee" fail whenever the marquee was dragged past the
 // border, which is most of the time. See src/xform.wyn's `crop`.
-pub fn crop(doc_w: int, doc_h: int, x: int, y: int, w: int, h: int) -> int {
+pub fn doc_crop(doc_w: int, doc_h: int, x: int, y: int, w: int, h: int) -> int {
     return apply(OP_CROP(), x, y, w, h, xform.kern_nearest(), doc_w, doc_h)
 }
 
@@ -324,10 +339,10 @@ pub fn crop(doc_w: int, doc_h: int, x: int, y: int, w: int, h: int) -> int {
 // makes it correct for reduction too. Bicubic is sharper and is the right choice
 // for a photo, but it rings at a hard step - and a document scale is applied to
 // every layer including flat-colour ones, where ringing is the most visible.
-pub fn scale(doc_w: int, doc_h: int, w: int, h: int) -> int {
+pub fn doc_scale(doc_w: int, doc_h: int, w: int, h: int) -> int {
     return apply(OP_SCALE(), 0, 0, w, h, xform.kern_bilinear(), doc_w, doc_h)
 }
 
-pub fn scale_kern(doc_w: int, doc_h: int, w: int, h: int, kern: int) -> int {
+pub fn doc_scale_kern(doc_w: int, doc_h: int, w: int, h: int, kern: int) -> int {
     return apply(OP_SCALE(), 0, 0, w, h, kern, doc_w, doc_h)
 }

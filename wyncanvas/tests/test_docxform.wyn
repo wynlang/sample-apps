@@ -101,7 +101,7 @@ test "rotate 90 CW turns the document and moves pixels the RIGHT way" {
     // sends the source's TOP-LEFT to the output's TOP-RIGHT, so this catches a
     // rotation that goes the wrong way - which no dimension assertion can.
     one_layer(4, 2)
-    var snap = docxform.rot_cw(4, 2)
+    var snap = docxform.doc_rot_cw(4, 2)
     assert_true(snap > 0)
     var b = layer.buffer(0)
     assert_eq(wynimg_width(b), 2)
@@ -121,7 +121,7 @@ test "rotate 90 CCW is the other direction, not the same one" {
     // If CW and CCW were wired to the same call, every dimension and round-trip
     // assertion would still pass. This is the one that separates them.
     one_layer(4, 2)
-    docxform.rot_ccw(4, 2)
+    docxform.doc_rot_ccw(4, 2)
     var b = layer.buffer(0)
     assert_eq(wynimg_width(b), 2)
     assert_eq(wynimg_height(b), 4)
@@ -141,8 +141,8 @@ test "rotate CW then CCW is the EXACT original, not an approximation" {
     // path was taken rather than the resampling one.
     one_layer(4, 2)
     var before = layer.buffer(0)
-    docxform.rot_cw(4, 2)
-    docxform.rot_ccw(2, 4)
+    docxform.doc_rot_cw(4, 2)
+    docxform.doc_rot_ccw(2, 4)
     var b = layer.buffer(0)
     assert_eq(wynimg_width(b), 4)
     assert_eq(wynimg_height(b), 2)
@@ -156,7 +156,7 @@ test "rotate CW then CCW is the EXACT original, not an approximation" {
 
 test "crop takes exactly the requested rectangle" {
     one_layer(8, 8)
-    var snap = docxform.crop(8, 8, 2, 3, 4, 2)
+    var snap = docxform.doc_crop(8, 8, 2, 3, 4, 2)
     assert_true(snap > 0)
     var b = layer.buffer(0)
     assert_eq(wynimg_width(b), 4)
@@ -174,7 +174,7 @@ test "a crop rect hanging off the edge is honoured, not refused" {
     // dragged past the border, which is most of the time. The parts with no source
     // come back transparent - see src/xform.wyn's crop.
     one_layer(4, 4)
-    var snap = docxform.crop(4, 4, 2, 2, 4, 4)
+    var snap = docxform.doc_crop(4, 4, 2, 2, 4, 4)
     assert_true(snap > 0)
     var b = layer.buffer(0)
     assert_eq(wynimg_width(b), 4)
@@ -188,7 +188,7 @@ test "a crop rect hanging off the edge is honoured, not refused" {
 
 test "scale resamples the document to exactly the requested size" {
     one_layer(4, 4)
-    var snap = docxform.scale(4, 4, 8, 8)
+    var snap = docxform.doc_scale(4, 4, 8, 8)
     assert_true(snap > 0)
     var b = layer.buffer(0)
     assert_eq(wynimg_width(b), 8)
@@ -205,12 +205,12 @@ test "a degenerate output size is REFUSED, not clamped to 1x1" {
     // destroyed document that looks like a working command.
     one_layer(4, 4)
     var before = layer.buffer(0)
-    assert_eq(docxform.crop(4, 4, 0, 0, 0, 4), 0)
-    assert_eq(docxform.crop(4, 4, 0, 0, 4, 0 - 1), 0)
-    assert_eq(docxform.scale(4, 4, 0, 8), 0)
+    assert_eq(docxform.doc_crop(4, 4, 0, 0, 0, 4), 0)
+    assert_eq(docxform.doc_crop(4, 4, 0, 0, 4, 0 - 1), 0)
+    assert_eq(docxform.doc_scale(4, 4, 0, 8), 0)
     // ...and a nonsense DOCUMENT size is refused before anything is allocated.
-    assert_eq(docxform.rot_cw(0, 4), 0)
-    assert_eq(docxform.rot_cw(4, 0 - 2), 0)
+    assert_eq(docxform.doc_rot_cw(0, 4), 0)
+    assert_eq(docxform.doc_rot_cw(4, 0 - 2), 0)
     // The document is untouched and nothing was logged.
     assert_eq(layer.buffer(0), before)
     assert_eq(wynimg_width(layer.buffer(0)), 4)
@@ -221,7 +221,7 @@ test "a degenerate output size is REFUSED, not clamped to 1x1" {
 test "an empty layer store is refused rather than logging an empty transform" {
     layer.store_new()
     history.history_new()
-    assert_eq(docxform.rot_cw(4, 4), 0)
+    assert_eq(docxform.doc_rot_cw(4, 4), 0)
     assert_eq(history.depth(), 0)
 }
 
@@ -236,7 +236,7 @@ test "EVERY layer moves, not just the active one" {
     layer.add("b", grid(4, 2), layer.KIND_RASTER())
     layer.add("c", grid(4, 2), layer.KIND_RASTER())
 
-    var snap = docxform.rot_cw(4, 2)
+    var snap = docxform.doc_rot_cw(4, 2)
     assert_true(snap > 0)
     var i = 0
     while i < 3 {
@@ -268,7 +268,7 @@ test "a document containing a GROUP is transformable" {
     layer.add("g", 0, layer.KIND_GROUP())
     layer.add("a", grid(4, 2), layer.KIND_RASTER())
 
-    var snap = docxform.rot_cw(4, 2)
+    var snap = docxform.doc_rot_cw(4, 2)
     assert_true(snap > 0)
     assert_eq(layer.buffer(0), 0)
     assert_eq(wynimg_width(layer.buffer(1)), 2)
@@ -286,7 +286,7 @@ test "a MASK is rotated with its layer, exactly" {
     var m = half_mask(4, 2)
     layer.set_mask(0, m)
 
-    docxform.rot_cw(4, 2)
+    docxform.doc_rot_cw(4, 2)
     var nm = layer.mask(0)
     assert_true(nm != m)
     assert_eq(wynimg_width(nm), 2)
@@ -319,7 +319,7 @@ test "SCALING a mask preserves coverage instead of erasing it" {
     one_layer(4, 4)
     layer.set_mask(0, half_mask(4, 4))
 
-    docxform.scale(4, 4, 8, 8)
+    docxform.doc_scale(4, 4, 8, 8)
     var nm = layer.mask(0)
     assert_eq(wynimg_width(nm), 8)
     assert_eq(wynimg_height(nm), 8)
@@ -343,7 +343,7 @@ test "an unmasked layer stays unmasked through a transform" {
     // no mask must not acquire one from a zero-initialised snapshot slot.
     one_layer(4, 2)
     assert_eq(layer.mask(0), 0)
-    docxform.rot_cw(4, 2)
+    docxform.doc_rot_cw(4, 2)
     assert_eq(layer.mask(0), 0)
     history.undo_any()
     assert_eq(layer.mask(0), 0)
@@ -355,7 +355,7 @@ test "an unmasked layer stays unmasked through a transform" {
 test "the transform is undoable and redoable, with the document size" {
     one_layer(4, 2)
     var original = layer.buffer(0)
-    docxform.rot_cw(4, 2)
+    docxform.doc_rot_cw(4, 2)
     var rotated = layer.buffer(0)
 
     assert_eq(history.depth(), 1)
@@ -378,9 +378,9 @@ test "two document transforms in a row undo one at a time, in order" {
     // the wrong entry's size would be visible. This is the case a single-entry test
     // cannot reach.
     one_layer(8, 4)
-    docxform.rot_cw(8, 4)                 // -> 4x8
+    docxform.doc_rot_cw(8, 4)                 // -> 4x8
     assert_eq(wynimg_width(layer.buffer(0)), 4)
-    docxform.crop(4, 8, 0, 0, 2, 3)       // -> 2x3
+    docxform.doc_crop(4, 8, 0, 0, 2, 3)       // -> 2x3
     assert_eq(wynimg_width(layer.buffer(0)), 2)
     assert_eq(history.depth(), 2)
 
@@ -407,7 +407,7 @@ test "the snapshot holds the BEFORE side, so history owns the old buffers" {
     // be unundoable while LOOKING recorded.
     one_layer(4, 2)
     var original = layer.buffer(0)
-    var snap = docxform.rot_cw(4, 2)
+    var snap = docxform.doc_rot_cw(4, 2)
     assert_eq(docsnap.buf_at(snap, 0), original)
     assert_eq(docsnap.doc_w(snap), 4)
     assert_eq(docsnap.doc_h(snap), 2)
@@ -426,7 +426,7 @@ test "a failed transform leaves the document EXACTLY as it was" {
     var b0 = layer.buffer(0)
     var b1 = layer.buffer(1)
 
-    assert_eq(docxform.crop(4, 2, 0, 0, 0, 2), 0)
+    assert_eq(docxform.doc_crop(4, 2, 0, 0, 0, 2), 0)
 
     assert_eq(layer.buffer(0), b0)
     assert_eq(layer.buffer(1), b1)
@@ -446,7 +446,7 @@ test "a transform truncates the redo branch like every other record" {
     assert_true(history.can_redo())
     // Recording a document transform now discards the opacity redo, as any record
     // does - the doc transform must not be special-cased out of push's truncation.
-    docxform.rot_cw(4, 2)
+    docxform.doc_rot_cw(4, 2)
     assert_false(history.can_redo())
     assert_eq(history.depth(), 1)
     history.history_reset()
@@ -458,7 +458,7 @@ test "history_reset after a transform frees the parked document" {
     // the whole outgoing document - one full float32 layer per row.
     one_layer(4, 2)
     var original = layer.buffer(0)
-    docxform.rot_cw(4, 2)
+    docxform.doc_rot_cw(4, 2)
     assert_eq(wynimg_alive(original), 1)
     history.history_reset()
     assert_eq(wynimg_alive(original), 0)
@@ -474,7 +474,7 @@ test "a scale that is a no-op size still records and still undoes" {
     // which frees a live buffer on the first redo-branch truncation.
     one_layer(4, 4)
     var original = layer.buffer(0)
-    var snap = docxform.scale(4, 4, 4, 4)
+    var snap = docxform.doc_scale(4, 4, 4, 4)
     assert_true(snap > 0)
     assert_true(layer.buffer(0) != original)
     assert_eq(docsnap.buf_at(snap, 0), original)
@@ -490,7 +490,7 @@ test "scale_kern honours the kernel it is given" {
     // be asserted bit-for-bit against the input, which is what makes it the check
     // that the kernel argument is threaded through at all rather than ignored.
     one_layer(4, 4)
-    var snap = docxform.scale_kern(4, 4, 8, 8, xform.kern_nearest())
+    var snap = docxform.doc_scale_kern(4, 4, 8, 8, xform.kern_nearest())
     assert_true(snap > 0)
     var b = layer.buffer(0)
     // A 2x nearest upscale duplicates each source pixel into a 2x2 block, so
