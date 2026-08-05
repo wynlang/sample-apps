@@ -1,8 +1,16 @@
-// layer - layer records held as parallel arrays.
+// layer - layer records held as an array of structs.
 //
-// Parallel arrays rather than an array of structs: returning a struct across
-// a module boundary is a known Wyn miscompile, so every accessor here returns
-// a primitive or an opaque ptr.
+// This WAS ten parallel arrays, because returning or holding a struct across a
+// module boundary miscompiled. That is fixed (wyn #268/#270/#276: a module-level
+// global keeps its initializer, an array-typed struct field keeps its element
+// type, and a lambda works inside an imported module), so the store is now one
+// `[Row]` and adding a column is a one-line change to `Row` instead of an edit
+// to eight places that fails silently when you miss one.
+//
+// THE ACCESSOR SURFACE IS DELIBERATELY UNCHANGED. Every `pub fn` below keeps its
+// exact signature, because there are ~1389 `layer.` call sites across 25 files;
+// this commit changes the STORAGE only. Collapsing the accessors themselves is a
+// separate, later job.
 //
 // Adjustment layers store PARAMETERS, never baked pixels. That is what makes
 // the editor non-destructive, and retrofitting it later would mean rewriting
@@ -21,14 +29,20 @@
 // This file is also symlinked at the project root as ./layer.wyn, because
 // `import layer` from tests/ does not search src/. See the wyn compiler's issue tracker.
 
-var l_names = [""]
-var l_bufs = [0]
-var l_kinds = [0]
-var l_opacity = [1.0]
-var l_blend = [0]
-var l_visible = [1]
-var l_masks = [0]
-var l_amount = [0.0]
+// One layer record. `vis` is an int rather than a bool because the public
+// `visible()`/`set_visible()` pair converts at the boundary and the stored
+// representation is asserted as 0/1 by the suite.
+pub struct Row {
+    name: string,
+    buf: int,
+    kind: int,
+    opacity: float,
+    blend: int,
+    visible: int,
+    mask: int,
+    amount: float,
+    parent: int
+}
 
 // Which group each layer belongs to, as a PARENT INDEX, or -1 for the top level.
 //
@@ -42,7 +56,10 @@ var l_amount = [0.0]
 // The alternative - storing children as a list per group - was rejected because it
 // duplicates the ordering that the stack already encodes, and two orderings that
 // can disagree is the bug this store's parallel-array design exists to avoid.
-var l_parent = [0 - 1]
+// The store. One seed row so the global carries a non-empty initializer, exactly
+// as the ten arrays each did; `l_count` is the live length and `row_grow` reuses
+// capacity above it.
+var l_rows = [Row { name: "", buf: 0, kind: 0, opacity: 1.0, blend: 0, visible: 1, mask: 0, amount: 0.0, parent: 0 - 1 }]
 var l_count = 0
 
 pub fn KIND_RASTER() -> int { return 0 }
@@ -88,22 +105,22 @@ fn valid(id: int) -> bool {
 // Write a complete row at `i`, which must already exist.
 fn row_set(i: int, name: string, buf: int, kind: int, op: float,
            bl: int, vis: int, mask: int, amt: float, parent: int) {
-    l_names[i] = name
-    l_bufs[i] = buf
-    l_kinds[i] = kind
-    l_opacity[i] = op
-    l_blend[i] = bl
-    l_visible[i] = vis
-    l_masks[i] = mask
-    l_amount[i] = amt
-    l_parent[i] = parent
+    l_rows[i].name = name
+    l_rows[i].buf = buf
+    l_rows[i].kind = kind
+    l_rows[i].opacity = op
+    l_rows[i].blend = bl
+    l_rows[i].visible = vis
+    l_rows[i].mask = mask
+    l_rows[i].amount = amt
+    l_rows[i].parent = parent
 }
 
 // Copy row `src` onto row `dst`. Used by every shift, in both directions.
 fn row_copy(dst: int, src: int) {
-    row_set(dst, l_names[src], l_bufs[src], l_kinds[src], l_opacity[src],
-            l_blend[src], l_visible[src], l_masks[src], l_amount[src],
-            l_parent[src])
+    row_set(dst, l_rows[src].name, l_rows[src].buf, l_rows[src].kind,
+            l_rows[src].opacity, l_rows[src].blend, l_rows[src].visible,
+            l_rows[src].mask, l_rows[src].amount, l_rows[src].parent)
 }
 
 // Append one row's worth of capacity, so `row_set` can then write it.
@@ -113,16 +130,9 @@ fn row_copy(dst: int, src: int) {
 // that must be OVERWRITTEN rather than pushed, or the arrays grow without bound
 // across an add/remove cycle.
 fn row_grow() {
-    if l_count < l_names.len() { return }
-    l_names.push("")
-    l_bufs.push(0)
-    l_kinds.push(0)
-    l_opacity.push(1.0)
-    l_blend.push(0)
-    l_visible.push(1)
-    l_masks.push(0)
-    l_amount.push(0.0)
-    l_parent.push(0 - 1)
+    if l_count < l_rows.len() { return }
+    l_rows.push(Row { name: "", buf: 0, kind: 0, opacity: 1.0, blend: 0,
+                      visible: 1, mask: 0, amount: 0.0, parent: 0 - 1 })
 }
 
 pub fn add(name: string, buf: int, kind: int) -> int {
@@ -135,22 +145,22 @@ pub fn add(name: string, buf: int, kind: int) -> int {
 
 pub fn name(id: int) -> string {
     if valid(id) == false { return "" }
-    return l_names[id]
+    return l_rows[id].name
 }
 
 pub fn buffer(id: int) -> int {
     if valid(id) == false { return 0 }
-    return l_bufs[id]
+    return l_rows[id].buf
 }
 
 pub fn kind(id: int) -> int {
     if valid(id) == false { return 0 }
-    return l_kinds[id]
+    return l_rows[id].kind
 }
 
 pub fn opacity(id: int) -> float {
     if valid(id) == false { return 1.0 }
-    return l_opacity[id]
+    return l_rows[id].opacity
 }
 
 pub fn set_opacity(id: int, v: float) {
@@ -158,38 +168,38 @@ pub fn set_opacity(id: int, v: float) {
     var c = v
     if c < 0.0 { c = 0.0 }
     if c > 1.0 { c = 1.0 }
-    l_opacity[id] = c
+    l_rows[id].opacity = c
 }
 
 pub fn blend_mode(id: int) -> int {
     if valid(id) == false { return 0 }
-    return l_blend[id]
+    return l_rows[id].blend
 }
 
 pub fn set_blend_mode(id: int, m: int) {
     if valid(id) == false { return }
     if m < 0 or m >= 27 { return }
-    l_blend[id] = m
+    l_rows[id].blend = m
 }
 
 pub fn visible(id: int) -> bool {
     if valid(id) == false { return false }
-    return l_visible[id] == 1
+    return l_rows[id].visible == 1
 }
 
 pub fn set_visible(id: int, v: bool) {
     if valid(id) == false { return }
-    if v { l_visible[id] = 1 } else { l_visible[id] = 0 }
+    if v { l_rows[id].visible = 1 } else { l_rows[id].visible = 0 }
 }
 
 pub fn mask(id: int) -> int {
     if valid(id) == false { return 0 }
-    return l_masks[id]
+    return l_rows[id].mask
 }
 
 pub fn set_mask(id: int, m: int) {
     if valid(id) == false { return }
-    l_masks[id] = m
+    l_rows[id].mask = m
 }
 
 // ---- grouping ---------------------------------------------------------------
@@ -197,7 +207,7 @@ pub fn set_mask(id: int, m: int) {
 // The group this layer belongs to, or -1 for the top level.
 pub fn parent(id: int) -> int {
     if valid(id) == false { return 0 - 1 }
-    return l_parent[id]
+    return l_rows[id].parent
 }
 
 // Put `id` inside group `p` (-1 for the top level). Returns false and changes
@@ -214,12 +224,12 @@ pub fn parent(id: int) -> int {
 pub fn set_parent(id: int, p: int) -> bool {
     if valid(id) == false { return false }
     if p == 0 - 1 {
-        l_parent[id] = 0 - 1
+        l_rows[id].parent = 0 - 1
         return true
     }
     if valid(p) == false { return false }
     if p == id { return false }
-    if l_kinds[p] != KIND_GROUP() { return false }
+    if l_rows[p].kind != KIND_GROUP() { return false }
     if p > id { return false }
     // Walk up from the proposed parent: if we reach `id`, this closes a cycle.
     //
@@ -233,7 +243,7 @@ pub fn set_parent(id: int, p: int) -> bool {
     // written by undo replay; the day either changes, the failure without this
     // check is an infinite loop in the render walk, not a wrong picture. The
     // `guard` counter below is the second half of that argument.
-    var up = l_parent[p]
+    var up = l_rows[p].parent
     var guard = 0
     while up != 0 - 1 {
         if up == id { return false }
@@ -241,9 +251,9 @@ pub fn set_parent(id: int, p: int) -> bool {
         // an infinite loop here would hang the editor rather than report anything.
         guard = guard + 1
         if guard > l_count { return false }
-        up = l_parent[up]
+        up = l_rows[up].parent
     }
-    l_parent[id] = p
+    l_rows[id].parent = p
     return true
 }
 
@@ -252,7 +262,7 @@ pub fn child_count(g: int) -> int {
     var n = 0
     var i = 0
     while i < l_count {
-        if l_parent[i] == g { n = n + 1 }
+        if l_rows[i].parent == g { n = n + 1 }
         i = i + 1
     }
     return n
@@ -260,7 +270,7 @@ pub fn child_count(g: int) -> int {
 
 // After rows have MOVED, rewrite every parent index that pointed at a moved row.
 //
-// `l_parent` holds indices, and this store's whole design is that an index IS an
+// `Row.parent` holds indices, and this store's whole design is that an index IS an
 // identity - so any operation that shifts rows invalidates parents that pointed
 // past the shift. Called by remove/insert/swap, which are the only three
 // operations that move rows.
@@ -274,7 +284,7 @@ pub fn child_count(g: int) -> int {
 fn reparent(was: int, now: int) {
     var i = 0
     while i < l_count {
-        if l_parent[i] == was { l_parent[i] = now }
+        if l_rows[i].parent == was { l_rows[i].parent = now }
         i = i + 1
     }
 }
@@ -283,20 +293,20 @@ fn reparent(was: int, now: int) {
 fn reparent_shift(lo: int, hi: int, delta: int) {
     var i = 0
     while i < l_count {
-        var pp = l_parent[i]
-        if pp >= lo and pp <= hi { l_parent[i] = pp + delta }
+        var pp = l_rows[i].parent
+        if pp >= lo and pp <= hi { l_rows[i].parent = pp + delta }
         i = i + 1
     }
 }
 
 pub fn adjust_amount(id: int) -> float {
     if valid(id) == false { return 0.0 }
-    return l_amount[id]
+    return l_rows[id].amount
 }
 
 pub fn set_adjust_amount(id: int, v: float) {
     if valid(id) == false { return }
-    l_amount[id] = v
+    l_rows[id].amount = v
 }
 
 // ---- structural edits ------------------------------------------------------
@@ -390,7 +400,7 @@ pub fn swap(a: int, b: int) -> int {
 
 pub fn set_name(id: int, s: string) {
     if valid(id) == false { return }
-    l_names[id] = s
+    l_rows[id].name = s
 }
 
 // Replaces a row's buffer handle, returning the previous one so the caller can
@@ -401,7 +411,7 @@ pub fn set_name(id: int, s: string) {
 // a mask reference) must keep seeing the same buffer.
 pub fn set_buffer(id: int, buf: int) -> int {
     if valid(id) == false { return 0 }
-    var prev = l_bufs[id]
-    l_bufs[id] = buf
+    var prev = l_rows[id].buf
+    l_rows[id].buf = buf
     return prev
 }
