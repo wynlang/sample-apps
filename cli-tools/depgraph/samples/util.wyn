@@ -1,0 +1,3 @@
+// Sample: closes the cycle util -> lexer -> util.
+import lexer
+pub fn trim() -> int { return 0 }

@@ -1,0 +1,3 @@
+// Sample: depends on util. Also part of a CYCLE: util imports lexer back.
+import util
+pub fn lex() -> int { return 0 }

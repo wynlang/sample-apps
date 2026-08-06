@@ -1,0 +1,4 @@
+// Sample: depends on lexer and (selectively) on util.
+import lexer
+import { trim } from util
+pub fn parse() -> int { return 0 }

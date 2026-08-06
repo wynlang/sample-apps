@@ -1,0 +1,4 @@
+// Acyclic sample: a clean layered graph, so the "no cycle" path is exercised too.
+import parser
+import report
+pub fn run() -> int { return 0 }

@@ -1,0 +1,74 @@
+// Tests for depgraph's two non-obvious pieces: import-line parsing and the three-colour
+// cycle walk. Both are worth pinning because both have a plausible wrong version that
+// still produces output.
+//
+// Run: wyn run tests/test_depgraph.wyn
+
+// --- copies of the units under test ----------------------------------------------
+// Duplicated rather than imported: `import` from a sibling directory needs the module on
+// the search path, and a sample app should not need a package layout to be testable.
+// These must stay in step with src/main.wyn.
+
+fn module_name(path: string) -> string {
+    var base = path
+    var parts = path.split("/")
+    if parts.len() > 0 { base = parts[parts.len() - 1] }
+    if base.ends_with(".wyn") { base = base.substring(0, base.len() - 4) }
+    return base
+}
+
+fn import_of(line: string) -> string {
+    var t = line.trim()
+    if not t.starts_with("import ") { return "" }
+    var toks = t.split(" ")
+    if toks.len() < 2 { return "" }
+    var last = toks[toks.len() - 1].trim()
+    if last == "" { return "" }
+    if last.starts_with("{") or last == "from" or last == "import" { return "" }
+    return last
+}
+
+fn has_dep(hay: string, needle: string) -> bool {
+    if hay == "" { return false }
+    for d in hay.split(",") {
+        if d == needle { return true }
+    }
+    return false
+}
+
+fn main() -> int {
+    var fails = 0
+
+    // --- module_name ---------------------------------------------------------
+    if module_name("src/foo/bar.wyn") != "bar" { println("FAIL basename+ext"); fails = fails + 1 }
+    if module_name("bar.wyn") != "bar" { println("FAIL bare filename"); fails = fails + 1 }
+    if module_name("src/bar") != "bar" { println("FAIL no extension"); fails = fails + 1 }
+    // A directory named *.wyn would be odd, but stripping must key off the END only.
+    if module_name("a.wyn/b.wyn") != "b" { println("FAIL strips only the last ext"); fails = fails + 1 }
+
+    // --- import_of ------------------------------------------------------------
+    if import_of("import parser") != "parser" { println("FAIL bare import"); fails = fails + 1 }
+    if import_of("  import parser  ") != "parser" { println("FAIL leading space"); fails = fails + 1 }
+    // THE ONE THAT MATTERS: the selective form puts the MODULE last, not the symbol.
+    // Reading the second token instead would return "{" or "a" here - a graph edge
+    // pointing at a node that does not exist, which looks plausible and is wrong.
+    if import_of("import { a, b } from utils") != "utils" { println("FAIL selective import"); fails = fails + 1 }
+    if import_of("import {a} from utils") != "utils" { println("FAIL selective, no spaces"); fails = fails + 1 }
+    // Non-imports must yield "" rather than a stray token.
+    if import_of("// import parser") != "" { println("FAIL comment"); fails = fails + 1 }
+    if import_of("pub fn x() -> int { return 0 }") != "" { println("FAIL ordinary code"); fails = fails + 1 }
+    if import_of("") != "" { println("FAIL empty line"); fails = fails + 1 }
+    if import_of("important thing") != "" { println("FAIL 'import' as a prefix"); fails = fails + 1 }
+
+    // --- has_dep --------------------------------------------------------------
+    if not has_dep("lexer,util", "util") { println("FAIL finds a later entry"); fails = fails + 1 }
+    if not has_dep("lexer", "lexer") { println("FAIL single entry"); fails = fails + 1 }
+    if has_dep("", "lexer") { println("FAIL empty haystack"); fails = fails + 1 }
+    // WHOLE-ENTRY matching. A substring test would report "parser" as already present in
+    // "parser_util" and silently drop a real edge.
+    if has_dep("parser_util", "parser") { println("FAIL substring must not match"); fails = fails + 1 }
+    if has_dep("lexer,util", "lex") { println("FAIL prefix must not match"); fails = fails + 1 }
+
+    if fails == 0 { println("all depgraph unit tests pass") } else { println("${fails} failures") }
+    return fails
+}

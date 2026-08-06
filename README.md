@@ -4,7 +4,7 @@ Real-world programs written in Wyn. Every app compiles and runs.
 
 ## Categories
 
-### 🛠 cli-tools/ (7 apps)
+### 🛠 cli-tools/ (8 apps)
 | App | Description |
 |-----|-------------|
 | **loc** | Count lines of code, with per-language comment syntax |
@@ -14,6 +14,7 @@ Real-world programs written in Wyn. Every app compiles and runs.
 | **md-toc** | Generate a Markdown TOC with GitHub-compatible anchors |
 | **wyn-grep** | Search files for a pattern |
 | **twux** | Terminal multiplexer *(interactive)* |
+| **depgraph** | Dependency graph from import statements: roots, and a three-colour DFS that finds cycles |
 
 ### 🖥 sysadmin/ (10 apps)
 | App | Description |

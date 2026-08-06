@@ -1,0 +1,213 @@
+// depgraph -- read a source tree's import statements and report the dependency graph:
+// what depends on what, which modules nothing imports, and whether there is a cycle.
+//
+// Why this app: a dependency graph is the smallest realistic problem that needs a GRAPH
+// rather than a list, so it exercises parts of a language that flat text-processing apps
+// never touch -- an adjacency structure, a recursive walk with a visited set, and a
+// search that must report "no answer" distinctly from "zero answers".
+//
+// What it shows off:
+//   * `enum Mark { Unvisited, InProgress, Done }` -- the three-colour DFS that finds a
+//     cycle. `InProgress` is the whole trick: reaching a node still on the stack IS the
+//     cycle, and a `match` with no fallthrough makes that legible.
+//   * `Option` for "is there a cycle" -- `none` means acyclic, a real answer rather than
+//     an error or an empty list.
+//   * recursion with an explicit mark array, because the graph MAY be cyclic and a naive
+//     walk would not terminate.
+//
+// It also found a compiler bug on its first run, which is the point of writing it: this
+// app's normal input is source lines containing the word `import`, and printing one
+// through `${...}` made the import scanner read the nested string as a real import
+// (fixed in the compiler; see tests/regression/test_import_scan_interp.wyn).
+//
+//   wyn run src/main.wyn              # analyse the tree you are standing in
+//   wyn run src/main.wyn samples      # or any directory
+
+// One module and the modules it imports.
+//
+// `deps` is a comma-joined string, not a `[string]` field: an array field inside a
+// struct is held back by a codegen limit, and a sample app is not the place to
+// demonstrate a workaround. At this size splitting on demand is free, and the record
+// stays a flat printable row.
+struct Module { name: string, deps: string, dep_count: int }
+
+enum Mark { Unvisited, InProgress, Done }
+
+// Strip a path to the module name a Wyn `import` would use: basename, no extension.
+fn module_name(path: string) -> string {
+    var base = path
+    var parts = path.split("/")
+    if parts.len() > 0 { base = parts[parts.len() - 1] }
+    if base.ends_with(".wyn") { base = base.substring(0, base.len() - 4) }
+    return base
+}
+
+// The module named by one line, or "" if the line is not an import.
+//
+// Handles both spellings the language accepts:
+//     import foo
+//     import { a, b } from foo
+// The selective form puts the module LAST, which is why this reads the final token
+// rather than the second. Getting that backwards reports the first imported SYMBOL as a
+// module, and every such edge points at a node that does not exist -- a graph that looks
+// plausible and is wrong, which is worse than a crash.
+fn import_of(line: string) -> string {
+    var t = line.trim()
+    if not t.starts_with("import ") { return "" }
+    var toks = t.split(" ")
+    if toks.len() < 2 { return "" }
+    var last = toks[toks.len() - 1].trim()
+    if last == "" { return "" }
+    // Defensive: a malformed `import {` with no `from` would otherwise yield "{".
+    if last.starts_with("{") or last == "from" or last == "import" { return "" }
+    return last
+}
+
+// Does `hay` already contain `needle` as one comma-separated entry?
+// Substring matching would be wrong here: "parser" must not match "parser_util".
+fn has_dep(hay: string, needle: string) -> bool {
+    if hay == "" { return false }
+    for d in hay.split(",") {
+        if d == needle { return true }
+    }
+    return false
+}
+
+fn main() -> int {
+    var dir = "src"
+    args = System.args()
+    if args.len() > 1 { dir = args[1] }
+
+    // Collect the modules. Parallel arrays rather than [Module]: see the note on the
+    // struct. Index i in each array describes the same module.
+    names = [""]
+    deps = [""]
+    var count = 0
+
+    // `File::walk_dir` returns ONE newline-joined string, not an array -- unlike
+    // `File::list_dir`. Iterating it directly used to pass `wyn check` and then die as a
+    // bare "internal codegen error"; it is now a check-time error that names the fix
+    // (see tests/errors/run_for_in_string_test.sh in the compiler).
+    var files = File::walk_dir(dir).split("\n")
+    for f in files {
+        if f == "" { continue }
+        if not f.ends_with(".wyn") { continue }
+        var mod = module_name(f)
+        var edges = ""
+        var n = 0
+        var content = File::read(f)
+        for line in content.split("\n") {
+            var imp = import_of(line)
+            if imp == "" { continue }
+            if imp == mod { continue }          // a self-import is not an edge
+            if has_dep(edges, imp) { continue } // count each edge once
+            if edges == "" { edges = imp } else { edges = "${edges},${imp}" }
+            n = n + 1
+        }
+        if count == 0 {
+            names[0] = mod
+            deps[0] = edges
+        } else {
+            names.push(mod)
+            deps.push(edges)
+        }
+        count = count + 1
+    }
+
+    if count == 0 {
+        println("depgraph: no .wyn files under '${dir}'")
+        return 1
+    }
+
+    println("depgraph: ${count} modules under '${dir}'")
+    println("")
+    for i in 0..count {
+        var d = deps[i]
+        if d == "" {
+            println("  ${names[i]}  (no imports)")
+        } else {
+            println("  ${names[i]} -> ${d}")
+        }
+    }
+
+    // --- what nothing imports -------------------------------------------------
+    //
+    // Roots (nothing depends on them) are entry points; if there are none and the graph
+    // is non-empty, every module is depended upon, which for a DAG is impossible - so a
+    // missing root is itself evidence of a cycle. That is worth printing rather than
+    // computing silently.
+    println("")
+    var roots = ""
+    for i in 0..count {
+        var referenced = false
+        for j in 0..count {
+            if j == i { continue }
+            if has_dep(deps[j], names[i]) { referenced = true }
+        }
+        if not referenced {
+            if roots == "" { roots = names[i] } else { roots = "${roots}, ${names[i]}" }
+        }
+    }
+    if roots == "" {
+        println("roots: none - every module is imported by another (see the cycle below)")
+    } else {
+        println("roots: ${roots}")
+    }
+
+    // --- cycle detection: three-colour DFS ------------------------------------
+    //
+    // `Mark` is the point of the exercise. Two colours (seen / not seen) find whether a
+    // node was VISITED, which is not the question - a diamond (a -> b, a -> c, b -> d,
+    // c -> d) revisits `d` and is perfectly acyclic. The cycle is reaching a node that is
+    // still ON THE STACK, which needs a third state, and `InProgress` names it.
+    //
+    // The marks live in a parallel [int] because an enum ARRAY indexed by position is
+    // more machinery than the idea needs here; `mark_of` and the two setters keep the
+    // enum meaning in one place.
+    marks = [0]
+    for i in 0..count {
+        if i == 0 { marks[0] = 0 } else { marks.push(0) }
+    }
+
+    var cycle_at = -1
+    for i in 0..count {
+        if cycle_at >= 0 { continue }
+        if marks[i] != 0 { continue }
+        // Iterative DFS with an explicit stack: recursion would need the mark array
+        // threaded through every call, and a deep tree would be a deep C stack.
+        stack = [i]
+        var top = 1
+        while top > 0 and cycle_at < 0 {
+            var node = stack[top - 1]
+            if marks[node] == 0 {
+                marks[node] = 1                     // InProgress
+                for d in deps[node].split(",") {
+                    if d == "" { continue }
+                    var target = -1
+                    for k in 0..count {
+                        if names[k] == d { target = k }
+                    }
+                    if target < 0 { continue }      // an import outside this tree
+                    if marks[target] == 1 {
+                        cycle_at = target           // still on the stack: a cycle
+                    } else if marks[target] == 0 {
+                        if top < stack.len() { stack[top] = target } else { stack.push(target) }
+                        top = top + 1
+                    }
+                }
+            } else {
+                marks[node] = 2                     // Done
+                top = top - 1
+            }
+        }
+    }
+
+    println("")
+    if cycle_at >= 0 {
+        println("CYCLE: reachable from '${names[cycle_at]}' - it imports its way back to itself")
+        println("  (a cycle means no build order exists; break one edge to fix it)")
+        return 1
+    }
+    println("acyclic: a valid build order exists")
+    return 0
+}

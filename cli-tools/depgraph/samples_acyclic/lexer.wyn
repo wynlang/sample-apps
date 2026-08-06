@@ -1,0 +1,2 @@
+import util
+pub fn lex() -> int { return 0 }

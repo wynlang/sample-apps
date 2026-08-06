@@ -1,0 +1,4 @@
+// Sample: the entry point. Depends on parser and report.
+import parser
+import report
+pub fn run() -> int { return 0 }

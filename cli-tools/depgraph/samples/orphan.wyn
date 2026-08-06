@@ -1,0 +1,2 @@
+// Sample: nothing imports this, and it imports nothing. Isolated node.
+pub fn unused() -> int { return 0 }

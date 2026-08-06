@@ -1,0 +1,2 @@
+// Sample: a leaf. Nothing it imports, and nothing but app imports it.
+pub fn emit() -> int { return 0 }
