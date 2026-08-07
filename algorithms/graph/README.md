@@ -57,13 +57,18 @@ happens to add up the same, so the tests assert the **hop list** as well.
 
 ## Notes on two compiler defects hit while writing this
 
-Both are filed; the workarounds are visible in the source.
+Writing this app surfaced two compiler bugs. **Both have since been fixed**, but the
+workarounds stay in the source until the fixes ship in a release, so the app keeps building
+on a released `wyn` rather than only on `dev`.
 
-- **`struct Path` breaks the file.** A user struct named after any of the 42 builtin stdlib
-  namespaces (`Path`, `Time`, `Color`, `Log`, `Env`, `Task`, …) makes type-checking fail
-  with `Type mismatch at line 1:0 / Expected: enum, Got: string` — a message naming neither
-  the struct nor a real line. The struct here is called `Route` for that reason.
-- **`from` and `root` are reserved words.** `fn shortest_path(g: [Node], from: int, to: int)`
-  does not parse, and neither does `for root in 0..n`. Both are used *only* in the import
-  grammar, so they are contextual by role but reserved globally. Note `to` is fine, so
-  `from`/`to` pairs half-work. The parameters here are `src`/`dst`.
+- **`struct Path` broke the file** — FIXED. A user struct named after any of the 42 builtin
+  stdlib namespaces (`Path`, `Time`, `Color`, `Log`, `Env`, `Task`, …) made type-checking
+  fail with `Type mismatch at line 1:0 / Expected: enum, Got: string` — a message naming
+  neither the struct nor a real line. A user struct now shadows the namespace. The struct
+  here is still called `Route`; rename it to `Path` once the fix is released.
+- **`from` and `root` were reserved words** — FIXED (they are contextual now).
+  `fn shortest_path(g: [Node], from: int, to: int)`
+  did not parse, and neither did `for root in 0..n`. Both are used *only* in the import
+  grammar, so they were contextual by role but reserved globally. `to` was never reserved,
+  so a `from`/`to` pair half-worked — which is exactly how this surfaced. The parameters
+  here stay `src`/`dst` for the same release reason.
