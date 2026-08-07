@@ -120,6 +120,83 @@ test "json round-trips the values it was given" {
     assert_eq(pretty.contains("stable"), true)
 }
 
+test "a written document reads back through the parser" {
+    // The real round-trip: write, serialize, parse, read. This used to be impossible to
+    // assert -- Json.new/Json.set and Json.get worked on two different representations, so a
+    // set key read back as "". Now stringify -> parse -> get is a closed loop, which is what
+    // an API client actually does with a response body.
+    req = Json.new()
+    Json.set(req, "name", "Wyn Language")
+    Json.set_int(req, "version", 2)
+    back = Json.parse(Json.stringify(req))
+    assert_eq(Json.get(back, "name"), "Wyn Language")
+    assert_eq(Json.get_int(back, "version"), 2)
+    assert_eq(Json.has(back, "name"), 1)
+    assert_eq(Json.has(back, "absent"), 0)
+}
+
+test "a value containing a quote cannot inject a key" {
+    // The failure this guards is not a crash but a forged field: an unescaped quote in a
+    // client-supplied value used to close the string early and let the rest be read as more
+    // JSON. Verified: the injected "role" came back as "admin".
+    req = Json.new()
+    Json.set(req, "name", "Eve\",\"role\":\"admin")
+    back = Json.parse(Json.stringify(req))
+    assert_eq(Json.has(back, "role"), 0)
+    assert_eq(Json.get(back, "name"), "Eve\",\"role\":\"admin")
+}
+
+test "control characters and backslashes survive a round-trip" {
+    // An API payload can contain a newline or a Windows path. Both used to produce output
+    // that this library's own parser could not read back.
+    req = Json.new()
+    Json.set(req, "note", "line1\nline2\ttabbed")
+    Json.set(req, "path", "C:\\tmp\\file")
+    back = Json.parse(Json.stringify(req))
+    assert_eq(Json.get(back, "note"), "line1\nline2\ttabbed")
+    assert_eq(Json.get(back, "path"), "C:\\tmp\\file")
+}
+
+test "two parsed documents stay independent" {
+    // Parsing a second response used to destroy the first: both handles were 0 and the older
+    // document's nodes were overwritten. A client holding a config and a response at once hit
+    // exactly this.
+    a = Json.parse("{\"id\":\"first\"}")
+    b = Json.parse("{\"id\":\"second\"}")
+    assert_eq(Json.get(a, "id"), "first")
+    assert_eq(Json.get(b, "id"), "second")
+}
+
+test "a large document is not truncated" {
+    // The serializer wrote into a fixed 4096-byte buffer and clamped, so a big response body
+    // came out unterminated. 30 keys of ~200 chars is comfortably past that.
+    req = Json.new()
+    filler = "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"
+    for i in 0..30 {
+        Json.set(req, "field${i}", filler)
+    }
+    raw = Json.stringify(req)
+    assert_eq(raw.len() > 5000, true)
+    assert_eq(raw.ends_with("}"), true)
+    // And it must still be readable, not merely long.
+    assert_eq(Json.get(Json.parse(raw), "field29"), filler)
+}
+
+test "malformed json does not hang the client" {
+    // A truncated or corrupt response body used to spin the parser until it exhausted memory.
+    // Reaching the assertions at all is the point.
+    assert_eq(Json.has(Json.parse("{\"k\": \"a\"b\"}"), "nope"), 0)
+    assert_eq(Json.has(Json.parse("{truncated"), "nope"), 0)
+    assert_eq(Json.has(Json.parse(""), "nope"), 0)
+}
+
+test "unicode escapes in a response decode to utf-8" {
+    // Real APIs send \uXXXX. These used to come back as the literal 6 characters.
+    doc = Json.parse("{\"city\":\"z\\u00fcrich\",\"sym\":\"\\u20ac\"}")
+    assert_eq(Json.get(doc, "city"), "zürich")
+    assert_eq(Json.get(doc, "sym"), "€")
+}
+
 test "json parse reads back a value set by name" {
     doc = Json.parse("{\"origin\":\"1.2.3.4\",\"n\":7}")
     assert_eq(Json.get(doc, "origin"), "1.2.3.4")
