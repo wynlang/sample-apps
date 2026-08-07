@@ -120,3 +120,106 @@ test "the advertised version matches the compiler's VERSION file" {
     assert(not src.contains("Powered by Wyn v1.8.0"))
     assert(not src.contains("\"version\", \"1.8.0\""))
 }
+
+// ---- the response builders, which used to be hand-built strings -------------
+//
+// api_add_user assembled its response by interpolation:
+//
+//     return "{\"id\":${id},\"name\":\"${name}\",\"email\":\"${email}\"}"
+//
+// The SQL side was escaped (Db.escape), but the JSON side was not -- and Db.escape does
+// not help, because this is JSON quoting, not SQL quoting. A client posting the name
+//   Eve","role":"admin
+// closed the string early and injected a field: verified before the fix, the forged
+// "role" read back as "admin" from the parsed response. Both builders use Json.set now.
+//
+// Duplicated from src/main.wyn rather than imported: `import` from a sibling directory
+// needs the module on the search path, and a sample app should not need a package layout
+// to be testable. Must stay in step with src.
+
+fn t_json_error(msg: string) -> string {
+    var e = Json.new()
+    Json.set(e, "error", msg)
+    return Json.stringify(e)
+}
+
+fn t_add_user_response(id: int, name: string, email: string) -> string {
+    var out = Json.new()
+    Json.set_int(out, "id", id)
+    Json.set(out, "name", name)
+    Json.set(out, "email", email)
+    return Json.stringify(out)
+}
+
+test "the add-user response is valid JSON with every field" {
+    var doc = Json.parse(t_add_user_response(4, "Dana", "dana@example.com"))
+    assert_eq(Json.get_int(doc, "id"), 4)
+    assert_eq(Json.get(doc, "name"), "Dana")
+    assert_eq(Json.get(doc, "email"), "dana@example.com")
+}
+
+test "a name containing a quote cannot inject a field" {
+    // The exact attack. The forged key must be absent AND the real name must survive whole
+    // -- dropping the value would also pass an absence check, and that is not a fix.
+    var doc = Json.parse(t_add_user_response(7, "Eve\",\"role\":\"admin", "e@f.g"))
+    assert_eq(Json.has(doc, "role"), 0)
+    assert_eq(Json.get(doc, "name"), "Eve\",\"role\":\"admin")
+    assert_eq(Json.get_int(doc, "id"), 7)
+    assert_eq(Json.get(doc, "email"), "e@f.g")
+}
+
+test "a name containing a backslash or newline survives" {
+    // Both used to produce a response the app's own parser could not read back.
+    var doc = Json.parse(t_add_user_response(8, "A\\B", "x\ny"))
+    assert_eq(Json.get(doc, "name"), "A\\B")
+    assert_eq(Json.get(doc, "email"), "x\ny")
+}
+
+test "the error response is valid JSON" {
+    var doc = Json.parse(t_json_error("name required"))
+    assert_eq(Json.get(doc, "error"), "name required")
+    assert_eq(Json.has(doc, "error"), 1)
+}
+
+test "src no longer hand-builds a JSON response by interpolation" {
+    // The units above are COPIES of src, so they cannot catch src drifting back to hand-built
+    // strings. This reads src itself.
+    //
+    // The removed line cannot be spelled literally here: a ${...} inside a Wyn string
+    // interpolates even with the braces backslash-escaped, so writing it out would try to
+    // resolve a variable named `id` at compile time (it fails with "Undefined variable 'id'").
+    // The dollar sign is therefore built from its code point.
+    var src = File.read("src/main.wyn")
+    var dollar = String.from_chars([36])
+
+    // The response must be built with Json.set*, not interpolated.
+    assert(src.contains("Json.set_int(out, \"id\", id)"))
+    assert(src.contains("Json.set(out, \"name\", name)"))
+    assert(src.contains("json_error("))
+
+    // And no JSON-looking string in src may interpolate a value into it. Any line that both
+    // opens a JSON object in a literal and contains a ${ is the bug coming back.
+    var lines = src.split("\n")
+    var bad = 0
+    for line in lines {
+        // Skip the comment that explains the bug -- a test that cannot survive its own
+        // explanation is a test that gets deleted rather than fixed.
+        if not line.trim().starts_with("//") {
+            if line.contains("{\\\"") and line.contains(dollar + "{") {
+                bad = bad + 1
+            }
+        }
+    }
+    assert_eq(bad, 0)
+}
+
+test "a builder response survives a real round trip" {
+    // End to end: the bytes a client actually receives parse back to the same values.
+    var body = t_add_user_response(9, "Quote\"Name", "q@e.com")
+    var r = round_trip(18905, "POST", "/api/users", "application/json", body)
+    assert(r.contains("application/json"))
+    // The response body is at the end, after the headers.
+    var doc = Json.parse(r.substring(r.index_of("{"), r.len()))
+    assert_eq(Json.get(doc, "name"), "Quote\"Name")
+    assert_eq(Json.get_int(doc, "id"), 9)
+}

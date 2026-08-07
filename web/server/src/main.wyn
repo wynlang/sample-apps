@@ -71,16 +71,36 @@ fn api_info_compact(db: int, start_time: int) -> string {
     return Json.stringify(j)
 }
 
+// Build the response with Json.set rather than string interpolation. The SQL side was
+// already escaped via Db.escape, but the JSON side was assembled by hand:
+//
+//     return "{\"id\":${id},\"name\":\"${name}\",...}"
+//
+// A client posting the name  Eve","role":"admin  closed the string early and injected a
+// field -- verified: the forged "role" read back as "admin" from the response. Db.escape
+// does not help, because this is JSON quoting, not SQL quoting. Json.set escapes, so the
+// value stays one value whatever it contains.
+fn json_error(msg: string) -> string {
+    var e = Json.new()
+    Json.set(e, "error", msg)
+    return Json.stringify(e)
+}
+
 fn api_add_user(db: int, body: string) -> string {
     var doc = Json.parse(body)
     var name = Json.get(doc, "name")
     var email = Json.get(doc, "email")
-    if name.len() == 0 { return "{\"error\":\"name required\"}" }
+    if name.len() == 0 { return json_error("name required") }
     var safe_name = Db.escape(name)
     var safe_email = Db.escape(email)
     Db.exec(db, "INSERT INTO users(name, email) VALUES('${safe_name}', '${safe_email}')")
     var id = Db.last_insert_id(db)
-    return "{\"id\":${id},\"name\":\"${name}\",\"email\":\"${email}\"}"
+
+    var out = Json.new()
+    Json.set_int(out, "id", id)
+    Json.set(out, "name", name)
+    Json.set(out, "email", email)
+    return Json.stringify(out)
 }
 
 fn handle_request(method: string, path: string, body: string, fd: int, db: int, start_time: int) {
@@ -102,10 +122,10 @@ fn handle_request(method: string, path: string, body: string, fd: int, db: int, 
         if path == "/api/users" {
             Http.respond(fd, 201, "application/json", api_add_user(db, body))
         } else {
-            Http.respond(fd, 405, "application/json", "{\"error\":\"method not allowed\"}")
+            Http.respond(fd, 405, "application/json", json_error("method not allowed"))
         }
     } else {
-        Http.respond(fd, 405, "application/json", "{\"error\":\"method not allowed\"}")
+        Http.respond(fd, 405, "application/json", json_error("method not allowed"))
     }
 }
 
