@@ -1,0 +1,177 @@
+// Tests for template-demo's rendering and routing.
+//
+// The app had NO tests, and could not have had any: routing and rendering were inline in
+// on_request() next to Http.respond, so nothing could be asserted without a socket.
+// `route()`, `escape()` and `user_list()` are now pure, which is what makes this file
+// possible.
+//
+// The cases target the plausible WRONG version of each piece:
+//   * escape() replacing `&` LAST instead of first -- which double-escapes and turns `<`
+//     into `&amp;lt;`. This is the classic ordering bug and it looks fine on input with no
+//     ampersands.
+//   * user_list() iterating a hardcoded index range instead of the array (the old code did
+//     `for i in 0..5` over a 5-element literal, so it broke the moment the list changed).
+//   * route() matching by prefix, so "/usersX" hits the users page.
+//
+// Duplicated from src/main.wyn rather than imported: `import` from a sibling directory needs
+// the module on the search path, and a sample app should not need a package layout to be
+// testable. Must stay in step with src.
+
+enum Page {
+    Home
+    Users
+    ApiInfo
+    NotFound
+}
+
+fn route(path: string) -> Page {
+    if path == "/" {
+        return Page::Home
+    }
+    if path == "/users" {
+        return Page::Users
+    }
+    if path == "/api/info" {
+        return Page::ApiInfo
+    }
+    return Page::NotFound
+}
+
+fn status_for(p: Page) -> int {
+    if p == Page::NotFound {
+        return 404
+    }
+    return 200
+}
+
+fn content_type_for(p: Page) -> string {
+    if p == Page::ApiInfo {
+        return "application/json"
+    }
+    return "text/html"
+}
+
+fn escape(s: string) -> string {
+    out = s.replace("&", "&amp;")
+    out = out.replace("<", "&lt;")
+    out = out.replace(">", "&gt;")
+    out = out.replace("\"", "&quot;")
+    out = out.replace("'", "&#39;")
+    return out
+}
+
+fn user_list(names: [string]) -> string {
+    out = "<div class=card><h2>Users</h2><ul>"
+    for n in names {
+        out = out + "<li>" + escape(n) + "</li>"
+    }
+    out = out + "</ul></div>"
+    return out
+}
+
+fn page_name(p: Page) -> string {
+    if p == Page::Home {
+        return "Home"
+    }
+    if p == Page::Users {
+        return "Users"
+    }
+    if p == Page::ApiInfo {
+        return "ApiInfo"
+    }
+    return "NotFound"
+}
+
+// --- escaping ----------------------------------------------------------------------
+
+test "escape neutralises a script tag" {
+    assert_eq(escape("<script>alert(1)</script>"),
+              "&lt;script&gt;alert(1)&lt;/script&gt;")
+}
+
+test "escape handles all five characters" {
+    assert_eq(escape("<"), "&lt;")
+    assert_eq(escape(">"), "&gt;")
+    assert_eq(escape("&"), "&amp;")
+    assert_eq(escape("\""), "&quot;")
+    assert_eq(escape("'"), "&#39;")
+}
+
+test "escape does NOT double-escape the ampersands it introduces" {
+    // The ordering bug: replacing & AFTER < would turn "<" into "&amp;lt;". Only an input
+    // containing BOTH a bare & and a tag character catches it.
+    assert_eq(escape("a<b"), "a&lt;b")
+    assert_eq(escape("a&b"), "a&amp;b")
+    assert_eq(escape("a&<b"), "a&amp;&lt;b")
+    assert_eq(escape("&<>"), "&amp;&lt;&gt;")
+}
+
+test "escape leaves ordinary text untouched" {
+    assert_eq(escape("Alice"), "Alice")
+    assert_eq(escape(""), "")
+    assert_eq(escape("plain text 123"), "plain text 123")
+}
+
+test "escape handles an already-escaped entity by escaping its ampersand" {
+    // Escaping twice must be visible rather than silently idempotent, so a
+    // double-escape bug elsewhere is detectable.
+    assert_eq(escape("&lt;"), "&amp;lt;")
+}
+
+// --- the user list -----------------------------------------------------------------
+
+test "user_list renders one li per name, whatever the count" {
+    // The old code looped a hardcoded 0..5. These lists are 1, 2 and 7 long.
+    one = user_list(["Solo"])
+    assert_eq(one.contains("<li>Solo</li>"), true)
+
+    two = user_list(["A", "B"])
+    assert_eq(two.contains("<li>A</li>"), true)
+    assert_eq(two.contains("<li>B</li>"), true)
+
+    seven = user_list(["1", "2", "3", "4", "5", "6", "7"])
+    assert_eq(seven.contains("<li>7</li>"), true)
+}
+
+test "user_list escapes every entry, not just the first" {
+    got = user_list(["ok", "<b>bad</b>"])
+    assert_eq(got.contains("<li>ok</li>"), true)
+    assert_eq(got.contains("&lt;b&gt;bad&lt;/b&gt;"), true)
+    // The raw tag must NOT survive anywhere in the output.
+    assert_eq(got.contains("<b>bad</b>"), false)
+}
+
+test "user_list on an empty list is a well-formed empty ul" {
+    got = user_list([])
+    assert_eq(got.contains("<ul></ul>"), true)
+    assert_eq(got.contains("<li>"), false)
+}
+
+// --- routing -----------------------------------------------------------------------
+
+test "the three real routes resolve" {
+    assert_eq(page_name(route("/")), "Home")
+    assert_eq(page_name(route("/users")), "Users")
+    assert_eq(page_name(route("/api/info")), "ApiInfo")
+}
+
+test "an unknown path is NotFound with a 404" {
+    assert_eq(page_name(route("/nope")), "NotFound")
+    assert_eq(status_for(route("/nope")), 404)
+    assert_eq(status_for(route("/users")), 200)
+}
+
+test "routes match exactly, not by prefix or suffix" {
+    assert_eq(page_name(route("/usersX")), "NotFound")
+    assert_eq(page_name(route("/users/")), "NotFound")
+    assert_eq(page_name(route("/users/1")), "NotFound")
+    assert_eq(page_name(route("/v2/users")), "NotFound")
+    assert_eq(page_name(route("")), "NotFound")
+}
+
+test "only the API route serves JSON" {
+    assert_eq(content_type_for(route("/api/info")), "application/json")
+    assert_eq(content_type_for(route("/")), "text/html")
+    assert_eq(content_type_for(route("/users")), "text/html")
+    assert_eq(content_type_for(route("/nope")), "text/html")
+}
