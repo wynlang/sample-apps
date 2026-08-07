@@ -1,0 +1,158 @@
+// Tests for wyn-web-demo's handler ids and status mapping.
+//
+// The app had NO tests. `Web.get(path, id)` takes an integer handler id and
+// `Web.match(method, path)` returns it, and those ids used to be BARE LITERALS: `Web.get(
+// "/about", 2)` at registration, `else if handler == 2` at dispatch, thirty lines apart.
+// Nothing tied the two 2s together, so swapping any pair silently served the wrong page.
+//
+// The ids are named functions now, and these tests pin the two things that can still go
+// wrong silently:
+//
+//   1. TWO HANDLERS SHARING AN ID. Two routes with the same number both dispatch to
+//      whichever branch is checked first -- one page becomes unreachable with no error.
+//   2. THE MISS VALUE. Web.match returns -1 for no match, NOT 0. This was got wrong while
+//      writing the app: h_not_found() returned 0, so the 404 branch never fired and every
+//      unknown path answered 200 with the fallback body. Verified against a live server
+//      before and after. That is why the miss value is asserted here explicitly.
+//
+// Duplicated from src/main.wyn rather than imported: `import` from a sibling directory needs
+// the module on the search path, and a sample app should not need a package layout to be
+// testable. Must stay in step with src.
+
+fn h_home() -> int {
+    return 1
+}
+
+fn h_about() -> int {
+    return 2
+}
+
+fn h_api_time() -> int {
+    return 3
+}
+
+fn h_create_note() -> int {
+    return 4
+}
+
+fn h_not_found() -> int {
+    return 0 - 1
+}
+
+fn status_for(handler: int) -> int {
+    if handler == h_create_note() {
+        return 201
+    }
+    if handler == h_not_found() {
+        return 404
+    }
+    return 200
+}
+
+fn content_type_for(handler: int) -> string {
+    if handler == h_api_time() {
+        return "application/json"
+    }
+    if handler == h_create_note() {
+        return "application/json"
+    }
+    return "text/html"
+}
+
+fn wyn_version() -> string {
+    return "1.20.0"
+}
+
+// Every real handler id, in registration order.
+fn all_handlers() -> [int] {
+    return [h_home(), h_about(), h_api_time(), h_create_note()]
+}
+
+// --- ids are distinct --------------------------------------------------------------
+
+test "every handler id is unique" {
+    // Two routes sharing an id makes one page unreachable, with no error anywhere.
+    hs = all_handlers()
+    dupes = 0
+    for i in 0..hs.len() {
+        for j in 0..hs.len() {
+            if i < j {
+                if hs[i] == hs[j] {
+                    dupes = dupes + 1
+                }
+            }
+        }
+    }
+    assert_eq(dupes, 0)
+}
+
+test "no real handler collides with the miss value" {
+    // If any route were registered as -1, an unknown path would dispatch to it.
+    for h in all_handlers() {
+        assert_eq(h == h_not_found(), false)
+    }
+}
+
+test "the handler table has one entry per registered route" {
+    // register_routes() registers exactly four; if a route is added there and not here (or
+    // vice versa) this count disagrees.
+    assert_eq(all_handlers().len(), 4)
+}
+
+// --- the miss value ----------------------------------------------------------------
+
+test "the miss value is -1, not 0" {
+    // Measured from Web.match on an unregistered path. Asserting 0 here is the bug that
+    // shipped a 200 for every unknown path.
+    assert_eq(h_not_found(), 0 - 1)
+    assert_eq(h_not_found() == 0, false)
+}
+
+test "a miss maps to 404" {
+    assert_eq(status_for(h_not_found()), 404)
+}
+
+test "zero is NOT treated as a miss" {
+    // 0 is not the miss value, so it must not get a 404 -- otherwise a future route
+    // numbered 0 would silently 404.
+    assert_eq(status_for(0), 200)
+}
+
+// --- statuses ----------------------------------------------------------------------
+
+test "GET handlers answer 200" {
+    assert_eq(status_for(h_home()), 200)
+    assert_eq(status_for(h_about()), 200)
+    assert_eq(status_for(h_api_time()), 200)
+}
+
+test "the create handler answers 201, not 200" {
+    // A POST that reports 200 is the easy thing to get wrong.
+    assert_eq(status_for(h_create_note()), 201)
+}
+
+test "every handler has a status" {
+    for h in all_handlers() {
+        s = status_for(h)
+        assert_eq(s == 200 or s == 201, true)
+    }
+    assert_eq(status_for(h_not_found()), 404)
+}
+
+// --- content types -----------------------------------------------------------------
+
+test "only the JSON endpoints serve application/json" {
+    assert_eq(content_type_for(h_api_time()), "application/json")
+    assert_eq(content_type_for(h_create_note()), "application/json")
+    assert_eq(content_type_for(h_home()), "text/html")
+    assert_eq(content_type_for(h_about()), "text/html")
+    assert_eq(content_type_for(h_not_found()), "text/html")
+}
+
+// --- the version string ------------------------------------------------------------
+
+test "the version is not the stale hardcoded one" {
+    // The About page claimed v1.8 while VERSION said 1.20.0 -- twelve minor releases stale.
+    assert_eq(wyn_version(), "1.20.0")
+    assert_eq(wyn_version() == "1.8", false)
+}

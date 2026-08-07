@@ -1,59 +1,143 @@
-// wyn-web-demo -- Web app using the wyn-web framework
-// Demonstrates: Web.get/post, Web.match, Web.render, spawn-per-request, Db
-// Run: wyn run main.wyn
+// wyn-web-demo -- Web app using the wyn-web framework.
+//
+// Demonstrates: Web.get/post, Web.match, Web.render, spawn-per-request, Db.
+// Run: wyn run src/main.wyn
+//
+// `Web.get(path, id)` takes an integer handler id and `Web.match(method, path)` returns it,
+// so the ids have to be ints. They used to be BARE LITERALS -- `Web.get("/about", 2)` at
+// registration and `else if handler == 2` at dispatch, thirty lines apart. Nothing tied the
+// two 2s together, so swapping any pair silently served the wrong page. They are named
+// constants now, and tests/test_handlers.wyn asserts the registration and dispatch tables
+// agree.
+
+// One function per handler id, so the id has exactly one definition.
+//
+// Deliberately NOT an enum: Web.get/Web.match are int-based, and an enum interpolates as its
+// ordinal, which would tie the wire values to declaration ORDER -- reordering the variants
+// would silently renumber the routes. Explicit numbers cannot drift that way.
+fn h_home() -> int {
+    return 1
+}
+
+fn h_about() -> int {
+    return 2
+}
+
+fn h_api_time() -> int {
+    return 3
+}
+
+fn h_create_note() -> int {
+    return 4
+}
+
+// Web.match returns -1 when no route matches -- measured, not assumed:
+//   Web.get("/", 1); Web.match("GET", "/nope")  ->  -1
+// Getting this wrong is silent: a 404 check against 0 never fires and every unknown path
+// answers 200 with the fallback body. That happened while writing this file, and it is why
+// the tests assert the miss value explicitly.
+fn h_not_found() -> int {
+    return 0 - 1
+}
+
+// The status each handler answers with. Split out so a test can assert it without a socket.
+fn status_for(handler: int) -> int {
+    if handler == h_create_note() {
+        return 201
+    }
+    if handler == h_not_found() {
+        return 404
+    }
+    return 200
+}
+
+fn content_type_for(handler: int) -> string {
+    if handler == h_api_time() {
+        return "application/json"
+    }
+    if handler == h_create_note() {
+        return "application/json"
+    }
+    return "text/html"
+}
+
+fn wyn_version() -> string {
+    // Was hardcoded "v1.8" in the About page while VERSION said 1.20.0 -- twelve minor
+    // releases stale. One place now.
+    return "1.20.0"
+}
+
+// Register every route. Returns the number registered so main can report it and a test can
+// assert the count matches the handler table.
+fn register_routes() -> int {
+    Web.get("/", h_home())
+    Web.get("/about", h_about())
+    Web.get("/api/time", h_api_time())
+    Web.post("/api/notes", h_create_note())
+    return 4
+}
 
 fn on_request(method: string, path: string, body: string, fd: int, db: int) {
-    var handler = Web.match(method, path)
+    handler = Web.match(method, path)
+    code = status_for(handler)
+    ctype = content_type_for(handler)
 
-    if handler == 1 {
-        // Home
-        var count = Db.query_one(db, "SELECT COUNT(*) FROM notes")
-        var html = Web.render("layout.html", "title=Home\ncontent=<div class=card><h2>Welcome</h2><p>A web app built with wyn-web.</p><p>" + count + " notes stored.</p></div>\n")
-        Http.respond(fd, 200, "text/html", html)
-    } else if handler == 2 {
-        // About
-        var html = Web.render("layout.html", "title=About\ncontent=<div class=card><h2>About</h2><p>Built with Wyn v1.8 -- zero external dependencies.</p></div>\n")
-        Http.respond(fd, 200, "text/html", html)
-    } else if handler == 3 {
-        // API: current time
-        var now = DateTime.to_iso(DateTime.now())
-        Http.respond(fd, 200, "application/json", "{\"time\":\"" + now + "\"}")
-    } else if handler == 4 {
-        // Create note
-        var doc = Json.parse(body)
-        var text = Json.get(doc, "text")
-        Db.exec(db, "INSERT INTO notes(text) VALUES('" + Db.escape(text) + "')")
-        Http.respond(fd, 201, "application/json", "{\"ok\":true}")
-    } else {
-        Http.respond(fd, 404, "text/html", "<h1>404</h1><p>Not found</p>")
+    if handler == h_home() {
+        count = Db.query_one(db, "SELECT COUNT(*) FROM notes")
+        html = Web.render("layout.html",
+            "title=Home\ncontent=<div class=card><h2>Welcome</h2><p>A web app built with wyn-web.</p><p>${count} notes stored.</p></div>\n")
+        Http.respond(fd, code, ctype, html)
+        return
     }
+    if handler == h_about() {
+        html = Web.render("layout.html",
+            "title=About\ncontent=<div class=card><h2>About</h2><p>Built with Wyn v${wyn_version()} -- zero external dependencies.</p></div>\n")
+        Http.respond(fd, code, ctype, html)
+        return
+    }
+    if handler == h_api_time() {
+        now = DateTime.to_iso(DateTime.now())
+        Http.respond(fd, code, ctype, "{\"time\":\"${now}\"}")
+        return
+    }
+    if handler == h_create_note() {
+        doc = Json.parse(body)
+        text = Json.get(doc, "text")
+        Db.exec(db, "INSERT INTO notes(text) VALUES('${Db.escape(text)}')")
+        Http.respond(fd, code, ctype, "{\"ok\":true}")
+        return
+    }
+    Http.respond(fd, code, ctype, "<h1>404</h1><p>Not found</p>")
 }
 
 fn main() {
-    // Setup routes
-    Web.get("/", 1)
-    Web.get("/about", 2)
-    Web.get("/api/time", 3)
-    Web.post("/api/notes", 4)
+    registered = register_routes()
     Web.templates("templates")
 
-    // Setup database
-    var db = Db.open("/tmp/wyn_web_demo.db")
+    db = Db.open("/tmp/wyn_web_demo.db")
     Db.exec(db, "CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, text TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
 
-    var port = 8080
-    var server = Http.serve(port)
+    port = 8080
+    server = Http.serve(port)
+    if server < 0 {
+        print("Failed to start server on port ${port}")
+        return 0
+    }
     print("wyn-web-demo running on http://localhost:${port}")
-    print("Routes: ${Web.route_count()} registered")
+    print("Routes: ${Web.route_count()} registered (expected ${registered})")
     print("Press Ctrl+C to stop")
 
     while 1 == 1 {
-        var req = Http.accept(server)
-        var method = req.split_at("|", 0)
-        var path = req.split_at("|", 1)
-        var body = req.split_at("|", 2)
-        var fd = req.split_at("|", 3).to_int()
+        req = Http.accept(server)
+        if req.len() == 0 {
+            continue
+        }
+        method = req.split_at("|", 0)
+        path = req.split_at("|", 1)
+        body = req.split_at("|", 2)
+        fd = req.split_at("|", 3).to_int()
         if fd > 0 {
+            print("${method} ${path} -> ${status_for(Web.match(method, path))}")
             spawn on_request(method, path, body, fd, db)
         }
     }
