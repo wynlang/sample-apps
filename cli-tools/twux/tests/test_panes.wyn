@@ -1,0 +1,220 @@
+// Tests for twux's pure logic: pane geometry, the close-and-shift, and the active-index
+// clamp.
+//
+// twux is an interactive terminal app -- it opens raw mode, reads keys and writes escape
+// sequences -- so the app itself cannot be run in a test. But the parts that can be WRONG
+// without crashing are all arithmetic and array shuffling, and those are extracted here.
+//
+// Each case targets a plausible wrong version:
+//   * geometry that leaves a one-column GAP or OVERLAP between panes, which looks like a
+//     rendering glitch rather than a bug. The last pane absorbs the remainder from the
+//     integer division, and that is the part an off-by-one hits.
+//   * a close-and-shift that drops the wrong pane, or leaves a stale copy of the closed
+//     pane's content in the last slot.
+//   * an active index left pointing past the end after a close, which then indexes out of
+//     bounds. (On a struct array that read used to SEGFAULT rather than panic -- fixed in
+//     the compiler, but the clamp is the app's job.)
+//
+// The units are copied from src/main.wyn rather than imported: `import` from a sibling
+// directory needs the module on the search path, and a sample app should not need a package
+// layout to be testable. They must stay in step with src.
+
+// --- geometry (verbatim from draw_one_pane) ---------------------------------------
+
+fn pane_start(cols: int, pane_count: int, idx: int) -> int {
+    base = cols / pane_count
+    return base * idx + 1
+}
+
+fn pane_width(cols: int, pane_count: int, idx: int) -> int {
+    base = cols / pane_count
+    if idx == pane_count - 1 {
+        // The last pane takes the remainder, so integer division cannot lose columns.
+        return cols - base * (pane_count - 1)
+    }
+    return base
+}
+
+// Total width across every pane -- must equal the terminal width exactly.
+fn total_width(cols: int, pane_count: int) -> int {
+    t = 0
+    for i in 0..pane_count {
+        t += pane_width(cols, pane_count, i)
+    }
+    return t
+}
+
+// Count places where pane i+1 does not start immediately after pane i ends.
+fn gap_count(cols: int, pane_count: int) -> int {
+    gaps = 0
+    for i in 0..pane_count {
+        if i < pane_count - 1 {
+            expect = pane_start(cols, pane_count, i) + pane_width(cols, pane_count, i)
+            if pane_start(cols, pane_count, i + 1) != expect {
+                gaps += 1
+            }
+        }
+    }
+    return gaps
+}
+
+// --- pane list operations ---------------------------------------------------------
+
+struct Pane {
+    title: string
+    cmd: string
+    content: string
+}
+
+// Close pane `at`, shifting the rest left. src/main.wyn does this with three hand-unrolled
+// branches over three parallel arrays; this is the same rule expressed once.
+fn close_pane(ps: [Pane], at: int) -> [Pane] {
+    out = []
+    i = 0
+    for p in ps {
+        if i != at {
+            out.push(p)
+        }
+        i += 1
+    }
+    return out
+}
+
+// After closing, the active index must not point past the end. src/main.wyn:
+//   pc -= 1;  if act >= pc { act = pc - 1 }
+fn clamp_active(active: int, pane_count: int) -> int {
+    if active >= pane_count {
+        return pane_count - 1
+    }
+    return active
+}
+
+fn titles_of(ps: [Pane]) -> string {
+    t = []
+    for p in ps {
+        t.push(p.title)
+    }
+    return t.join(",")
+}
+
+fn four_panes() -> [Pane] {
+    return [
+        Pane { title: "files", cmd: "ls", content: "A" },
+        Pane { title: "procs", cmd: "ps", content: "B" },
+        Pane { title: "disk", cmd: "df", content: "C" },
+        Pane { title: "env", cmd: "env", content: "D" }
+    ]
+}
+
+// --- geometry tests ---------------------------------------------------------------
+
+test "panes tile the terminal exactly, for every pane count" {
+    // A total that differs from cols by even one means a gap or an overlap on screen.
+    for pc in [1, 2, 3, 4] {
+        assert_eq(total_width(80, pc), 80)
+    }
+}
+
+test "panes tile widths that do not divide evenly" {
+    // 81/2, 81/4, 100/3 and 7/4 all have remainders -- the last pane must absorb them.
+    assert_eq(total_width(81, 2), 81)
+    assert_eq(total_width(81, 4), 81)
+    assert_eq(total_width(100, 3), 100)
+    assert_eq(total_width(7, 4), 7)
+}
+
+test "no gaps or overlaps between adjacent panes" {
+    for pc in [1, 2, 3, 4] {
+        assert_eq(gap_count(80, pc), 0)
+        assert_eq(gap_count(81, pc), 0)
+        assert_eq(gap_count(7, pc), 0)
+    }
+}
+
+test "the first pane starts at column 1" {
+    // Terminal columns are 1-based; starting at 0 would write off-screen.
+    for pc in [1, 2, 3, 4] {
+        assert_eq(pane_start(80, pc, 0), 1)
+    }
+}
+
+test "the last pane absorbs the division remainder" {
+    // 81/4 = 20, so panes 0..2 are 20 wide and the last one is 21.
+    assert_eq(pane_width(81, 4, 0), 20)
+    assert_eq(pane_width(81, 4, 1), 20)
+    assert_eq(pane_width(81, 4, 2), 20)
+    assert_eq(pane_width(81, 4, 3), 21)
+}
+
+test "a single pane spans the whole width" {
+    assert_eq(pane_width(80, 1, 0), 80)
+    assert_eq(pane_start(80, 1, 0), 1)
+}
+
+// --- close-and-shift tests --------------------------------------------------------
+
+test "closing the first pane shifts the rest left" {
+    assert_eq(titles_of(close_pane(four_panes(), 0)), "procs,disk,env")
+}
+
+test "closing a middle pane keeps both sides in order" {
+    // The order matters: a shift that overwrites in the wrong direction duplicates a title.
+    assert_eq(titles_of(close_pane(four_panes(), 1)), "files,disk,env")
+    assert_eq(titles_of(close_pane(four_panes(), 2)), "files,procs,env")
+}
+
+test "closing the last pane drops exactly it" {
+    // src/main.wyn has unrolled branches for active 0, 1 and 2 but none for 3 -- closing the
+    // last pane relies on the count decrementing alone. This pins that it is right.
+    assert_eq(titles_of(close_pane(four_panes(), 3)), "files,procs,disk")
+}
+
+test "closing always removes exactly one pane" {
+    for at in [0, 1, 2, 3] {
+        assert_eq(close_pane(four_panes(), at).len(), 3)
+    }
+}
+
+test "closing carries the cmd and content with the title" {
+    // The three parallel arrays in src must shift together; a struct makes that automatic,
+    // but the test states the requirement.
+    got = close_pane(four_panes(), 1)
+    assert_eq(got[0].content, "A")
+    assert_eq(got[1].content, "C")
+    assert_eq(got[1].cmd, "df")
+}
+
+test "closing down to one pane leaves the right one" {
+    ps = four_panes()
+    ps = close_pane(ps, 0)
+    ps = close_pane(ps, 0)
+    ps = close_pane(ps, 0)
+    assert_eq(titles_of(ps), "env")
+}
+
+// --- active-index clamp -----------------------------------------------------------
+
+test "the active index is clamped when the last pane closes" {
+    // Active was 3 of 4; after closing there are 3 panes, so the last valid index is 2.
+    assert_eq(clamp_active(3, 3), 2)
+    assert_eq(clamp_active(2, 2), 1)
+    assert_eq(clamp_active(1, 1), 0)
+}
+
+test "an in-range active index is left alone" {
+    assert_eq(clamp_active(0, 4), 0)
+    assert_eq(clamp_active(1, 4), 1)
+    assert_eq(clamp_active(2, 3), 2)
+}
+
+test "the clamp never returns an out-of-range index" {
+    // An unclamped index indexes past the end. On a struct array that read used to
+    // segfault rather than panic, so the clamp is the app's own safety net.
+    for pc in [1, 2, 3, 4] {
+        for act in [0, 1, 2, 3] {
+            c = clamp_active(act, pc)
+            assert_eq(c >= 0, true)
+            assert_eq(c < pc, true)
+        }
+    }
+}
