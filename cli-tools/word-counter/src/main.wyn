@@ -79,6 +79,16 @@ fn main() {
     print("  \x1b[90m${total} words, ${ranked.len()} distinct\x1b[0m")
     print("")
 
+    // An empty (or punctuation-only) file leaves `ranked` empty, and reading
+    // `ranked[0].n` below then SEGFAULTED: a struct-array out-of-bounds read is
+    // unchecked, unlike an int-array read which panics with a file and line. Bail out
+    // before indexing rather than relying on the runtime to catch it.
+    if ranked.len() == 0 {
+        print("  \x1b[90mno words to rank\x1b[0m")
+        print("")
+        return
+    }
+
     // The top 15, as a bar chart scaled to the most common word.
     var top = ranked[0].n
     var shown = 0

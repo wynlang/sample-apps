@@ -1,18 +1,151 @@
-test "string split" {
-    var words = "hello world foo".split(" ")
-    assert_eq(words.len(), 3)
+// Tests for word-counter.
+//
+// The previous version of this file asserted only that `split`, `HashMap` and `trim`
+// work -- i.e. it tested the STDLIB, not this app. Nothing covered `normalize()` or the
+// ranking sort, which are the two pieces that can silently produce a wrong answer while
+// still printing a plausible chart. Those are the focus here; the stdlib assertions that
+// main() genuinely leans on are kept.
+//
+// `normalize` and the ranking sort are duplicated from src/main.wyn rather than imported:
+// `import` from a sibling directory needs the module on the search path, and a sample app
+// should not need a package layout to be testable. They must stay in step with src.
+
+struct Count {
+    word: string
+    n: int
 }
 
-test "hashmap counting" {
-    var counts = HashMap.new()
-    counts.set("hello", "1")
-    counts.set("world", "1")
-    assert_eq(counts.len(), 2)
-    assert(counts.has("hello"))
+fn normalize(w: string) -> string {
+    var out = ""
+    for ch in w.lower().chars() {
+        if (ch >= "a" and ch <= "z") or (ch >= "0" and ch <= "9") {
+            out = out + ch
+        }
+    }
+    return out
 }
 
-test "string methods" {
+// Selection sort by count, descending -- a copy of the ranking step in main().
+fn rank(counts: [Count]) -> [Count] {
+    ranked = []
+    for c in counts {
+        ranked.push(c)
+    }
+    var i = 0
+    while i < ranked.len() {
+        var max = i
+        var j = i + 1
+        while j < ranked.len() {
+            if ranked[j].n > ranked[max].n {
+                max = j
+            }
+            j += 1
+        }
+        if max != i {
+            var tmp = ranked[i]
+            ranked[i] = ranked[max]
+            ranked[max] = tmp
+        }
+        i += 1
+    }
+    return ranked
+}
+
+fn joined(cs: [Count]) -> string {
+    parts = []
+    for c in cs {
+        parts.push("${c.word}=${c.n}")
+    }
+    return parts.join(",")
+}
+
+// --- normalize -------------------------------------------------------------------
+
+test "normalize lowercases so Cat and cat are one word" {
+    assert_eq(normalize("Cat"), "cat")
+    assert_eq(normalize("CAT"), "cat")
+    assert_eq(normalize("cat"), "cat")
+}
+
+test "normalize strips punctuation from both ends and the middle" {
+    assert_eq(normalize("cat,"), "cat")
+    assert_eq(normalize("(cat)"), "cat")
+    assert_eq(normalize("do-not"), "donot")
+}
+
+test "normalize keeps digits" {
+    // Dropping digits would silently merge "utf8" into "utf".
+    assert_eq(normalize("utf8"), "utf8")
+    assert_eq(normalize("2024"), "2024")
+}
+
+test "normalize yields empty for punctuation-only input" {
+    // main() relies on this to skip tokens: `if w.len() == 0 { continue }`.
+    assert_eq(normalize(",,,"), "")
+    assert_eq(normalize("..."), "")
+    assert_eq(normalize(""), "")
+}
+
+// --- ranking ---------------------------------------------------------------------
+
+test "rank orders by descending count" {
+    got = rank([
+        Count { word: "a", n: 1 },
+        Count { word: "b", n: 5 },
+        Count { word: "c", n: 3 }
+    ])
+    assert_eq(joined(got), "b=5,c=3,a=1")
+}
+
+test "rank leaves an already-sorted list alone" {
+    got = rank([
+        Count { word: "b", n: 5 },
+        Count { word: "c", n: 3 },
+        Count { word: "a", n: 1 }
+    ])
+    assert_eq(joined(got), "b=5,c=3,a=1")
+}
+
+test "rank handles a single entry" {
+    got = rank([Count { word: "only", n: 2 }])
+    assert_eq(joined(got), "only=2")
+}
+
+test "rank handles an empty list without indexing it" {
+    // This is the case that SEGFAULTED in main(): reading ranked[0].n on an empty
+    // struct array is unchecked, unlike an int array which panics with a line number.
+    got = rank([])
+    assert_eq(got.len(), 0)
+    assert_eq(joined(got), "")
+}
+
+test "rank keeps every entry, it does not dedupe or drop" {
+    got = rank([
+        Count { word: "a", n: 2 },
+        Count { word: "b", n: 2 },
+        Count { word: "c", n: 2 }
+    ])
+    assert_eq(got.len(), 3)
+}
+
+// --- the stdlib behaviour main() depends on ---------------------------------------
+
+test "split on a space yields one token per word" {
+    assert_eq("hello world foo".split(" ").len(), 3)
+}
+
+test "string case and trim helpers" {
     assert_eq("  hello  ".trim(), "hello")
     assert_eq("Hello".lower(), "hello")
     assert_eq("hello".upper(), "HELLO")
+}
+
+test "get_int returns 0 for an absent key" {
+    // main() has no first-sight special case; it relies on 0 + 1 == 1.
+    counts = HashMap.new()
+    assert_eq(counts.get_int("nope"), 0)
+    counts.insert_int("seen", counts.get_int("seen") + 1)
+    assert_eq(counts.get_int("seen"), 1)
+    counts.insert_int("seen", counts.get_int("seen") + 1)
+    assert_eq(counts.get_int("seen"), 2)
 }
