@@ -1,0 +1,173 @@
+// Tests for everything api-client does that does NOT need the network.
+//
+// src/main.wyn is itself a checklist -- it asserts and counts failures -- but exactly one of
+// its six checks needs `https://httpbin.org` to be reachable, and that one check makes the
+// whole program unrunnable as a gate: offline it reports a failure and a nonzero verdict, so
+// CI cannot tell "the network is down" from "base64 is broken".
+//
+// Everything else it exercises (base64, HMAC-SHA256, SHA256, JSON, CSV) is pure and belongs
+// in a test that runs anywhere. That is this file. src/main.wyn keeps the live HTTP call,
+// because demonstrating a real request is the point of the demo.
+//
+// The cases target values that a plausible wrong implementation still produces:
+//   * base64 that round-trips but pads wrongly -- so the EXACT encoding is asserted, not
+//     just decode(encode(x)) == x, which passes even if both sides are wrong the same way.
+//   * a hash of the right LENGTH but the wrong value -- so known-answer vectors are used.
+//     Asserting only `len() == 64` is what src/main.wyn does, and it cannot tell SHA256 from
+//     any other 64-hex-char output.
+//   * CSV where the header row is or is not counted, and lookup by NAME vs by index.
+
+// --- base64 ------------------------------------------------------------------------
+
+test "base64 round-trips" {
+    creds = Encoding.base64_encode("user:pass123")
+    assert_eq(Encoding.base64_decode(creds), "user:pass123")
+}
+
+test "base64 produces the exact expected encoding" {
+    // A round-trip alone passes even if encode and decode are wrong in the same way.
+    // These are the canonical RFC 4648 vectors.
+    assert_eq(Encoding.base64_encode("user:pass123"), "dXNlcjpwYXNzMTIz")
+    assert_eq(Encoding.base64_encode("f"), "Zg==")
+    assert_eq(Encoding.base64_encode("fo"), "Zm8=")
+    assert_eq(Encoding.base64_encode("foo"), "Zm9v")
+    assert_eq(Encoding.base64_encode("foob"), "Zm9vYg==")
+}
+
+test "base64 padding is correct for every input length mod 3" {
+    // 1 byte -> two '=', 2 bytes -> one '=', 3 bytes -> none. Getting this wrong is the
+    // classic base64 bug and a round-trip against your own decoder hides it.
+    assert_eq(Encoding.base64_encode("a").ends_with("=="), true)
+    assert_eq(Encoding.base64_encode("ab").ends_with("="), true)
+    assert_eq(Encoding.base64_encode("ab").ends_with("=="), false)
+    assert_eq(Encoding.base64_encode("abc").ends_with("="), false)
+}
+
+test "base64 handles an empty string" {
+    assert_eq(Encoding.base64_encode(""), "")
+    assert_eq(Encoding.base64_decode(""), "")
+}
+
+// --- SHA256 ------------------------------------------------------------------------
+
+test "sha256 matches known answers, not just a length" {
+    // src/main.wyn asserts only len() == 64, which cannot tell SHA256 from any other
+    // 64-hex-char output. These are the published vectors.
+    assert_eq(Crypto.sha256(""),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    assert_eq(Crypto.sha256("abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+}
+
+test "sha256 output is 64 hex characters" {
+    assert_eq(Crypto.sha256("benchmark data").len(), 64)
+    assert_eq(Crypto.sha256("").len(), 64)
+}
+
+test "sha256 is sensitive to a single-character change" {
+    // A hash that ignores part of its input still has the right length.
+    a = Crypto.sha256("payload")
+    b = Crypto.sha256("payloae")
+    assert_eq(a == b, false)
+}
+
+// --- HMAC-SHA256 -------------------------------------------------------------------
+
+test "hmac_sha256 output is 64 hex characters" {
+    sig = Crypto.hmac_sha256("secret-key", "GET /api/data 12345")
+    assert_eq(sig.len(), 64)
+}
+
+test "hmac_sha256 depends on the KEY, not just the message" {
+    // An implementation that ignored the key would still produce 64 chars and would still
+    // look stable across runs -- this is the check that catches it.
+    msg = "GET /api/data 12345"
+    a = Crypto.hmac_sha256("secret-key", msg)
+    b = Crypto.hmac_sha256("other-key", msg)
+    assert_eq(a == b, false)
+}
+
+test "hmac_sha256 depends on the message" {
+    key = "secret-key"
+    a = Crypto.hmac_sha256(key, "GET /api/data")
+    b = Crypto.hmac_sha256(key, "GET /api/other")
+    assert_eq(a == b, false)
+}
+
+test "hmac_sha256 is deterministic" {
+    // A signature that changed per call would break any real signing scheme.
+    a = Crypto.hmac_sha256("k", "m")
+    b = Crypto.hmac_sha256("k", "m")
+    assert_eq(a, b)
+}
+
+test "hmac_sha256 is not the same as a plain sha256 of the message" {
+    // A stub that ignored the key entirely would return sha256(msg).
+    msg = "GET /api/data"
+    assert_eq(Crypto.hmac_sha256("secret-key", msg) == Crypto.sha256(msg), false)
+}
+
+// --- JSON --------------------------------------------------------------------------
+
+test "json round-trips the values it was given" {
+    req = Json.new()
+    Json.set(req, "name", "Wyn Language")
+    Json.set_int(req, "version", 2)
+    Json.set_bool(req, "stable", 1)
+    pretty = Json.to_pretty_string(req)
+    assert_eq(pretty.contains("Wyn Language"), true)
+    assert_eq(pretty.contains("version"), true)
+    assert_eq(pretty.contains("stable"), true)
+}
+
+test "json parse reads back a value set by name" {
+    doc = Json.parse("{\"origin\":\"1.2.3.4\",\"n\":7}")
+    assert_eq(Json.get(doc, "origin"), "1.2.3.4")
+}
+
+test "json get on an absent key does not return a neighbour's value" {
+    // Returning the wrong field is worse than returning nothing.
+    doc = Json.parse("{\"a\":\"first\",\"b\":\"second\"}")
+    assert_eq(Json.get(doc, "a"), "first")
+    assert_eq(Json.get(doc, "b"), "second")
+    assert_eq(Json.get(doc, "missing") == "first", false)
+}
+
+// --- CSV ---------------------------------------------------------------------------
+
+test "csv row_count INCLUDES the header row" {
+    // Three data rows plus a header. Off by one here shifts every subsequent lookup.
+    csv = Csv.parse("lang,year,type\nWyn,2024,compiled\nGo,2009,compiled\nPython,1991,interpreted")
+    assert_eq(Csv.row_count(csv), 4)
+}
+
+test "csv headers are read in order" {
+    csv = Csv.parse("lang,year,type\nWyn,2024,compiled")
+    assert_eq(Csv.header(csv, 0), "lang")
+    assert_eq(Csv.header(csv, 1), "year")
+    assert_eq(Csv.header(csv, 2), "type")
+}
+
+test "csv get is row-major, indexed from the header" {
+    // Row 1 is the FIRST DATA row, not the header.
+    csv = Csv.parse("lang,year,type\nWyn,2024,compiled\nGo,2009,compiled")
+    assert_eq(Csv.get(csv, 1, 0), "Wyn")
+    assert_eq(Csv.get(csv, 1, 1), "2024")
+    assert_eq(Csv.get(csv, 2, 0), "Go")
+}
+
+test "csv get_field looks up by NAME, matching get by index" {
+    // A name lookup that resolved to the wrong column would still return a plausible value.
+    csv = Csv.parse("lang,year,type\nWyn,2024,compiled\nGo,2009,compiled")
+    assert_eq(Csv.get_field(csv, 1, "lang"), "Wyn")
+    assert_eq(Csv.get_field(csv, 1, "year"), "2024")
+    assert_eq(Csv.get_field(csv, 1, "type"), "compiled")
+    // The two access paths must agree.
+    assert_eq(Csv.get_field(csv, 2, "lang"), Csv.get(csv, 2, 0))
+}
+
+test "csv handles a single data row" {
+    csv = Csv.parse("a,b\n1,2")
+    assert_eq(Csv.row_count(csv), 2)
+    assert_eq(Csv.get_field(csv, 1, "b"), "2")
+}
