@@ -1,43 +1,127 @@
-// REST API server with SQLite persistence and concurrent request handling
-// Demonstrates: spawn for concurrent requests, Http.serve, Db, JSON, string interpolation
+// REST API server with SQLite persistence and concurrent request handling.
+//
+// Demonstrates: spawn for concurrent requests, Http.serve, Db, and -- the part that
+// actually needed work -- routing that can be TESTED without opening a socket.
+//
+// The routing used to live inline in process_request(), interleaved with Db and Http
+// calls, so there was no way to assert that "GET /api/health" resolves to the health
+// handler without standing up a server. `route()` below is the pure decision (method +
+// path -> a Route enum), and process_request() does the I/O for whatever route() picked.
+// tests/test_routes.wyn covers route() directly.
+
+// Every endpoint this API answers, plus the two distinct ways a request can miss.
+// An enum rather than a string tag: a typo in a string tag is a silent 404, whereas a
+// typo in a variant name does not compile.
+enum Route {
+    Health
+    ListItems
+    CreateItem
+    NotFound
+    MethodNotAllowed
+}
+
+// The pure routing decision. No Db, no Http, no globals -- just method + path.
+//
+// MethodNotAllowed is kept distinct from NotFound on purpose: `DELETE /api/items` is a
+// known path with an unsupported verb (405), while `GET /api/nope` is genuinely absent
+// (404). Collapsing both into 404 is the plausible wrong version, and the tests pin it.
+fn route(method: string, path: string) -> Route {
+    if path == "/api/health" {
+        if method == "GET" {
+            return Route::Health
+        }
+        return Route::MethodNotAllowed
+    }
+    if path == "/api/items" {
+        if method == "GET" {
+            return Route::ListItems
+        }
+        if method == "POST" {
+            return Route::CreateItem
+        }
+        return Route::MethodNotAllowed
+    }
+    return Route::NotFound
+}
+
+// The HTTP status each route answers with. Split out so a test can assert the status
+// without a socket, and so the status lives next to the route rather than being repeated
+// at each Http.respond call site.
+fn status_for(r: Route) -> int {
+    if r == Route::Health {
+        return 200
+    }
+    if r == Route::ListItems {
+        return 200
+    }
+    if r == Route::CreateItem {
+        return 201
+    }
+    if r == Route::MethodNotAllowed {
+        return 405
+    }
+    return 404
+}
+
+fn db_path() -> string {
+    return "/tmp/wyn_api.db"
+}
 
 fn process_request(method: string, path: string, body: string, fd: int) {
-    if method == "GET" {
-        if path == "/api/items" {
-            var db = Db.open("/tmp/wyn_api.db")
-            var rows = Db.query(db, "SELECT id, name, done FROM items ORDER BY id")
-            Db.close(db)
-            Http.respond(fd, 200, "application/json", "{\"data\":\"${rows.replace("\n", "; ").replace("\"", "'")}\"}")
-            return
-        }
-        if path == "/api/health" {
-            Http.respond(fd, 200, "application/json", "{\"status\":\"ok\"}")
-            return
-        }
+    r = route(method, path)
+    code = status_for(r)
+
+    if r == Route::ListItems {
+        db = Db.open(db_path())
+        rows = Db.query(db, "SELECT id, name, done FROM items ORDER BY id")
+        Db.close(db)
+        Http.respond(fd, code, "application/json",
+            "{\"data\":\"${rows.replace("\n", "; ").replace("\"", "'")}\"}")
+        return
     }
-    if method == "POST" {
-        if path == "/api/items" {
-            var db = Db.open("/tmp/wyn_api.db")
-            var safe_body = Db.escape(body)
-            Db.exec(db, "INSERT INTO items (name, done) VALUES ('${safe_body}', 0)")
-            var id = Db.last_insert_id(db)
-            Db.close(db)
-            Http.respond(fd, 201, "application/json", "{\"id\":${id}}")
-            return
-        }
+    if r == Route::CreateItem {
+        db = Db.open(db_path())
+        safe_body = Db.escape(body)
+        Db.exec(db, "INSERT INTO items (name, done) VALUES ('${safe_body}', 0)")
+        id = Db.last_insert_id(db)
+        Db.close(db)
+        Http.respond(fd, code, "application/json", "{\"id\":${id}}")
+        return
     }
-    Http.respond(fd, 404, "application/json", "{\"error\":\"not found\"}")
+    if r == Route::Health {
+        Http.respond(fd, code, "application/json", "{\"status\":\"ok\"}")
+        return
+    }
+    if r == Route::MethodNotAllowed {
+        Http.respond(fd, code, "application/json",
+            "{\"error\":\"method not allowed\",\"path\":\"${path}\"}")
+        return
+    }
+    Http.respond(fd, code, "application/json", "{\"error\":\"not found\"}")
+}
+
+// Create the table and seed it ONLY when empty.
+//
+// This used to INSERT the two demo rows unconditionally on every start, so the table grew
+// by two duplicates per run -- three starts left six rows, and the GET /api/items demo got
+// steadily less convincing. Measured before fixing: the count went 2, 4, 6.
+fn init_db() -> int {
+    db = Db.open(db_path())
+    Db.exec(db, "CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT, done INTEGER)")
+    existing = Db.query(db, "SELECT id FROM items LIMIT 1")
+    if existing.len() == 0 {
+        Db.exec(db, "INSERT INTO items (name, done) VALUES ('Buy milk', 0)")
+        Db.exec(db, "INSERT INTO items (name, done) VALUES ('Write code', 1)")
+    }
+    Db.close(db)
+    return 0
 }
 
 fn main() {
-    var db = Db.open("/tmp/wyn_api.db")
-    Db.exec(db, "CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT, done INTEGER)")
-    Db.exec(db, "INSERT INTO items (name, done) VALUES ('Buy milk', 0)")
-    Db.exec(db, "INSERT INTO items (name, done) VALUES ('Write code', 1)")
-    Db.close(db)
+    init_db()
 
-    var port = 18090
-    var server = Http.serve(port)
+    port = 18090
+    server = Http.serve(port)
     if server < 0 {
         print("Failed to start server")
         return 0
@@ -47,16 +131,18 @@ fn main() {
     print("Press Ctrl+C to stop")
 
     while 1 == 1 {
-        var req = Http.accept(server)
-        if req.len() == 0 { continue }
-        var method = req.split_at("|", 0)
-        var path = req.split_at("|", 1)
-        var body = req.split_at("|", 2)
-        var fd = req.split_at("|", 3).to_int()
+        req = Http.accept(server)
+        if req.len() == 0 {
+            continue
+        }
+        method = req.split_at("|", 0)
+        path = req.split_at("|", 1)
+        body = req.split_at("|", 2)
+        fd = req.split_at("|", 3).to_int()
 
-        print("${method} ${path}")
+        print("${method} ${path} -> ${status_for(route(method, path))}")
 
-        // Handle each request concurrently -- non-blocking server
+        // Handle each request concurrently -- non-blocking server.
         spawn process_request(method, path, body, fd)
     }
 

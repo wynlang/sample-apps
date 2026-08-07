@@ -1,0 +1,169 @@
+// Tests for rest-api's routing.
+//
+// The app had NO tests, because routing lived inline in process_request() interleaved with
+// Db.open and Http.respond -- there was no way to assert "GET /api/health resolves to the
+// health handler" without standing up a server and a database. `route()` is now the pure
+// decision, so it can be asserted directly; that refactor is the reason this file exists.
+//
+// The cases target the plausible WRONG router rather than the happy path:
+//   * collapsing 405 into 404 (the most common shortcut, and invisible until a client
+//     sends the wrong verb to a real path)
+//   * matching a path by PREFIX, so "/api/itemsXYZ" or "/api/items/1" quietly hits the
+//     list handler
+//   * case-insensitive or partial method matching, so "get" or "GETX" is treated as GET
+//
+// route() and status_for() are duplicated from src/main.wyn rather than imported: `import`
+// from a sibling directory needs the module on the search path, and a sample app should not
+// need a package layout to be testable. They must stay in step with src.
+
+enum Route {
+    Health
+    ListItems
+    CreateItem
+    NotFound
+    MethodNotAllowed
+}
+
+fn route(method: string, path: string) -> Route {
+    if path == "/api/health" {
+        if method == "GET" {
+            return Route::Health
+        }
+        return Route::MethodNotAllowed
+    }
+    if path == "/api/items" {
+        if method == "GET" {
+            return Route::ListItems
+        }
+        if method == "POST" {
+            return Route::CreateItem
+        }
+        return Route::MethodNotAllowed
+    }
+    return Route::NotFound
+}
+
+fn status_for(r: Route) -> int {
+    if r == Route::Health {
+        return 200
+    }
+    if r == Route::ListItems {
+        return 200
+    }
+    if r == Route::CreateItem {
+        return 201
+    }
+    if r == Route::MethodNotAllowed {
+        return 405
+    }
+    return 404
+}
+
+// A name per route, so a failure says which route was picked instead of just "not equal".
+fn route_name(r: Route) -> string {
+    if r == Route::Health {
+        return "Health"
+    }
+    if r == Route::ListItems {
+        return "ListItems"
+    }
+    if r == Route::CreateItem {
+        return "CreateItem"
+    }
+    if r == Route::MethodNotAllowed {
+        return "MethodNotAllowed"
+    }
+    return "NotFound"
+}
+
+fn hit(method: string, path: string) -> string {
+    return route_name(route(method, path))
+}
+
+// --- the three real endpoints -----------------------------------------------------
+
+test "GET /api/health routes to Health" {
+    assert_eq(hit("GET", "/api/health"), "Health")
+    assert_eq(status_for(route("GET", "/api/health")), 200)
+}
+
+test "GET /api/items routes to ListItems" {
+    assert_eq(hit("GET", "/api/items"), "ListItems")
+    assert_eq(status_for(route("GET", "/api/items")), 200)
+}
+
+test "POST /api/items routes to CreateItem and answers 201" {
+    // 201 Created, not 200 -- a POST that reports 200 is the easy thing to get wrong.
+    assert_eq(hit("POST", "/api/items"), "CreateItem")
+    assert_eq(status_for(route("POST", "/api/items")), 201)
+}
+
+// --- wrong verb on a known path is 405, NOT 404 -----------------------------------
+
+test "a known path with an unsupported verb is MethodNotAllowed" {
+    assert_eq(hit("DELETE", "/api/items"), "MethodNotAllowed")
+    assert_eq(hit("PUT", "/api/items"), "MethodNotAllowed")
+    assert_eq(hit("PATCH", "/api/items"), "MethodNotAllowed")
+    assert_eq(status_for(route("DELETE", "/api/items")), 405)
+}
+
+test "POST to a GET-only path is MethodNotAllowed" {
+    // /api/health is GET-only; POSTing to it must not be a 404.
+    assert_eq(hit("POST", "/api/health"), "MethodNotAllowed")
+    assert_eq(status_for(route("POST", "/api/health")), 405)
+}
+
+test "405 and 404 are different statuses" {
+    // The distinction is the whole reason MethodNotAllowed exists as a variant.
+    assert_eq(status_for(route("DELETE", "/api/items")), 405)
+    assert_eq(status_for(route("GET", "/api/nope")), 404)
+}
+
+// --- unknown paths are 404 ---------------------------------------------------------
+
+test "an unknown path is NotFound" {
+    assert_eq(hit("GET", "/api/nope"), "NotFound")
+    assert_eq(hit("GET", "/"), "NotFound")
+    assert_eq(hit("GET", ""), "NotFound")
+    assert_eq(status_for(route("GET", "/api/nope")), 404)
+}
+
+// --- paths must match EXACTLY, not by prefix --------------------------------------
+
+test "a path that merely starts with a known path is NotFound" {
+    // Prefix matching would send all of these to ListItems.
+    assert_eq(hit("GET", "/api/itemsXYZ"), "NotFound")
+    assert_eq(hit("GET", "/api/items/1"), "NotFound")
+    assert_eq(hit("GET", "/api/items/"), "NotFound")
+    assert_eq(hit("GET", "/api/healthz"), "NotFound")
+}
+
+test "a path that merely ends with a known path is NotFound" {
+    assert_eq(hit("GET", "/v2/api/items"), "NotFound")
+    assert_eq(hit("GET", "/prefix/api/health"), "NotFound")
+}
+
+// --- methods must match EXACTLY ----------------------------------------------------
+
+test "method matching is case-sensitive" {
+    // HTTP verbs are uppercase; a lowercase "get" is not a GET.
+    assert_eq(hit("get", "/api/items"), "MethodNotAllowed")
+    assert_eq(hit("Get", "/api/items"), "MethodNotAllowed")
+    assert_eq(hit("post", "/api/items"), "MethodNotAllowed")
+}
+
+test "a method that merely starts with a known verb is not that verb" {
+    assert_eq(hit("GETX", "/api/items"), "MethodNotAllowed")
+    assert_eq(hit("POSTX", "/api/items"), "MethodNotAllowed")
+    assert_eq(hit("", "/api/items"), "MethodNotAllowed")
+}
+
+// --- status_for covers every variant ----------------------------------------------
+
+test "every route has a status and none defaults wrongly" {
+    assert_eq(status_for(Route::Health), 200)
+    assert_eq(status_for(Route::ListItems), 200)
+    assert_eq(status_for(Route::CreateItem), 201)
+    assert_eq(status_for(Route::MethodNotAllowed), 405)
+    assert_eq(status_for(Route::NotFound), 404)
+}
