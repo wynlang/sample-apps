@@ -1,0 +1,374 @@
+// Tests for the graph app's three algorithms. Each one has a plausible WRONG version that
+// still produces output, so the assertions target exactly those:
+//
+//   * Dijkstra: a cost-only check cannot tell a correct path from a different route that
+//     happens to total the same. The DAG below is built so the cheapest route has MORE
+//     hops than the direct one, and the tests assert the HOP LIST, not just the cost.
+//   * BFS: returning the queue length instead of the visited count, or the last depth
+//     instead of the max, both look right on a linear graph. The graphs here branch.
+//   * Cycle detection: a two-colour walk reports a DIAMOND as a cycle. That case is
+//     asserted explicitly.
+//
+// Units are duplicated from src/main.wyn rather than imported: `import` from a sibling
+// directory needs the module on the search path, and a sample app should not need a
+// package layout to be testable. These must stay in step with src/main.wyn.
+
+struct Edge {
+    to: int
+    weight: int
+}
+
+struct Node {
+    name: string
+    edges: [Edge]
+}
+
+struct Route {
+    cost: int
+    hops: [int]
+}
+
+struct Reach {
+    count: int
+    depth: int
+}
+
+enum GraphErr {
+    Empty
+    BadNode
+    Unreachable
+}
+
+fn far() -> int {
+    return 1000000
+}
+
+fn in_range(g: [Node], i: int) -> bool {
+    if i < 0 {
+        return false
+    }
+    return i < g.len()
+}
+
+fn shortest_path(g: [Node], src: int, dst: int) -> Result<Route, GraphErr> {
+    if g.len() == 0 {
+        return Err(GraphErr::Empty)
+    }
+    if not in_range(g, src) {
+        return Err(GraphErr::BadNode)
+    }
+    if not in_range(g, dst) {
+        return Err(GraphErr::BadNode)
+    }
+
+    n = g.len()
+    dist = []
+    prev = []
+    seen = []
+    for i in 0..n {
+        dist.push(far())
+        prev.push(0 - 1)
+        seen.push(false)
+    }
+    dist[src] = 0
+
+    for step in 0..n {
+        best = 0 - 1
+        best_d = far()
+        for i in 0..n {
+            if not seen[i] {
+                if dist[i] < best_d {
+                    best_d = dist[i]
+                    best = i
+                }
+            }
+        }
+        if best < 0 {
+            break
+        }
+        seen[best] = true
+        for e in g[best].edges {
+            if in_range(g, e.to) {
+                cand = dist[best] + e.weight
+                if cand < dist[e.to] {
+                    dist[e.to] = cand
+                    prev[e.to] = best
+                }
+            }
+        }
+    }
+
+    if dist[dst] >= far() {
+        return Err(GraphErr::Unreachable)
+    }
+
+    back = []
+    cur = dst
+    while cur >= 0 {
+        back.push(cur)
+        if cur == src {
+            break
+        }
+        cur = prev[cur]
+    }
+    hops = []
+    i = back.len() - 1
+    while i >= 0 {
+        hops.push(back[i])
+        i -= 1
+    }
+    return Ok(Route { cost: dist[dst], hops: hops })
+}
+
+fn reachable_from(g: [Node], src: int) -> Result<Reach, GraphErr> {
+    if g.len() == 0 {
+        return Err(GraphErr::Empty)
+    }
+    if not in_range(g, src) {
+        return Err(GraphErr::BadNode)
+    }
+
+    n = g.len()
+    depth = []
+    for i in 0..n {
+        depth.push(0 - 1)
+    }
+    queue = []
+    queue.push(src)
+    depth[src] = 0
+
+    head = 0
+    max_depth = 0
+    found = 0
+    while head < queue.len() {
+        cur = queue[head]
+        head += 1
+        found += 1
+        if depth[cur] > max_depth {
+            max_depth = depth[cur]
+        }
+        for e in g[cur].edges {
+            if in_range(g, e.to) {
+                if depth[e.to] < 0 {
+                    depth[e.to] = depth[cur] + 1
+                    queue.push(e.to)
+                }
+            }
+        }
+    }
+    return Ok(Reach { count: found, depth: max_depth })
+}
+
+fn has_cycle(g: [Node]) -> bool {
+    n = g.len()
+    color = []
+    for i in 0..n {
+        color.push(0)
+    }
+
+    for start_node in 0..n {
+        if color[start_node] != 0 {
+            continue
+        }
+        stack = []
+        eidx = []
+        stack.push(start_node)
+        eidx.push(0)
+        color[start_node] = 1
+
+        while stack.len() > 0 {
+            top = stack.len() - 1
+            cur = stack[top]
+            k = eidx[top]
+            if k >= g[cur].edges.len() {
+                color[cur] = 2
+                stack.pop()
+                eidx.pop()
+                continue
+            }
+            eidx[top] = k + 1
+            nxt = g[cur].edges[k].to
+            if not in_range(g, nxt) {
+                continue
+            }
+            if color[nxt] == 1 {
+                return true
+            }
+            if color[nxt] == 0 {
+                color[nxt] = 1
+                stack.push(nxt)
+                eidx.push(0)
+            }
+        }
+    }
+    return false
+}
+
+// a=0 b=1 c=2 d=3.  a->b(4) a->c(1); b->d(1); c->b(2); d has no edges.
+// a->d is 5 via a->b->d (2 hops) but 4 via a->c->b->d (3 hops), so the cheapest route is
+// NOT the shortest by hop count.
+fn dag() -> [Node] {
+    return [
+        Node { name: "a", edges: [Edge { to: 1, weight: 4 }, Edge { to: 2, weight: 1 }] },
+        Node { name: "b", edges: [Edge { to: 3, weight: 1 }] },
+        Node { name: "c", edges: [Edge { to: 1, weight: 2 }] },
+        Node { name: "d", edges: [] }
+    ]
+}
+
+fn ring() -> [Node] {
+    return [
+        Node { name: "x", edges: [Edge { to: 1, weight: 1 }] },
+        Node { name: "y", edges: [Edge { to: 2, weight: 1 }] },
+        Node { name: "z", edges: [Edge { to: 0, weight: 1 }] }
+    ]
+}
+
+// Two distinct paths converge on index 3. ACYCLIC -- the case a two-colour walk gets wrong.
+fn diamond() -> [Node] {
+    return [
+        Node { name: "p", edges: [Edge { to: 1, weight: 1 }, Edge { to: 2, weight: 1 }] },
+        Node { name: "q", edges: [Edge { to: 3, weight: 1 }] },
+        Node { name: "r", edges: [Edge { to: 3, weight: 1 }] },
+        Node { name: "s", edges: [] }
+    ]
+}
+
+fn cost_of(g: [Node], src: int, dst: int) -> int {
+    match shortest_path(g, src, dst) {
+        Ok(r) => {
+            return r.cost
+        }
+        Err(e) => {
+            return 0 - 1
+        }
+    }
+}
+
+fn hops_of(g: [Node], src: int, dst: int) -> string {
+    match shortest_path(g, src, dst) {
+        Ok(r) => {
+            parts = []
+            for h in r.hops {
+                parts.push(g[h].name)
+            }
+            return parts.join(",")
+        }
+        Err(e) => {
+            return "!"
+        }
+    }
+}
+
+test "dijkstra prefers the cheaper route even though it has MORE hops" {
+    g = dag()
+    assert_eq(cost_of(g, 0, 3), 4)
+    // The 2-hop route a->b->d costs 5. Asserting the hop list is what rules it out.
+    assert_eq(hops_of(g, 0, 3), "a,c,b,d")
+}
+
+test "dijkstra direct edge" {
+    g = dag()
+    assert_eq(cost_of(g, 0, 2), 1)
+    assert_eq(hops_of(g, 0, 2), "a,c")
+}
+
+test "dijkstra source equals target costs nothing" {
+    g = dag()
+    assert_eq(cost_of(g, 0, 0), 0)
+    assert_eq(hops_of(g, 0, 0), "a")
+}
+
+test "dijkstra reports unreachable rather than a bogus cost" {
+    g = dag()
+    // d has no outgoing edges, so nothing is reachable from it.
+    assert_eq(cost_of(g, 3, 0), 0 - 1)
+    assert_eq(hops_of(g, 3, 0), "!")
+}
+
+test "dijkstra rejects an out-of-range node" {
+    g = dag()
+    assert_eq(cost_of(g, 0, 99), 0 - 1)
+    assert_eq(cost_of(g, 0 - 5, 0), 0 - 1)
+}
+
+test "dijkstra rejects an empty graph" {
+    empty = []
+    assert_eq(cost_of(empty, 0, 0), 0 - 1)
+}
+
+test "bfs counts every reachable node and the true max depth" {
+    g = dag()
+    match reachable_from(g, 0) {
+        Ok(r) => {
+            // a,b,c,d all reachable; deepest is d at 2 hops (a->c->b->d is longer in cost
+            // but BFS ignores weight, so d is depth 2 via a->b->d).
+            assert_eq(r.count, 4)
+            assert_eq(r.depth, 2)
+        }
+        Err(e) => {
+            assert_eq(1, 0)
+        }
+    }
+}
+
+test "bfs from a sink sees only itself" {
+    g = dag()
+    match reachable_from(g, 3) {
+        Ok(r) => {
+            assert_eq(r.count, 1)
+            assert_eq(r.depth, 0)
+        }
+        Err(e) => {
+            assert_eq(1, 0)
+        }
+    }
+}
+
+test "bfs terminates on a cycle instead of looping" {
+    g = ring()
+    match reachable_from(g, 0) {
+        Ok(r) => {
+            assert_eq(r.count, 3)
+            assert_eq(r.depth, 2)
+        }
+        Err(e) => {
+            assert_eq(1, 0)
+        }
+    }
+}
+
+test "bfs rejects an empty graph" {
+    empty = []
+    match reachable_from(empty, 0) {
+        Ok(r) => {
+            assert_eq(1, 0)
+        }
+        Err(e) => {
+            assert_eq(true, e == GraphErr::Empty)
+        }
+    }
+}
+
+test "cycle detection finds a real ring" {
+    assert_eq(has_cycle(ring()), true)
+}
+
+test "cycle detection does NOT call a DAG cyclic" {
+    assert_eq(has_cycle(dag()), false)
+}
+
+test "cycle detection does NOT call a diamond cyclic" {
+    // Two paths converging on one node is not a cycle. A two-colour walk says it is.
+    assert_eq(has_cycle(diamond()), false)
+}
+
+test "cycle detection on an empty graph" {
+    empty = []
+    assert_eq(has_cycle(empty), false)
+}
+
+test "cycle detection finds a self-loop" {
+    selfloop = [Node { name: "s", edges: [Edge { to: 0, weight: 1 }] }]
+    assert_eq(has_cycle(selfloop), true)
+}

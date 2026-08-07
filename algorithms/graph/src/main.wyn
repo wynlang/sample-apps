@@ -1,0 +1,339 @@
+// Graph algorithms in Wyn -- shortest paths, reachability, and cycle detection.
+//
+// Every routine here returns a `Result` with a STRUCT ok payload and an ENUM error, and
+// the graph itself is an array of structs each holding its own array of edges. That
+// combination is deliberate: a nested walk over `[Node]` where each `Node` owns an
+// `[Edge]` is the shape that has historically produced silently-wrong answers rather
+// than a crash, so the app leans on it instead of avoiding it.
+//
+// No adjacency MATRIX is used. A matrix would make the interesting indexing trivial and
+// would not represent how a real graph is stored.
+
+struct Edge {
+    to: int
+    weight: int
+}
+
+struct Node {
+    name: string
+    edges: [Edge]
+}
+
+// A shortest-path answer: the total cost plus the node order that achieved it.
+//
+// Named `Route`, not `Path`: a user struct named after a builtin stdlib NAMESPACE
+// (`Path`, `Time`, `Color`, `Log`, `Env`, `Task`, ... 42 of them) makes the file fail to
+// type-check with "Type mismatch at line 1:0 / Expected: enum, Got: string" -- a message
+// that names neither the struct nor a real line. Filed against the compiler.
+struct Route {
+    cost: int
+    hops: [int]
+}
+
+struct Reach {
+    // How many nodes are reachable from the source (including the source), and the
+    // furthest hop-distance found.
+    count: int
+    depth: int
+}
+
+enum GraphErr {
+    Empty
+    BadNode
+    Unreachable
+}
+
+// A sentinel larger than any path this app builds, standing in for "infinity". Using a
+// sentinel rather than an Option per-slot keeps the inner loop honest about the
+// comparison, which is where an off-by-one hides.
+fn far() -> int {
+    return 1000000
+}
+
+fn node_count(g: [Node]) -> int {
+    return g.len()
+}
+
+fn in_range(g: [Node], i: int) -> bool {
+    if i < 0 {
+        return false
+    }
+    return i < g.len()
+}
+
+// --- Dijkstra ---------------------------------------------------------------------
+//
+// Linear scan for the minimum rather than a heap: the graphs here are small, and the
+// scan keeps the "pick the closest unvisited node" step visible. Returns the cost AND
+// the reconstructed hop list, because a cost-only version cannot distinguish a correct
+// path from one that merely adds up to the same number.
+fn shortest_path(g: [Node], src: int, dst: int) -> Result<Route, GraphErr> {
+    if g.len() == 0 {
+        return Err(GraphErr::Empty)
+    }
+    if not in_range(g, src) {
+        return Err(GraphErr::BadNode)
+    }
+    if not in_range(g, dst) {
+        return Err(GraphErr::BadNode)
+    }
+
+    n = g.len()
+    dist = []
+    prev = []
+    seen = []
+    for i in 0..n {
+        dist.push(far())
+        prev.push(0 - 1)
+        seen.push(false)
+    }
+    dist[src] = 0
+
+    for step in 0..n {
+        // Closest unvisited node.
+        best = 0 - 1
+        best_d = far()
+        for i in 0..n {
+            if not seen[i] {
+                if dist[i] < best_d {
+                    best_d = dist[i]
+                    best = i
+                }
+            }
+        }
+        if best < 0 {
+            // Everything still unvisited is unreachable; stop rather than spin.
+            break
+        }
+        seen[best] = true
+
+        // Relax every edge leaving `best`. This is the nested walk over a struct's own
+        // array -- `g[best].edges` -- indexed by a value computed in the outer loop.
+        for e in g[best].edges {
+            if in_range(g, e.to) {
+                cand = dist[best] + e.weight
+                if cand < dist[e.to] {
+                    dist[e.to] = cand
+                    prev[e.to] = best
+                }
+            }
+        }
+    }
+
+    if dist[dst] >= far() {
+        return Err(GraphErr::Unreachable)
+    }
+
+    // Walk `prev` backwards, then reverse -- the reversal is what proves the chain was
+    // recorded, not just the total.
+    back = []
+    cur = dst
+    while cur >= 0 {
+        back.push(cur)
+        if cur == src {
+            break
+        }
+        cur = prev[cur]
+    }
+    hops = []
+    i = back.len() - 1
+    while i >= 0 {
+        hops.push(back[i])
+        i -= 1
+    }
+    return Ok(Route { cost: dist[dst], hops: hops })
+}
+
+// --- Breadth-first reachability --------------------------------------------------
+//
+// Counts reachable nodes and the furthest hop-depth, ignoring weights. Uses an explicit
+// queue index rather than shifting the array, so the queue stays a plain [int].
+fn reachable_from(g: [Node], src: int) -> Result<Reach, GraphErr> {
+    if g.len() == 0 {
+        return Err(GraphErr::Empty)
+    }
+    if not in_range(g, src) {
+        return Err(GraphErr::BadNode)
+    }
+
+    n = g.len()
+    depth = []
+    for i in 0..n {
+        depth.push(0 - 1)
+    }
+    queue = []
+    queue.push(src)
+    depth[src] = 0
+
+    head = 0
+    max_depth = 0
+    found = 0
+    while head < queue.len() {
+        cur = queue[head]
+        head += 1
+        found += 1
+        if depth[cur] > max_depth {
+            max_depth = depth[cur]
+        }
+        for e in g[cur].edges {
+            if in_range(g, e.to) {
+                if depth[e.to] < 0 {
+                    depth[e.to] = depth[cur] + 1
+                    queue.push(e.to)
+                }
+            }
+        }
+    }
+    return Ok(Reach { count: found, depth: max_depth })
+}
+
+// --- Cycle detection --------------------------------------------------------------
+//
+// Three-colour DFS, iterative so a deep graph cannot blow the stack: 0 = unvisited,
+// 1 = on the current path (grey), 2 = finished (black). A back-edge to a grey node is a
+// cycle. Using two colours instead would report a diamond (two paths to one node) as a
+// cycle, which is the plausible-but-wrong version.
+fn has_cycle(g: [Node]) -> bool {
+    n = g.len()
+    color = []
+    for i in 0..n {
+        color.push(0)
+    }
+
+    for start_node in 0..n {
+        if color[start_node] != 0 {
+            continue
+        }
+        // Explicit stack of (node, next-edge-index) kept as two parallel arrays.
+        stack = []
+        eidx = []
+        stack.push(start_node)
+        eidx.push(0)
+        color[start_node] = 1
+
+        while stack.len() > 0 {
+            top = stack.len() - 1
+            cur = stack[top]
+            k = eidx[top]
+            if k >= g[cur].edges.len() {
+                color[cur] = 2
+                stack.pop()
+                eidx.pop()
+                continue
+            }
+            eidx[top] = k + 1
+            nxt = g[cur].edges[k].to
+            if not in_range(g, nxt) {
+                continue
+            }
+            if color[nxt] == 1 {
+                return true
+            }
+            if color[nxt] == 0 {
+                color[nxt] = 1
+                stack.push(nxt)
+                eidx.push(0)
+            }
+        }
+    }
+    return false
+}
+
+// --- Sample graphs ----------------------------------------------------------------
+
+// A weighted DAG where the cheapest route is NOT the one with fewest hops: a->c->b->d
+// costs 4 over three hops, while the direct a->b->d costs 5 over two. A cost-only check
+// would pass even if the hop list were wrong, which is why main prints both.
+fn build_dag() -> [Node] {
+    return [
+        Node { name: "a", edges: [Edge { to: 1, weight: 4 }, Edge { to: 2, weight: 1 }] },
+        Node { name: "b", edges: [Edge { to: 3, weight: 1 }] },
+        Node { name: "c", edges: [Edge { to: 1, weight: 2 }] },
+        Node { name: "d", edges: [] }
+    ]
+}
+
+fn build_cyclic() -> [Node] {
+    return [
+        Node { name: "x", edges: [Edge { to: 1, weight: 1 }] },
+        Node { name: "y", edges: [Edge { to: 2, weight: 1 }] },
+        Node { name: "z", edges: [Edge { to: 0, weight: 1 }] }
+    ]
+}
+
+// A diamond: two distinct paths converge on "s". Acyclic, and the case a two-colour
+// walk would wrongly call a cycle.
+fn build_diamond() -> [Node] {
+    return [
+        Node { name: "p", edges: [Edge { to: 1, weight: 1 }, Edge { to: 2, weight: 1 }] },
+        Node { name: "q", edges: [Edge { to: 3, weight: 1 }] },
+        Node { name: "r", edges: [Edge { to: 3, weight: 1 }] },
+        Node { name: "s", edges: [] }
+    ]
+}
+
+fn err_name(e: GraphErr) -> string {
+    if e == GraphErr::Empty {
+        return "empty graph"
+    }
+    if e == GraphErr::BadNode {
+        return "node out of range"
+    }
+    return "unreachable"
+}
+
+fn show_path(g: [Node], src: int, dst: int) {
+    match shortest_path(g, src, dst) {
+        Ok(p) => {
+            names = []
+            for h in p.hops {
+                names.push(g[h].name)
+            }
+            print("  ${g[src].name} -> ${g[dst].name}: cost ${p.cost} via ${names.join(" -> ")}")
+        }
+        Err(e) => print("  ${g[src].name} -> ${g[dst].name}: ${err_name(e)}")
+    }
+}
+
+fn main() {
+    print("=== Graph Algorithms ===")
+
+    dag = build_dag()
+    print("")
+    print("Weighted DAG (${node_count(dag)} nodes)")
+    show_path(dag, 0, 3)
+    show_path(dag, 0, 2)
+    show_path(dag, 3, 0)
+
+    print("")
+    print("Reachability")
+    match reachable_from(dag, 0) {
+        Ok(r) => print("  from a: ${r.count} nodes, max depth ${r.depth}")
+        Err(e) => print("  ${err_name(e)}")
+    }
+    match reachable_from(dag, 3) {
+        Ok(r) => print("  from d: ${r.count} nodes, max depth ${r.depth}")
+        Err(e) => print("  ${err_name(e)}")
+    }
+
+    print("")
+    print("Cycle detection")
+    print("  DAG has cycle:     ${has_cycle(dag)}")
+    print("  diamond has cycle: ${has_cycle(build_diamond())}")
+    print("  ring has cycle:    ${has_cycle(build_cyclic())}")
+
+    print("")
+    print("Error handling")
+    match shortest_path(dag, 0, 99) {
+        Ok(p) => print("  unexpected ok: ${p.cost}")
+        Err(e) => print("  bad target -> ${err_name(e)}")
+    }
+    empty = []
+    match reachable_from(empty, 0) {
+        Ok(r) => print("  unexpected ok: ${r.count}")
+        Err(e) => print("  empty graph -> ${err_name(e)}")
+    }
+
+    print("")
+    print("  ✓ done")
+}
