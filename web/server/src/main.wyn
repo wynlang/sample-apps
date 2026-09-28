@@ -8,7 +8,7 @@ fn css() -> string {
 
 fn html(title: string, body: string) -> string {
     var style = css()
-    return "<!DOCTYPE html><html><head><meta charset=utf-8><title>${title}</title><style>${style}</style></head><body><header><h1>Wyn Server</h1><nav><a href=/>Home</a> <a href=/status>Status</a> <a href=/users>Users</a> <a href=/api/info>API</a></nav></header><main>${body}</main><footer>Powered by Wyn v1.21.0</footer></body></html>"
+    return "<!DOCTYPE html><html><head><meta charset=utf-8><title>${title}</title><style>${style}</style></head><body><header><h1>Wyn Server</h1><nav><a href=/>Home</a> <a href=/status>Status</a> <a href=/users>Users</a> <a href=/api/info>API</a></nav></header><main>${body}</main><footer>Powered by Wyn v1.22.0-rc1</footer></body></html>"
 }
 
 fn page_home() -> string {
@@ -50,7 +50,7 @@ fn api_info(db: int, start_time: int) -> string {
     // One constant, checked against repos/wyn/VERSION. There is no runtime accessor for
     // the compiler version, so this is hand-maintained - it said 1.8.0 for thirteen
     // releases, which is exactly the kind of detail that makes a demo look abandoned.
-    Json.set(j, "version", "1.21.0")
+    Json.set(j, "version", "1.22.0-rc1")
     Json.set(j, "platform", Os.platform())
     Json.set(j, "arch", Os.arch())
     Json.set_int(j, "uptime", DateTime.now() - start_time)
